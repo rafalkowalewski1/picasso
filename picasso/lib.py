@@ -139,14 +139,42 @@ def __getattr__(name: str) -> Any:
 WINDOWS_MAX_WORKERS = 61
 
 
-def n_workers(cpu_utilization: float = 0.75) -> int:
+#: Default fraction of CPU cores available to rendering. Deliberately
+#: lower than Localize's 0.8: localization is a one-off batch job,
+#: whereas rendering runs continuously while a user interacts with the
+#: GUI, often on shared analysis workstations.
+RENDER_CPU_UTILIZATION_DEFAULT = 0.5
+
+
+def n_workers(
+    cpu_utilization: float = 0.75,
+    settings_section: str | None = None,
+) -> int:
     """Number of workers (processes or threads) to use for parallel
     computation.
 
     Parameters
     ----------
     cpu_utilization : float, optional
-        Fraction of the available CPUs to use. Default 0.75.
+        Fraction of the available CPUs to use. Default 0.75. When
+        ``settings_section`` is given, this acts as the fallback for an
+        invalid or missing setting.
+    settings_section : str, optional
+        Name of a section in the user settings file
+        (``~/.picasso/settings.yaml``, also editable via
+        ``File > Picasso settings`` in the GUIs) that overrides
+        ``cpu_utilization``. The file is read on every call, so changes
+        apply without restarting Picasso:
+
+        .. code-block:: yaml
+
+            Render:
+              cpu_utilization: 0.5  # fraction of CPU cores, in (0, 1)
+              max_workers: 4        # optional absolute cap
+
+        ``max_workers``, when set to a positive integer, additionally
+        caps the result. Rendering uses ``settings_section="Render"``
+        with ``RENDER_CPU_UTILIZATION_DEFAULT`` as the fallback.
 
     Returns
     -------
@@ -154,9 +182,28 @@ def n_workers(cpu_utilization: float = 0.75) -> int:
         ``cpu_utilization`` times the CPU count, at least 1 and, on
         Windows only, at most ``WINDOWS_MAX_WORKERS``.
     """
+    max_workers = None
+    if settings_section is not None:
+        settings = io.load_user_settings()
+        try:
+            value = settings[settings_section]["cpu_utilization"]
+        except Exception:
+            value = None
+        if isinstance(value, float) and 0.0 < value < 1.0:
+            cpu_utilization = value
+        try:
+            max_workers = settings[settings_section]["max_workers"]
+        except Exception:
+            max_workers = None
     n = max(1, int(cpu_utilization * multiprocessing.cpu_count()))
     if sys.platform == "win32":
         n = min(WINDOWS_MAX_WORKERS, n)
+    if (
+        isinstance(max_workers, int)
+        and not isinstance(max_workers, bool)
+        and max_workers >= 1
+    ):
+        n = min(n, max_workers)
     return n
 
 

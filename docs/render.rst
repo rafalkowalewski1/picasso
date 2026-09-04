@@ -642,3 +642,18 @@ Opens a dialog where different clustering parameters can be checked on the loade
 Nearest Neighbor Analysis
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 Calculates distances to the ``k``-th nearest neighbors between two channels (can be the same channel). ``k`` is defined by the user. The distances are stored in nm as a .hdf5 localizations file with new columns ``nnd_1``, ``nnd_2``, ..., ``nnd_k`` for each localization in channel 1. The distances are calculated in 3D if both datasets have z information.
+
+CPU usage on shared workstations
+--------------------------------
+Rendering uses a limited number of CPU worker threads so that Picasso stays polite on shared analysis computers where several users work at the same time. The budget is set in the user settings file ``~/.picasso/settings.yaml`` (also editable via ``File > Picasso settings`` in any module):
+
+.. code-block:: yaml
+
+    Render:
+      cpu_utilization: 0.5
+      max_workers: 4
+
+- ``cpu_utilization`` is the fraction of CPU cores that rendering may use, a number between 0 and 1 (exclusive). The default is 0.5 — lower than the 0.8 that ``Picasso: Localize`` uses for fitting (``Localize: cpu_utilization``): localization is a one-off batch job, whereas rendering runs continuously while you pan, zoom and adjust the display, often for many users at once on a shared machine. Invalid values silently fall back to the default.
+- ``max_workers`` (optional) is an absolute cap on the number of worker threads and wins over ``cpu_utilization``. For example, set it to 4 on a 64-core workstation to leave the remaining cores to your colleagues regardless of the fraction. Remove the key to disable the cap.
+
+The settings file is read every time a render starts, so changes apply immediately, without restarting Picasso. At least one worker is always used and, on Windows, the number of workers is capped at 61 (a limitation of Python's process handling).

@@ -1333,3 +1333,61 @@ class TestLazyQtImports:
     def test_unknown_attribute_raises(self):
         with pytest.raises(AttributeError):
             lib.no_such_attribute
+
+
+# ---------------------------------------------------------------------------
+# Render worker budget
+# ---------------------------------------------------------------------------
+
+
+class TestNWorkersFromSettings:
+    """``lib.n_workers(..., settings_section=...)`` reads the given
+    settings section with the same defensive semantics as Localize's
+    ``cpu_utilization`` handling and caps the result with the optional
+    ``max_workers``."""
+
+    def _render_workers(self):
+        return lib.n_workers(
+            lib.RENDER_CPU_UTILIZATION_DEFAULT, settings_section="Render"
+        )
+
+    def _set_settings(self, monkeypatch, render_section):
+        settings = {} if render_section is None else {"Render": render_section}
+        monkeypatch.setattr(lib.io, "load_user_settings", lambda: settings)
+
+    def test_no_section_never_reads_settings(self, monkeypatch):
+        def _boom():
+            raise AssertionError("settings must not be read")
+
+        monkeypatch.setattr(lib.io, "load_user_settings", _boom)
+        assert lib.n_workers(0.75) >= 1
+
+    def test_default_when_section_missing(self, monkeypatch):
+        self._set_settings(monkeypatch, None)
+        assert self._render_workers() == lib.n_workers(
+            lib.RENDER_CPU_UTILIZATION_DEFAULT
+        )
+
+    def test_valid_fraction(self, monkeypatch):
+        self._set_settings(monkeypatch, {"cpu_utilization": 0.25})
+        assert self._render_workers() == lib.n_workers(0.25)
+
+    @pytest.mark.parametrize("bad", [1.5, -0.2, 0.0, 1, True, "half", None])
+    def test_invalid_fraction_falls_back(self, monkeypatch, bad):
+        self._set_settings(monkeypatch, {"cpu_utilization": bad})
+        assert self._render_workers() == lib.n_workers(
+            lib.RENDER_CPU_UTILIZATION_DEFAULT
+        )
+
+    def test_max_workers_caps(self, monkeypatch):
+        self._set_settings(
+            monkeypatch, {"cpu_utilization": 0.9, "max_workers": 1}
+        )
+        assert self._render_workers() == 1
+
+    @pytest.mark.parametrize("bad", [0, -3, True, "two", 2.5, None])
+    def test_invalid_max_workers_ignored(self, monkeypatch, bad):
+        self._set_settings(
+            monkeypatch, {"cpu_utilization": 0.25, "max_workers": bad}
+        )
+        assert self._render_workers() == lib.n_workers(0.25)
