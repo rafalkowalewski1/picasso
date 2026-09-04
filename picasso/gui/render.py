@@ -7554,6 +7554,21 @@ class LocsLoadWorker(QtCore.QObject):
 #: ``interaction_subsample`` key in ``settings["Render"]`` overrides it)
 INTERACTION_SUBSAMPLE_AUTO = 500_000
 
+#: fraction per side rendered beyond the visible viewport, so pans and
+#: zoom-outs within the margin reveal already-rendered pixels instantly
+#: (asynchronous GUI renders only — exports stay exact-viewport)
+VIEWPORT_MARGIN = 0.15
+
+
+def _expand_viewport(
+    viewport: tuple, margin: float
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """``viewport`` grown symmetrically by ``margin`` per side."""
+    (y_min, x_min), (y_max, x_max) = viewport
+    dy = (y_max - y_min) * margin
+    dx = (x_max - x_min) * margin
+    return ((y_min - dy, x_min - dx), (y_max + dy, x_max + dx))
+
 
 class RenderWorker(QtCore.QObject):
     """Render scenes off the GUI thread, latest request wins.
@@ -7792,6 +7807,11 @@ class View(QtWidgets.QLabel):
         # interactive previews (live pan/zoom) render a subsample; the
         # refine timer follows up with a full-quality render on idle
         self._displayed_viewport = None  # viewport of the shown frame
+        # the last rendered frame (covering a margin beyond the view)
+        # and its viewport: every displayed frame is composed from it
+        self._blit_image = None
+        self._blit_viewport = None
+        self._image_viewport = None  # viewport of the raw-image cache
         self._current_request_interactive = False
         self._refine_timer = QtCore.QTimer(self)
         self._refine_timer.setSingleShot(True)
@@ -9474,7 +9494,12 @@ class View(QtWidgets.QLabel):
                 qimage = self.render_scene(
                     autoscale=autoscale, use_cache=use_cache
                 )
-                self._complete_scene(qimage)
+                if not use_cache:
+                    # synchronous renders cover the tight viewport
+                    self._image_viewport = self._viewport_key()
+                self._complete_scene(
+                    qimage, self._image_viewport or self._viewport_key()
+                )
             else:
                 # full renders run on the worker thread; meanwhile the
                 # last frame is blitted to its position in the new
@@ -9493,33 +9518,47 @@ class View(QtWidgets.QLabel):
             (self.viewport[1][0], self.viewport[1][1]),
         )
 
-    def _show_viewport_preview(self) -> None:
-        """Instant geometric feedback while the worker renders: draw the
-        last rendered frame shifted/scaled to where it belongs in the
-        new viewport. Stale but correctly positioned pixels beat a
-        frozen frame; regions without content keep the background color
-        until the render arrives."""
-        source = getattr(self, "qimage_no_picks", None)
-        old = self._displayed_viewport
-        if source is None or old is None:
+    def _set_blit_source(
+        self, qimage: QtGui.QImage, rendered_viewport: tuple
+    ) -> None:
+        """Adopt a rendered frame (covering ``rendered_viewport``, which
+        may extend beyond the visible view by the render margin) as the
+        source every displayed frame is composed from."""
+        (_, t_x_min), (_, t_x_max) = self._viewport_key()
+        (y_min, x_min), (y_max, x_max) = rendered_viewport
+        tight_width = t_x_max - t_x_min
+        ratio = (x_max - x_min) / tight_width if tight_width > 0 else 1.0
+        self._blit_image = qimage.scaled(
+            max(1, round(self.width() * ratio)),
+            max(1, round(self.height() * ratio)),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        )
+        self._blit_viewport = ((y_min, x_min), (y_max, x_max))
+
+    def _compose_visible(self) -> None:
+        """Compose the window view from the last rendered frame: crop
+        and position it for the current viewport — margin content is
+        revealed instantly on pans and zoom-outs — then draw overlays
+        and picks. Regions the render never covered keep the background
+        color until the next render lands."""
+        source = self._blit_image
+        if source is None:
             return
-        if old == self._viewport_key():
-            # same viewport: nothing to reposition, just refresh
-            self._draw_picks_and_show()
-            return
-        (o_y_min, o_x_min), (o_y_max, o_x_max) = old
-        (n_y_min, n_x_min), (n_y_max, n_x_max) = self.viewport
+        (o_y_min, o_x_min), (o_y_max, o_x_max) = self._blit_viewport
+        (n_y_min, n_x_min), (n_y_max, n_x_max) = self._viewport_key()
         new_width = n_x_max - n_x_min
         new_height = n_y_max - n_y_min
         if new_width <= 0 or new_height <= 0:
             return
-        target = QtGui.QImage(source.size(), source.format())
+        target = QtGui.QImage(
+            max(1, self.width()), max(1, self.height()), source.format()
+        )
         if self.window.dataset_dialog.wbackground.isChecked():
             target.fill(QtGui.QColor(255, 255, 255))
         else:
             target.fill(QtGui.QColor(0, 0, 0))
-        px_per_cam_x = source.width() / new_width
-        px_per_cam_y = source.height() / new_height
+        px_per_cam_x = target.width() / new_width
+        px_per_cam_y = target.height() / new_height
         dest = QtCore.QRectF(
             (o_x_min - n_x_min) * px_per_cam_x,
             (o_y_min - n_y_min) * px_per_cam_y,
@@ -9530,29 +9569,32 @@ class View(QtWidgets.QLabel):
         painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawImage(dest, source)
         painter.end()
-        self.qimage_no_picks = target
+        # overlays go on the visible crop, so they keep their corner
+        # positions regardless of the render margin
+        target = self.draw_scalebar(target)
+        target = self.draw_minimap(target)
+        self.qimage_no_picks = self.draw_legend(target)
         self._displayed_viewport = self._viewport_key()
         self._draw_picks_and_show()
 
-    def _complete_scene(self, qimage: QtGui.QImage) -> None:
-        """Second half of ``draw_scene``: window scaling, overlays and
-        display. Runs on the GUI thread, either directly (synchronous
-        renders) or from ``_on_render_finished``."""
-        # scale image's size to the window
-        qimage = qimage.scaled(
-            self.width(),
-            self.height(),
-            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-        )
-        # draw scalebar, minimap and legend
-        self.qimage_no_picks = self.draw_scalebar(qimage)
-        self.qimage_no_picks = self.draw_minimap(self.qimage_no_picks)
-        self.qimage_no_picks = self.draw_legend(self.qimage_no_picks)
+    def _show_viewport_preview(self) -> None:
+        """Instant geometric feedback during pans/zooms: recompose the
+        window view from the last rendered frame. Margin content
+        appears immediately; the worker's render replaces it shortly."""
+        self._compose_visible()
+
+    def _complete_scene(
+        self, qimage: QtGui.QImage, rendered_viewport: tuple
+    ) -> None:
+        """Second half of ``draw_scene``: adopt the rendered frame as
+        the blit source and compose the visible view. Runs on the GUI
+        thread, directly for synchronous renders or from
+        ``_on_render_finished``."""
+        self._set_blit_source(qimage, rendered_viewport)
         # adjust zoom in Display Settings Dialog
         dppvp = self.display_pixels_per_viewport_pixels()
         self.window.display_settings_dlg.set_zoom_silently(dppvp)
-        self._displayed_viewport = self._viewport_key()
-        self._draw_picks_and_show()
+        self._compose_visible()
 
     def _draw_picks_and_show(self) -> None:
         """Draw picks and points over the rendered image and display."""
@@ -9570,13 +9612,22 @@ class View(QtWidgets.QLabel):
         self.setPixmap(self.pixmap)
         self.window.update_info()
 
-    def _build_render_request(self, autoscale: bool = False) -> dict:
+    def _build_render_request(
+        self, autoscale: bool = False
+    ) -> tuple[dict, tuple]:
         """Snapshot everything ``render.render_scene`` needs, on the GUI
         thread (dialog reads and locs preparation are not thread safe).
-        Mirrors ``render_scene``'s no-cache path."""
+        Mirrors ``render_scene``'s no-cache path, with the viewport
+        inflated by ``VIEWPORT_MARGIN`` so pans and zoom-outs reveal
+        already-rendered content. Returns the request and the inflated
+        viewport it covers."""
         kwargs = self.get_render_kwargs()
+        rendered_viewport = _expand_viewport(
+            kwargs["viewport"], VIEWPORT_MARGIN
+        )
+        kwargs["viewport"] = rendered_viewport
         locs, infos = self._prepare_locs_for_rendering(
-            viewport=kwargs["viewport"]
+            viewport=rendered_viewport
         )
         cmap = self.window.display_settings_dlg.colormap.currentText()
         if cmap == "Custom":
@@ -9584,18 +9635,21 @@ class View(QtWidgets.QLabel):
         vmin = self.window.display_settings_dlg.minimum.value()
         vmax = self.window.display_settings_dlg.maximum.value()
         contrast = None if autoscale else (vmin, vmax)
-        return dict(
-            locs=locs,
-            info=infos,
-            **kwargs,
-            contrast=contrast,
-            invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
-            background_color=self.window.dataset_dialog.background_color,
-            single_channel_colormap=cmap,
-            colors=self.read_colors(),
-            relative_intensities=self.read_relative_intensities(),
-            return_contrast_limits=True,
-            return_raw_image=True,
+        return (
+            dict(
+                locs=locs,
+                info=infos,
+                **kwargs,
+                contrast=contrast,
+                invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
+                background_color=self.window.dataset_dialog.background_color,
+                single_channel_colormap=cmap,
+                colors=self.read_colors(),
+                relative_intensities=self.read_relative_intensities(),
+                return_contrast_limits=True,
+                return_raw_image=True,
+            ),
+            rendered_viewport,
         )
 
     def _interaction_subsample_target(self) -> int:
@@ -9648,13 +9702,13 @@ class View(QtWidgets.QLabel):
         with compensated contrast and arm the refine timer, which
         follows up with a full-quality render once the gesture pauses.
         """
-        request = self._build_render_request(autoscale)
+        request, rendered_viewport = self._build_render_request(autoscale)
         if interactive:
             interactive = self._subsample_request(request)
         self._render_request_id += 1
         self._current_request_interactive = interactive
         self._render_worker.submit(
-            self._render_request_id, request, self._viewport_key()
+            self._render_request_id, request, rendered_viewport
         )
         if interactive:
             self._refine_timer.start()
@@ -9686,30 +9740,48 @@ class View(QtWidgets.QLabel):
         cache or the contrast spinboxes.
         """
         if request_id != self._render_request_id:
-            qimage = qimage.scaled(
-                self.width(),
-                self.height(),
-                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            )
-            qimage = self.draw_scalebar(qimage)
-            qimage = self.draw_minimap(qimage)
-            self.qimage_no_picks = self.draw_legend(qimage)
-            self._displayed_viewport = (
-                (viewport[0][0], viewport[0][1]),
-                (viewport[1][0], viewport[1][1]),
-            )
-            self._show_viewport_preview()
+            # superseded: still fresher than what is on screen — adopt
+            # as the blit source, repositioned for the current viewport
+            self._set_blit_source(qimage, viewport)
+            self._compose_visible()
             return
         if not self._current_request_interactive:
             # previews must not poison the raw-image cache (a subsampled
             # cache would corrupt later contrast redraws) nor write
             # their compensated limits into the contrast spinboxes
-            self.n_locs = n_locs
+            self.n_locs = self._visible_n_locs(n_locs)
             self.image = raw_image
+            self._image_viewport = (
+                (viewport[0][0], viewport[0][1]),
+                (viewport[1][0], viewport[1][1]),
+            )
             vmin, vmax = contrast_limits
             self.window.display_settings_dlg.silent_minimum_update(vmin)
             self.window.display_settings_dlg.silent_maximum_update(vmax)
-        self._complete_scene(qimage)
+        self._complete_scene(qimage, viewport)
+
+    def _visible_n_locs(self, rendered_n: int) -> int:
+        """Localization count for the visible viewport. The render
+        covers a margin beyond the view, so the count is corrected via
+        the per-channel viewport pyramid where available; when a
+        channel has no pyramid, or the slicer / fast-render subsampling
+        is active, the rendered count (which then includes the margin
+        ring) is reported instead."""
+        if self.window.slicer_dialog.slicer_radio_button.isChecked():
+            return rendered_n
+        if any(idx is not None for idx in self.fast_render_indices):
+            return rendered_n
+        total = 0
+        for i in range(len(self.locs)):
+            if len(self.locs) > 1 and not (
+                self.window.dataset_dialog.checks[i].isChecked()
+            ):
+                continue
+            indices = self._viewport_indices(i, self.viewport)
+            if indices is None:
+                return rendered_n
+            total += len(indices)
+        return total
 
     def stop_render_worker(self) -> None:
         """Stop the render worker thread. A render in flight is allowed

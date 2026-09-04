@@ -81,7 +81,10 @@ def window(qt_offscreen, tmp_path):
 
 
 class TestAsyncRender:
-    def test_async_matches_sync(self, window, qapp):
+    def test_async_matches_sync(self, window, qapp, monkeypatch):
+        # margin off: with it, async legitimately renders a larger
+        # viewport than the sync path and raw images differ in coverage
+        monkeypatch.setattr(gui_render, "VIEWPORT_MARGIN", 0.0)
         view = window.view
         view.update_scene()
         request_id = view._render_request_id
@@ -121,7 +124,8 @@ class TestAsyncRender:
         assert len(calls) <= 2 < n_requests
         assert view._render_request_id == final_id
 
-    def test_stale_result_discarded(self, window, qapp):
+    def test_stale_result_discarded(self, window, qapp, monkeypatch):
+        monkeypatch.setattr(gui_render, "VIEWPORT_MARGIN", 0.0)
         view = window.view
         zoomed = ((0.0, 0.0), (HEIGHT / 2, WIDTH / 2))
         view.update_scene()
@@ -257,3 +261,28 @@ class TestAsyncRender:
         assert window.view is not old_view
         assert window.view._render_thread is not None
         window.view.stop_render_worker()
+
+    def test_margin_inflates_render_viewport(self, window, qapp):
+        view = window.view
+        view.update_scene()
+        _wait_until(qapp, lambda: getattr(view, "image", None) is not None)
+        (t0, t1), (t2, t3) = view._viewport_key()
+        (r0, r1), (r2, r3) = view._blit_viewport
+        expected = 1.0 + 2 * gui_render.VIEWPORT_MARGIN
+        assert (r3 - r1) / (t3 - t1) == pytest.approx(expected)
+        assert (r2 - r0) / (t2 - t0) == pytest.approx(expected)
+        # the margin extends symmetrically beyond the visible view
+        assert r0 < t0 and r1 < t1 and r2 > t2 and r3 > t3
+        # while the displayed frame is the window-sized visible crop
+        assert view.qimage_no_picks.width() >= view.width()
+
+    def test_cache_redraw_after_margin_render(self, window, qapp):
+        view = window.view
+        view.update_scene()
+        _wait_until(qapp, lambda: getattr(view, "image", None) is not None)
+        assert view._image_viewport == view._blit_viewport
+        shown = _qimage_bytes(view.qimage)
+        # the contrast/cache path (synchronous) must crop the cached
+        # margin image identically
+        view.draw_scene(view.viewport, use_cache=True)
+        assert _qimage_bytes(view.qimage) == shown

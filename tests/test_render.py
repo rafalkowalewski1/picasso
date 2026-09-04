@@ -2126,13 +2126,13 @@ class TestParallelChannels:
         monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 10)
         self._force_budget(monkeypatch, 4)
         calls = []
-        original = render.render
+        original = render._render_arrays
 
         def counting(*args, **kwargs):
             calls.append(1)
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(render, "render", counting)
+        monkeypatch.setattr(render, "_render_arrays", counting)
         channels = [locs.iloc[i::2] for i in range(2)]
         common = dict(
             disp_px_size=PIXELSIZE / 10,

@@ -103,6 +103,104 @@ def render(
     image : lib.FloatArray2D
         Rendered image.
     """
+    return _render_arrays(
+        _extract_render_columns(locs, blur_method, ang),
+        info,
+        disp_px_size=disp_px_size,
+        viewport=viewport,
+        blur_method=blur_method,
+        min_blur_width=min_blur_width,
+        ang=ang,
+    )
+
+
+class _RenderColumns:
+    """Numpy views of the localization columns one render needs.
+
+    Chunked parallel rendering slices these arrays instead of
+    DataFrames: the per-chunk pandas overhead (``iloc``, ``to_numpy``)
+    holds the GIL and measurably caps the thread pool's efficiency.
+    Extraction happens once per channel; ``angle`` is stored in radians
+    and ``lpz`` with its fallback already applied, so chunk slices are
+    plain array views.
+    """
+
+    __slots__ = ("x", "y", "lpx", "lpy", "lpz", "angle", "z")
+
+    def __init__(self, x, y, lpx=None, lpy=None, lpz=None, angle=None, z=None):
+        self.x = x
+        self.y = y
+        self.lpx = lpx
+        self.lpy = lpy
+        self.lpz = lpz
+        self.angle = angle
+        self.z = z
+
+    def __len__(self) -> int:
+        return len(self.x)
+
+    def slice(self, start: int, stop: int) -> "_RenderColumns":
+        """Row range as array views (no copies)."""
+
+        def cut(array):
+            return None if array is None else array[start:stop]
+
+        return _RenderColumns(
+            self.x[start:stop],
+            self.y[start:stop],
+            cut(self.lpx),
+            cut(self.lpy),
+            cut(self.lpz),
+            cut(self.angle),
+            cut(self.z),
+        )
+
+
+def _extract_render_columns(
+    locs: pd.DataFrame,
+    blur_method: str | None,
+    ang: tuple | Rotation | None,
+) -> _RenderColumns:
+    """Pull the columns ``blur_method`` (and rotation) needs out of the
+    DataFrame, converting angle to radians and applying the lpz
+    fallback once per channel."""
+    need_lp = blur_method in ("gaussian", "gaussian_iso", "convolve")
+    lpx = locs["lpx"].to_numpy() if need_lp else None
+    lpy = locs["lpy"].to_numpy() if need_lp else None
+    angle = None
+    if blur_method == "gaussian" and "angle" in locs:
+        # the stored column is in degrees, the kernels expect radians
+        angle = np.deg2rad(locs["angle"].to_numpy())
+    z = None
+    lpz = None
+    if ang is not None:
+        z = locs["z"].to_numpy()
+        if blur_method in ("gaussian", "gaussian_iso"):
+            if "lpz" in locs:
+                lpz = locs["lpz"].to_numpy()
+            else:
+                # if lpz not found, make it twice the mean of lpx and lpy
+                lpz = 2 * locs[["lpx", "lpy"]].to_numpy().mean(axis=1)
+    return _RenderColumns(
+        locs["x"].to_numpy(), locs["y"].to_numpy(), lpx, lpy, lpz, angle, z
+    )
+
+
+def _render_arrays(
+    columns: _RenderColumns,
+    info: dict,
+    *,
+    disp_px_size: float,
+    viewport: tuple[tuple[float, float], tuple[float, float]] | None = None,
+    blur_method: (
+        Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
+    ) = None,
+    min_blur_width: float = 0.0,
+    ang: tuple | Rotation | None = None,
+) -> tuple[int, lib.FloatArray2D]:
+    """``render`` on pre-extracted column arrays (see ``render`` for
+    the parameters). The chunked parallel scheduler calls this per row
+    slice so no pandas work happens inside worker tasks."""
     pixelsize = lib.get_from_metadata(info, "Pixelsize", raise_error=True)
     oversampling = pixelsize / disp_px_size
 
@@ -114,8 +212,8 @@ def render(
     (y_min, x_min), (y_max, x_max) = viewport
     if blur_method is None:
         # no blur
-        return _render_hist(
-            locs,
+        return _render_hist_arrays(
+            columns,
             oversampling,
             y_min,
             x_min,
@@ -126,7 +224,7 @@ def render(
     elif blur_method == "gaussian":
         # individual localization precision
         return _render_gaussian(
-            locs,
+            columns,
             oversampling,
             y_min,
             x_min,
@@ -138,7 +236,7 @@ def render(
     elif blur_method == "gaussian_iso":
         # individual localization precision (same for x and y)
         return _render_gaussian_iso(
-            locs,
+            columns,
             oversampling,
             y_min,
             x_min,
@@ -150,7 +248,7 @@ def render(
     elif blur_method == "smooth":
         # one pixel blur
         return _render_smooth(
-            locs,
+            columns,
             oversampling,
             y_min,
             x_min,
@@ -161,7 +259,7 @@ def render(
     elif blur_method == "convolve":
         # global localization precision
         return _render_convolve(
-            locs,
+            columns,
             oversampling,
             y_min,
             x_min,
@@ -1023,9 +1121,30 @@ def _render_hist(
     image : lib.FloatArray2D
         Rendered image.
     """
+    return _render_hist_arrays(
+        _extract_render_columns(locs, None, ang),
+        oversampling,
+        y_min,
+        x_min,
+        y_max,
+        x_max,
+        ang=ang,
+    )
+
+
+def _render_hist_arrays(
+    columns: _RenderColumns,
+    oversampling: float,
+    y_min: float,
+    x_min: float,
+    y_max: float,
+    x_max: float,
+    ang: tuple[float, float, float] | Rotation | None = None,
+) -> tuple[int, lib.FloatArray2D]:
+    """``_render_hist`` on pre-extracted column arrays."""
     image, n_pixel_y, n_pixel_x, x, y, in_view = _render_setup(
-        locs["x"].to_numpy(),
-        locs["y"].to_numpy(),
+        columns.x,
+        columns.y,
         oversampling,
         y_min,
         x_min,
@@ -1033,8 +1152,8 @@ def _render_hist(
         x_max,
     )
     if ang is not None:
-        x, y, _, _ = locs_rotation(
-            locs,
+        x, y, _, _ = _locs_rotation_arrays(
+            columns,
             oversampling,
             x_min,
             x_max,
@@ -1184,7 +1303,7 @@ def render_hist3d_anisotropic(
 
 
 def _render_gaussian(
-    locs: pd.DataFrame,
+    columns: _RenderColumns,
     oversampling: float,
     y_min: float,
     x_min: float,
@@ -1198,8 +1317,8 @@ def _render_gaussian(
 
     Parameters
     ----------
-    locs : pd.DataFrame
-        Localizations to be rendered.
+    columns : _RenderColumns
+        Column arrays of the localizations to be rendered.
     oversampling : float
         Number of super-resolution pixels per camera pixel.
     y_min, y_max : float
@@ -1222,8 +1341,8 @@ def _render_gaussian(
         Rendered image.
     """
     image, n_pixel_y, n_pixel_x, x, y, in_view = _render_setup(
-        locs["x"].to_numpy(),
-        locs["y"].to_numpy(),
+        columns.x,
+        columns.y,
         oversampling,
         y_min,
         x_min,
@@ -1232,19 +1351,15 @@ def _render_gaussian(
     )
 
     if ang is None:  # not rotated
-        blur_width = oversampling * np.maximum(
-            locs["lpx"].to_numpy(), min_blur_width
-        )
-        blur_height = oversampling * np.maximum(
-            locs["lpy"].to_numpy(), min_blur_width
-        )
+        blur_width = oversampling * np.maximum(columns.lpx, min_blur_width)
+        blur_height = oversampling * np.maximum(columns.lpy, min_blur_width)
         sy = blur_height[in_view]
         sx = blur_width[in_view]
 
-        if "angle" in locs:
-            # per-localization in-plane rotation of the precision ellipse;
-            # the stored column is in degrees, the kernel expects radians
-            angle = np.deg2rad(locs["angle"].to_numpy()[in_view])
+        if columns.angle is not None:
+            # per-localization in-plane rotation of the precision
+            # ellipse (already converted to radians at extraction)
+            angle = columns.angle[in_view]
             _fill_gaussian_theta(
                 image, x, y, sx, sy, angle, n_pixel_x, n_pixel_y
             )
@@ -1252,8 +1367,8 @@ def _render_gaussian(
             _fill_gaussian(image, x, y, sx, sy, n_pixel_x, n_pixel_y)
 
     else:  # rotated
-        x, y, in_view, z = locs_rotation(
-            locs,
+        x, y, in_view, z = _locs_rotation_arrays(
+            columns,
             oversampling,
             x_min,
             x_max,
@@ -1261,18 +1376,10 @@ def _render_gaussian(
             y_max,
             ang,
         )
-        blur_width = oversampling * np.maximum(
-            locs["lpx"].to_numpy(), min_blur_width
-        )
-        blur_height = oversampling * np.maximum(
-            locs["lpy"].to_numpy(), min_blur_width
-        )
-        # if lpz not found, make it twice the mean of lpx and lpy
-        if "lpz" in locs:
-            lpz = locs["lpz"].to_numpy()
-        else:
-            lpz = 2 * locs[["lpx", "lpy"]].to_numpy().mean(axis=1)
-        blur_depth = oversampling * np.maximum(lpz, min_blur_width)
+        blur_width = oversampling * np.maximum(columns.lpx, min_blur_width)
+        blur_height = oversampling * np.maximum(columns.lpy, min_blur_width)
+        # lpz carries its fallback from extraction already
+        blur_depth = oversampling * np.maximum(columns.lpz, min_blur_width)
 
         sy = blur_height[in_view]
         sx = blur_width[in_view]
@@ -1281,10 +1388,10 @@ def _render_gaussian(
         rot_matrix = np.ascontiguousarray(
             to_rotation(ang).as_matrix(), dtype=np.float32
         )
-        if "angle" in locs:
-            # per-localization in-plane rotation (degrees in the stored
-            # column), composed with the global rotation
-            angle = np.deg2rad(locs["angle"].to_numpy())[in_view]
+        if columns.angle is not None:
+            # per-localization in-plane rotation (radians), composed
+            # with the global rotation
+            angle = columns.angle[in_view]
             _fill_gaussian_rot_theta(
                 image,
                 x,
@@ -1307,7 +1414,7 @@ def _render_gaussian(
 
 
 def _render_gaussian_iso(
-    locs: pd.DataFrame,
+    columns: _RenderColumns,
     oversampling: float,
     y_min: float,
     x_min: float,
@@ -1319,8 +1426,8 @@ def _render_gaussian_iso(
     """Same as ``_render_gaussian``, but uses the same localization
     precision in x and y."""
     image, n_pixel_y, n_pixel_x, x, y, in_view = _render_setup(
-        locs["x"].to_numpy(),
-        locs["y"].to_numpy(),
+        columns.x,
+        columns.y,
         oversampling,
         y_min,
         x_min,
@@ -1329,20 +1436,16 @@ def _render_gaussian_iso(
     )
 
     if ang is None:  # not rotated
-        blur_width = oversampling * np.maximum(
-            locs["lpx"].to_numpy(), min_blur_width
-        )
-        blur_height = oversampling * np.maximum(
-            locs["lpy"].to_numpy(), min_blur_width
-        )
+        blur_width = oversampling * np.maximum(columns.lpx, min_blur_width)
+        blur_height = oversampling * np.maximum(columns.lpy, min_blur_width)
         sy = (blur_height[in_view] + blur_width[in_view]) / 2
         sx = sy
 
         _fill_gaussian(image, x, y, sx, sy, n_pixel_x, n_pixel_y)
 
     else:  # rotated
-        x, y, in_view, z = locs_rotation(
-            locs,
+        x, y, in_view, z = _locs_rotation_arrays(
+            columns,
             oversampling,
             x_min,
             x_max,
@@ -1350,18 +1453,10 @@ def _render_gaussian_iso(
             y_max,
             ang,
         )
-        blur_width = oversampling * np.maximum(
-            locs["lpx"].to_numpy(), min_blur_width
-        )
-        blur_height = oversampling * np.maximum(
-            locs["lpy"].to_numpy(), min_blur_width
-        )
-        # for now, let lpz be twice the mean of lpx and lpy
-        if "lpz" in locs:
-            lpz = locs["lpz"].to_numpy()
-        else:
-            lpz = 2 * locs[["lpx", "lpy"]].to_numpy().mean(axis=1)
-        blur_depth = oversampling * np.maximum(lpz, min_blur_width)
+        blur_width = oversampling * np.maximum(columns.lpx, min_blur_width)
+        blur_height = oversampling * np.maximum(columns.lpy, min_blur_width)
+        # lpz carries its fallback from extraction already
+        blur_depth = oversampling * np.maximum(columns.lpz, min_blur_width)
 
         sy = (blur_height[in_view] + blur_width[in_view]) / 2
         sx = sy
@@ -1379,7 +1474,7 @@ def _render_gaussian_iso(
 
 
 def _render_convolve(
-    locs: pd.DataFrame,
+    columns: _RenderColumns,
     oversampling: float,
     y_min: float,
     x_min: float,
@@ -1394,8 +1489,8 @@ def _render_convolve(
 
     Parameters
     ----------
-    locs : pd.DataFrame
-        Localizations to be rendered.
+    columns : _RenderColumns
+        Column arrays of the localizations to be rendered.
     oversampling : float
         Number of super-resolution pixels per camera pixel.
     y_min, x_min : float
@@ -1418,8 +1513,8 @@ def _render_convolve(
         Rendered image.
     """
     image, n_pixel_y, n_pixel_x, x, y, in_view = _render_setup(
-        locs["x"].to_numpy(),
-        locs["y"].to_numpy(),
+        columns.x,
+        columns.y,
         oversampling,
         y_min,
         x_min,
@@ -1427,8 +1522,8 @@ def _render_convolve(
         x_max,
     )
     if ang is not None:  # rotate
-        x, y, in_view, _ = locs_rotation(
-            locs,
+        x, y, in_view, _ = _locs_rotation_arrays(
+            columns,
             oversampling,
             x_min,
             x_max,
@@ -1443,16 +1538,16 @@ def _render_convolve(
     else:
         _fill(image, x, y)
         blur_width = oversampling * max(
-            np.median(locs["lpx"].to_numpy()[in_view]), min_blur_width
+            np.median(columns.lpx[in_view]), min_blur_width
         )
         blur_height = oversampling * max(
-            np.median(locs["lpy"].to_numpy()[in_view]), min_blur_width
+            np.median(columns.lpy[in_view]), min_blur_width
         )
         return n, _fftconvolve(image, blur_width, blur_height)
 
 
 def _render_smooth(
-    locs: pd.DataFrame,
+    columns: _RenderColumns,
     oversampling: float,
     y_min: float,
     x_min: float,
@@ -1465,8 +1560,8 @@ def _render_smooth(
 
     Parameters
     ----------
-    locs : pd.DataFrame
-        Localizations to be rendered.
+    columns : _RenderColumns
+        Column arrays of the localizations to be rendered.
     oversampling : float
         Number of super-resolution pixels per camera pixel.
     y_min, x_min : float
@@ -1487,8 +1582,8 @@ def _render_smooth(
         Rendered image.
     """
     image, n_pixel_y, n_pixel_x, x, y, in_view = _render_setup(
-        locs["x"].to_numpy(),
-        locs["y"].to_numpy(),
+        columns.x,
+        columns.y,
         oversampling,
         y_min,
         x_min,
@@ -1497,8 +1592,8 @@ def _render_smooth(
     )
 
     if ang is not None:  # rotate
-        x, y, _, _ = locs_rotation(
-            locs,
+        x, y, _, _ = _locs_rotation_arrays(
+            columns,
             oversampling,
             x_min,
             x_max,
@@ -1712,8 +1807,31 @@ def locs_rotation(
     z : lib.FloatArray1D
         New z coordinates
     """
+    return _locs_rotation_arrays(
+        _extract_render_columns(locs, None, ang),
+        oversampling,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        ang,
+    )
+
+
+def _locs_rotation_arrays(
+    columns: _RenderColumns,
+    oversampling: float,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    ang: tuple[float, float, float] | Rotation,
+) -> tuple[
+    lib.FloatArray1D, lib.FloatArray1D, lib.BoolArray1D, lib.FloatArray1D
+]:
+    """``locs_rotation`` on pre-extracted column arrays."""
     # z is translated to pixels
-    locs_coord = locs[["x", "y", "z"]].to_numpy()
+    locs_coord = np.column_stack((columns.x, columns.y, columns.z))
 
     # x and y are in range (x_min/y_min, x_max/y_max) so they need to be
     # shifted (scipy rotation is around origin)
@@ -3392,13 +3510,20 @@ def _render_channels(
         ``render``'s ``(n, image)`` result per channel, in input order.
     """
 
+    # column arrays extracted once per channel: chunk tasks then slice
+    # numpy views instead of DataFrames, keeping pandas (and its
+    # GIL-held overhead) out of the worker tasks entirely
+    channel_columns = [
+        _extract_render_columns(channel, blur_method, ang) for channel in locs
+    ]
+
     def render_rows(i: int, start: int, stop: int):
-        chunk = locs[i]
+        chunk = channel_columns[i]
         if stop - start < len(chunk):
-            chunk = chunk.iloc[start:stop]
-        return render(
-            locs=chunk,
-            info=info[i],
+            chunk = chunk.slice(start, stop)
+        return _render_arrays(
+            chunk,
+            info[i],
             disp_px_size=disp_px_size,
             viewport=viewport,
             blur_method=blur_method,
