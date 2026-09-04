@@ -14,6 +14,7 @@ scale bar and picks.
 from __future__ import annotations
 
 import os
+from concurrent import futures
 from typing import Literal, Callable, TYPE_CHECKING
 
 import numba
@@ -173,7 +174,7 @@ def render(
         raise Exception("blur_method not understood.")
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def _render_setup(
     x: lib.FloatArray1D,
     y: lib.FloatArray1D,
@@ -231,7 +232,7 @@ def _render_setup(
     return image, n_pixel_y, n_pixel_x, x, y, in_view
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def _render_setup_anisotropic(  # used in Average
     x: lib.FloatArray1D,
     y: lib.FloatArray1D,
@@ -290,7 +291,7 @@ def _render_setup_anisotropic(  # used in Average
     return image, n_pixel_y, n_pixel_x, x, y, in_view
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def _render_setup3d(
     x: lib.FloatArray1D,
     y: lib.FloatArray1D,
@@ -370,7 +371,7 @@ def _render_setup3d(
     return image, n_pixel_y, n_pixel_x, n_pixel_z, x, y, z, in_view
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def _render_setup3d_anisotropic(
     x: lib.FloatArray1D,
     y: lib.FloatArray1D,
@@ -453,7 +454,7 @@ def _render_setup3d_anisotropic(
     return image, n_pixel_y, n_pixel_x, n_pixel_z, x, y, z, in_view
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def _fill(
     image: lib.FloatArray2D, x: lib.FloatArray1D, y: lib.FloatArray1D
 ) -> None:
@@ -472,7 +473,7 @@ def _fill(
         image[j, i] += 1
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def _fill3d(
     image: lib.FloatArray3D,
     x: lib.FloatArray1D,
@@ -495,7 +496,7 @@ def _fill3d(
         image[j, i, k] += 1
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _draw_gaussian_loc(
     image: lib.FloatArray2D,
     x_: float,
@@ -549,7 +550,7 @@ def _draw_gaussian_loc(
             row[j_min + jj] += gy_i * gx[jj]
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _fill_gaussian(
     image: lib.FloatArray2D,
     x: lib.FloatArray1D,
@@ -584,7 +585,7 @@ def _fill_gaussian(
         )
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _draw_gaussian_theta_loc(
     image: lib.FloatArray2D,
     x_: float,
@@ -639,7 +640,7 @@ def _draw_gaussian_theta_loc(
             image[i, j] += norm * np.exp(-0.5 * exponent)
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _fill_gaussian_theta(
     image: lib.FloatArray2D,
     x: lib.FloatArray1D,
@@ -679,7 +680,7 @@ def _fill_gaussian_theta(
         )
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _draw_gaussian_cov3d_loc(
     image: lib.FloatArray2D,
     x_: float,
@@ -730,7 +731,7 @@ def _draw_gaussian_cov3d_loc(
             image[i, j] += norm * np.exp(-0.5 * exponent)
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _draw_gaussian_rot_loc(
     image: lib.FloatArray2D,
     x_: float,
@@ -754,7 +755,7 @@ def _draw_gaussian_rot_loc(
     )
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _draw_gaussian_rot_theta_loc(
     image: lib.FloatArray2D,
     x_: float,
@@ -787,7 +788,7 @@ def _draw_gaussian_rot_theta_loc(
     )
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _fill_gaussian_rot(
     image: lib.FloatArray2D,
     x: lib.FloatArray1D,
@@ -837,7 +838,7 @@ def _fill_gaussian_rot(
         )
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, nogil=True)
 def _fill_gaussian_rot_theta(
     image: lib.FloatArray2D,
     x: lib.FloatArray1D,
@@ -894,7 +895,7 @@ def _fill_gaussian_rot_theta(
         )
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def inverse_3x3(a: lib.Array3x3) -> lib.Array3x3:
     """Calculate inverse of a 3x3 matrix. This function is faster than
     ``np.linalg.inv``.
@@ -927,7 +928,7 @@ def inverse_3x3(a: lib.Array3x3) -> lib.Array3x3:
     return c
 
 
-@numba.njit
+@numba.njit(nogil=True)
 def determinant_3x3(a: lib.Array3x3) -> np.float32:
     """Calculate determinant of a 3x3 matrix. This function is faster
     than ``np.linalg.det``.
@@ -3285,6 +3286,93 @@ def render_scene(
         return qimage, n_locs
 
 
+def _n_channel_workers(n_channels: int) -> int:
+    """Number of worker threads for rendering ``n_channels`` channels.
+
+    Bounded by the user's render CPU budget (the ``Render`` section of
+    the user settings file, see ``lib.n_workers``). A single channel
+    never reads the settings and always renders on the calling thread.
+
+    Parameters
+    ----------
+    n_channels : int
+        Number of channels to be rendered.
+
+    Returns
+    -------
+    n : int
+        Number of worker threads, at least 1.
+    """
+    if n_channels <= 1:
+        return 1
+    return min(
+        n_channels,
+        lib.n_workers(
+            lib.RENDER_CPU_UTILIZATION_DEFAULT, settings_section="Render"
+        ),
+    )
+
+
+def _render_channels(
+    locs: list[pd.DataFrame],
+    info: list[list[dict]],
+    *,
+    disp_px_size: float,
+    viewport: tuple[tuple[float, float], tuple[float, float]] | None,
+    blur_method: (
+        Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
+    ),
+    min_blur_width: float,
+    ang: tuple | Rotation | None,
+) -> list[tuple[int, lib.FloatArray2D]]:
+    """Render each channel's raw grayscale image, in parallel across
+    channels when the render CPU budget allows.
+
+    Channels are dispatched largest-first so the biggest channel never
+    serializes the tail of the pool; results keep input order. Threads
+    give real parallelism because the fill kernels release the GIL
+    (``nogil=True``) and never mutate their inputs, so channels share
+    nothing writable. The pool only lives for the duration of one
+    render, keeping Picasso polite on shared workstations.
+
+    Parameters
+    ----------
+    locs : list of pd.DataFrame
+        Localizations, one DataFrame per channel.
+    info : list of list of dict
+        Metadata, one entry per channel.
+    disp_px_size, viewport, blur_method, min_blur_width, ang
+        See ``render``.
+
+    Returns
+    -------
+    renderings : list of (int, lib.FloatArray2D)
+        ``render``'s ``(n, image)`` result per channel, in input order.
+    """
+
+    def render_one(i: int) -> tuple[int, lib.FloatArray2D]:
+        return render(
+            locs=locs[i],
+            info=info[i],
+            disp_px_size=disp_px_size,
+            viewport=viewport,
+            blur_method=blur_method,
+            min_blur_width=min_blur_width,
+            ang=ang,
+        )
+
+    n_workers = _n_channel_workers(len(locs))
+    if n_workers == 1:
+        return [render_one(i) for i in range(len(locs))]
+    order = sorted(range(len(locs)), key=lambda i: len(locs[i]), reverse=True)
+    with futures.ThreadPoolExecutor(n_workers) as executor:
+        largest_first = list(executor.map(render_one, order))
+    renderings = [None] * len(locs)
+    for i, rendering in zip(order, largest_first):
+        renderings[i] = rendering
+    return renderings
+
+
 def _render_multi_channel(
     locs: list[pd.DataFrame],
     info: list[list[dict]],
@@ -3316,18 +3404,17 @@ def _render_multi_channel(
         raw_image = raw_image_cache
         n_locs = 0
     else:
-        renderings = [  # monochromatic images of localizations
-            render(
-                locs=locs[i],
-                info=info[i],
-                disp_px_size=disp_px_size,
-                viewport=viewport,
-                blur_method=blur_method,
-                min_blur_width=min_blur_width,
-                ang=ang,
-            )
-            for i in range(len(locs))
-        ]
+        # monochromatic images of localizations, rendered in parallel
+        # across channels within the user's render CPU budget
+        renderings = _render_channels(
+            locs,
+            info,
+            disp_px_size=disp_px_size,
+            viewport=viewport,
+            blur_method=blur_method,
+            min_blur_width=min_blur_width,
+            ang=ang,
+        )
         n_locs = sum([rendering[0] for rendering in renderings])
         raw_image = np.array([rendering[1] for rendering in renderings])
 

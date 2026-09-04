@@ -11,7 +11,7 @@ import pytest
 from PyQt6 import QtCore, QtGui
 from scipy.spatial.transform import Rotation
 
-from picasso import io, masking, render
+from picasso import io, lib, masking, render
 
 from tests.conftest import PIXELSIZE
 
@@ -2031,3 +2031,63 @@ class TestRenderPurity:
             np.testing.assert_array_equal(arr, orig)
         assert n1 == n2
         np.testing.assert_array_equal(image1, image2)
+
+
+# ---------------------------------------------------------------------------
+# Parallel channel rendering
+# ---------------------------------------------------------------------------
+
+
+class TestParallelChannels:
+    """The channel thread pool must produce exactly the sequential
+    result, and its width must respect the user's render CPU budget."""
+
+    @pytest.mark.parametrize("rotated", [False, True])
+    def test_parallel_matches_sequential(
+        self, locs, locs_3d, info, monkeypatch, rotated
+    ):
+        source = locs_3d if rotated else locs
+        channels = [source.iloc[i::3] for i in range(3)]
+        kwargs = dict(
+            disp_px_size=PIXELSIZE / 10,
+            colors=[(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)],
+            viewport=FULL_VIEWPORT,
+            blur_method="gaussian",
+            min_blur_width=0.0,
+            ang=PURITY_ANG if rotated else None,
+            contrast=(0.0, 5.0),
+        )
+        monkeypatch.setattr(render, "_n_channel_workers", lambda n: 1)
+        n_seq, rgb_seq, _, raw_seq = render._render_multi_channel(
+            channels, [info] * 3, **kwargs
+        )
+        monkeypatch.setattr(render, "_n_channel_workers", lambda n: 3)
+        n_par, rgb_par, _, raw_par = render._render_multi_channel(
+            channels, [info] * 3, **kwargs
+        )
+        assert n_seq == n_par
+        np.testing.assert_array_equal(raw_seq, raw_par)
+        np.testing.assert_array_equal(rgb_seq, rgb_par)
+
+    def test_single_channel_never_reads_settings(self, monkeypatch):
+        def _boom():
+            raise AssertionError("settings must not be read")
+
+        monkeypatch.setattr(lib.io, "load_user_settings", _boom)
+        assert render._n_channel_workers(1) == 1
+
+    def test_worker_budget_caps(self, monkeypatch):
+        monkeypatch.setattr(
+            lib.io,
+            "load_user_settings",
+            lambda: {"Render": {"cpu_utilization": 0.9, "max_workers": 2}},
+        )
+        assert render._n_channel_workers(8) == 2
+
+    def test_bounded_by_channel_count(self, monkeypatch):
+        monkeypatch.setattr(
+            lib.io,
+            "load_user_settings",
+            lambda: {"Render": {"cpu_utilization": 0.9, "max_workers": 61}},
+        )
+        assert render._n_channel_workers(2) <= 2
