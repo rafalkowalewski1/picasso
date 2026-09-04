@@ -2176,3 +2176,140 @@ class TestParallelChannels:
             or (start, stop) == (0, sizes[i])
             for i, start, stop in tasks
         )
+
+
+# ---------------------------------------------------------------------------
+# Fused post-processing vs the legacy numpy chain
+# ---------------------------------------------------------------------------
+
+
+def _legacy_multi_lut(
+    raw, luts, contrast, relative_intensities, background_color, invert
+):
+    """The pre-fusion numpy post-processing chain, kept as the reference
+    the fused kernels are compared against (built from the public
+    helpers plus the removed inline steps)."""
+    vmin, vmax = contrast if contrast is not None else (None, None)
+    images = render.scale_contrast(
+        raw.copy(), vmin, vmax, autoscale=contrast is None
+    )
+    images = render.scale_intensities(
+        images, relative_intensities=relative_intensities
+    )
+    colors_arr = np.asarray(luts, dtype=np.float32)
+    images_f32 = np.ascontiguousarray(images, dtype=np.float32)
+    idx = np.clip((images_f32 * 255.0).astype(np.int32), 0, 255)
+    rgb = np.zeros(
+        (images_f32.shape[1], images_f32.shape[2], 3), dtype=np.float32
+    )
+    for c in range(images_f32.shape[0]):
+        rgb += colors_arr[c][idx[c]]
+    np.minimum(rgb, 1.0, out=rgb)
+    if background_color is not None and any(c > 0 for c in background_color):
+        bg = np.asarray(background_color, dtype=np.float32)
+        alpha = np.clip(images_f32.sum(axis=0), 0.0, 1.0)[..., None]
+        rgb = rgb + bg * (1.0 - alpha)
+        np.minimum(rgb, 1.0, out=rgb)
+    rgb = render.to_8bit(rgb)
+    if invert:
+        rgb = 255 - rgb
+    return rgb
+
+
+def _legacy_single(raw, colormap, contrast, invert):
+    vmin, vmax = contrast if contrast is not None else (None, None)
+    image = render.scale_contrast(
+        raw.copy(), vmin, vmax, autoscale=contrast is None
+    )
+    image = render.to_8bit(image)
+    rgb = render.apply_colormap(image, colormap)
+    if invert:
+        rgb = 255 - rgb
+    return rgb
+
+
+class TestFusedCompose:
+    """The fused post-processing kernels must reproduce the legacy
+    numpy chain to within uint8 rounding (<= 1 count per pixel)."""
+
+    @pytest.fixture(scope="class")
+    def raw_stack(self):
+        rng = np.random.default_rng(7)
+        raw = rng.exponential(2.0, size=(3, 80, 90)).astype(np.float32)
+        raw[:, ::7, ::5] = 0.0  # empty pixels
+        raw[0, 3, 4] = np.nan  # non-finite must map to 0
+        raw[1, 10, 11] = 500.0  # fiducial-grade hot pixel
+        return raw
+
+    @pytest.fixture(scope="class")
+    def luts(self):
+        return [render.solid_to_lut(rgb) for rgb in lib.get_colors(3)]
+
+    @pytest.mark.parametrize(
+        "contrast,rel,bg,invert",
+        [
+            ((0.0, 5.0), None, None, False),
+            ((0.0, 5.0), [1.0, 0.7, 1.3], None, False),
+            ((0.0, 5.0), None, (0.08, 0.08, 0.12), False),
+            ((0.5, 3.0), [1.0, 0.7, 1.3], (0.1, 0.0, 0.2), True),
+            (None, None, None, False),  # autoscale
+        ],
+    )
+    def test_multi_lut_matches_legacy(
+        self, raw_stack, luts, info, contrast, rel, bg, invert
+    ):
+        expected = _legacy_multi_lut(
+            raw_stack, luts, contrast, rel, bg, invert
+        )
+        _, rgb, _, _ = render._render_multi_channel(
+            [None] * 3,
+            [info] * 3,
+            disp_px_size=10.0,
+            colors=luts,
+            contrast=contrast,
+            relative_intensities=rel,
+            invert_colors=invert,
+            background_color=bg,
+            raw_image_cache=raw_stack,
+        )
+        diff = np.abs(rgb.astype(np.int16) - expected.astype(np.int16))
+        assert diff.max() <= 1
+
+    @pytest.mark.parametrize("contrast", [(0.0, 5.0), None])
+    @pytest.mark.parametrize("invert", [False, True])
+    def test_single_matches_legacy(self, raw_stack, info, contrast, invert):
+        raw = raw_stack[0]
+        for colormap in ["magma", np.linspace(0, 1, 256 * 4).reshape(256, 4)]:
+            expected = _legacy_single(raw, colormap, contrast, invert)
+            _, rgb, _, _ = render._render_single_channel(
+                None,
+                info,
+                disp_px_size=10.0,
+                contrast=contrast,
+                invert_colors=invert,
+                single_channel_colormap=colormap,
+                raw_image_cache=raw,
+            )
+            diff = np.abs(rgb.astype(np.int16) - expected.astype(np.int16))
+            assert diff.max() <= 1
+
+    def test_contrast_limits_match_scale_contrast(self, raw_stack):
+        for args in [
+            (None, None, True),
+            (0.5, 4.0, False),
+            (None, 2.0, False),
+        ]:
+            _, expected = render.scale_contrast(
+                raw_stack.copy(),
+                args[0],
+                args[1],
+                autoscale=args[2],
+                return_contrast_limits=True,
+            )
+            result = render._contrast_limits(raw_stack, *args)
+            # NaN-aware comparison: with NaN pixels and vmin=None both
+            # implementations agree on vmin=NaN, but NaN != NaN
+            np.testing.assert_array_equal(
+                np.asarray(result, dtype=np.float64),
+                np.asarray(expected, dtype=np.float64),
+            )

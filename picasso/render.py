@@ -3454,6 +3454,183 @@ def _render_channels(
     return renderings
 
 
+def _contrast_limits(
+    image: lib.FloatArray2D | lib.FloatArray3D,
+    vmin: float | None,
+    vmax: float | None,
+    autoscale: bool,
+) -> tuple[float, float]:
+    """Contrast limits exactly as ``scale_contrast`` derives them,
+    without scaling the image."""
+    if autoscale:
+        if image.ndim == 2:
+            max_ = image.max()
+        else:
+            # lowest max value from all channels, given it's not
+            # an empty image
+            max_ = min([_.max() for _ in image if _.max() > 0])
+        vmax = 0.5 * max_
+        vmin = 0.0
+    vmin = vmin if vmin is not None else image.min()
+    vmax = vmax if vmax is not None else image.max()
+    if vmin == vmax:
+        vmax = vmin + 1e-6
+    return vmin, vmax
+
+
+def _resolve_cmap(colormap: str | lib.FloatArray2D) -> lib.IntArray2D:
+    """The 256-entry uint8 RGB table that ``apply_colormap`` would use
+    for ``colormap`` (built identically, alpha dropped)."""
+    if isinstance(colormap, str):
+        cmap = np.uint8(np.round(255 * plt.get_cmap(colormap)(np.arange(256))))
+    else:
+        cmap = np.uint8(np.round(255 * colormap))
+    return np.ascontiguousarray(cmap[:, :3])
+
+
+@numba.njit(cache=True, nogil=True)
+def _compose_multi_lut(
+    raw: lib.FloatArray3D,
+    luts: lib.FloatArray3D,
+    vmin: float,
+    vmax: float,
+    rel: lib.FloatArray1D,
+    bg: lib.FloatArray1D,
+    has_bg: bool,
+) -> tuple[lib.FloatArray3D, np.float32]:
+    """Fused replacement for the multi-channel numpy post-processing
+    chain (contrast scale -> intensity scale -> LUT gather -> additive
+    blend -> background compositing), reading the raw stack once.
+
+    Reproduces the chain's float32 arithmetic step for step (subtract
+    then divide, non-finite to zero, clip, truncating int cast for the
+    LUT index) so results match the legacy path bit-for-bit up to
+    quantization. Returns the float RGB image plus its global maximum,
+    which ``_quantize_rgb`` needs for ``to_8bit``'s renormalization.
+    """
+    n_channels, n_y, n_x = raw.shape
+    vmin32 = np.float32(vmin)
+    rng32 = np.float32(vmax - vmin)
+    one = np.float32(1.0)
+    zero = np.float32(0.0)
+    rgb = np.empty((n_y, n_x, 3), dtype=np.float32)
+    max_value = zero
+    for i in range(n_y):
+        for j in range(n_x):
+            r = zero
+            g = zero
+            b = zero
+            coverage = zero
+            for c in range(n_channels):
+                v = (raw[c, i, j] - vmin32) / rng32
+                if not np.isfinite(v):
+                    v = zero
+                if v < zero:
+                    v = zero
+                elif v > one:
+                    v = one
+                v = v * rel[c]
+                idx = np.int32(v * np.float32(255.0))
+                if idx < 0:
+                    idx = 0
+                elif idx > 255:
+                    idx = 255
+                r += luts[c, idx, 0]
+                g += luts[c, idx, 1]
+                b += luts[c, idx, 2]
+                coverage += v
+            if r > one:
+                r = one
+            if g > one:
+                g = one
+            if b > one:
+                b = one
+            if has_bg:
+                if coverage < zero:
+                    coverage = zero
+                elif coverage > one:
+                    coverage = one
+                remainder = one - coverage
+                r += bg[0] * remainder
+                g += bg[1] * remainder
+                b += bg[2] * remainder
+                if r > one:
+                    r = one
+                if g > one:
+                    g = one
+                if b > one:
+                    b = one
+            rgb[i, j, 0] = r
+            rgb[i, j, 1] = g
+            rgb[i, j, 2] = b
+            if r > max_value:
+                max_value = r
+            if g > max_value:
+                max_value = g
+            if b > max_value:
+                max_value = b
+    return rgb, max_value
+
+
+@numba.njit(cache=True, nogil=True)
+def _quantize_rgb(
+    rgb: lib.FloatArray3D, max_value: np.float32
+) -> lib.IntArray3D:
+    """``to_8bit`` as a kernel: divide by the global maximum (when
+    positive) and round to uint8, matching numpy's half-to-even."""
+    n_y, n_x, _ = rgb.shape
+    denom = max_value if max_value > np.float32(0.0) else np.float32(1.0)
+    out = np.empty((n_y, n_x, 3), dtype=np.uint8)
+    for i in range(n_y):
+        for j in range(n_x):
+            for k in range(3):
+                t = (rgb[i, j, k] / denom) * np.float32(255.0)
+                out[i, j, k] = np.uint8(np.rint(t))
+    return out
+
+
+@numba.njit(cache=True, nogil=True)
+def _compose_single(
+    raw: lib.FloatArray2D,
+    cmap: lib.IntArray2D,
+    vmin: float,
+    vmax: float,
+) -> lib.IntArray3D:
+    """Fused replacement for the single-channel chain
+    (``scale_contrast`` -> ``to_8bit`` -> ``apply_colormap``): contrast
+    scale with clipping, renormalize by the global maximum, round to the
+    256-entry colormap index and gather RGB."""
+    n_y, n_x = raw.shape
+    vmin32 = np.float32(vmin)
+    rng32 = np.float32(vmax - vmin)
+    one = np.float32(1.0)
+    zero = np.float32(0.0)
+    scaled = np.empty((n_y, n_x), dtype=np.float32)
+    max_value = zero
+    for i in range(n_y):
+        for j in range(n_x):
+            v = (raw[i, j] - vmin32) / rng32
+            if not np.isfinite(v):
+                v = zero
+            if v < zero:
+                v = zero
+            elif v > one:
+                v = one
+            scaled[i, j] = v
+            if v > max_value:
+                max_value = v
+    denom = max_value if max_value > zero else one
+    out = np.empty((n_y, n_x, 3), dtype=np.uint8)
+    for i in range(n_y):
+        for j in range(n_x):
+            t = (scaled[i, j] / denom) * np.float32(255.0)
+            idx = np.int64(np.rint(t))
+            out[i, j, 0] = cmap[idx, 0]
+            out[i, j, 1] = cmap[idx, 1]
+            out[i, j, 2] = cmap[idx, 2]
+    return out
+
+
 def _render_multi_channel(
     locs: list[pd.DataFrame],
     info: list[list[dict]],
@@ -3499,44 +3676,73 @@ def _render_multi_channel(
         n_locs = sum([rendering[0] for rendering in renderings])
         raw_image = np.array([rendering[1] for rendering in renderings])
 
-    # scale contrast and intensities
     vmin, vmax = contrast if contrast is not None else (None, None)
     autoscale = True if contrast is None else False
-    images, contrast_limits = scale_contrast(
-        raw_image, vmin, vmax, autoscale=autoscale, return_contrast_limits=True
-    )
-    images = scale_intensities(
-        images, relative_intensities=relative_intensities
-    )
-
-    # color the images
     if colors is None:  # fallback if the user did not specify colors
-        colors = lib.get_colors(len(images))
+        colors = lib.get_colors(raw_image.shape[0])
     colors_arr = np.asarray(colors, dtype=np.float32)
-    images_f32 = np.ascontiguousarray(images, dtype=np.float32)
-    if colors_arr.ndim == 2:
-        # legacy path: each channel is a single (r, g, b)
-        rgb = np.tensordot(images_f32, colors_arr, axes=([0], [0]))
-    else:
-        # LUT path: each channel is a (256, 3) lookup table
-        idx = np.clip((images_f32 * 255.0).astype(np.int32), 0, 255)
-        rgb = np.zeros(
-            (images_f32.shape[1], images_f32.shape[2], 3), dtype=np.float32
+
+    if colors_arr.ndim == 3:
+        # LUT path (the GUI's path): one fused kernel does contrast ->
+        # intensities -> LUT gather -> blend -> background -> 8 bit in
+        # two passes over the stack instead of the ~10-pass numpy chain
+        n_channels = raw_image.shape[0]
+        contrast_limits = _contrast_limits(raw_image, vmin, vmax, autoscale)
+        if relative_intensities is None:
+            rel = np.ones(n_channels, dtype=np.float32)
+        else:
+            assert len(relative_intensities) == n_channels, (
+                "Length of relative_intensities must match number of "
+                "channels in images."
+            )
+            rel = np.asarray(relative_intensities, dtype=np.float32)
+        has_bg = background_color is not None and any(
+            c > 0 for c in background_color
         )
-        for c in range(images_f32.shape[0]):
-            rgb += colors_arr[c][idx[c]]
-    # clip to max value of 1 (preserves relative brightness)
-    np.minimum(rgb, 1.0, out=rgb)
-    # composite over a background color (default black = no change). The
-    # background shows through where there are few/no localizations,
-    # while bright regions keep their true channel colors. Alpha is the
-    # total per-pixel coverage summed across channels.
-    if background_color is not None and any(c > 0 for c in background_color):
-        bg = np.asarray(background_color, dtype=np.float32)
-        alpha = np.clip(images_f32.sum(axis=0), 0.0, 1.0)[..., None]
-        rgb = rgb + bg * (1.0 - alpha)
+        bg = np.asarray(
+            background_color if has_bg else (0.0, 0.0, 0.0), dtype=np.float32
+        )
+        rgb32, max_value = _compose_multi_lut(
+            np.ascontiguousarray(raw_image, dtype=np.float32),
+            np.ascontiguousarray(colors_arr),
+            contrast_limits[0],
+            contrast_limits[1],
+            rel,
+            bg,
+            has_bg,
+        )
+        rgb = _quantize_rgb(rgb32, max_value)
+    else:
+        # legacy solid-color path: each channel is a single (r, g, b),
+        # rendered as intensity x rgb through the numpy reference chain
+        # (kept as-is for public-API compatibility)
+        images, contrast_limits = scale_contrast(
+            raw_image,
+            vmin,
+            vmax,
+            autoscale=autoscale,
+            return_contrast_limits=True,
+        )
+        images = scale_intensities(
+            images, relative_intensities=relative_intensities
+        )
+        images_f32 = np.ascontiguousarray(images, dtype=np.float32)
+        rgb = np.tensordot(images_f32, colors_arr, axes=([0], [0]))
+        # clip to max value of 1 (preserves relative brightness)
         np.minimum(rgb, 1.0, out=rgb)
-    rgb = to_8bit(rgb)
+        # composite over a background color (default black = no change).
+        # The background shows through where there are few/no
+        # localizations, while bright regions keep their true channel
+        # colors. Alpha is the total per-pixel coverage summed across
+        # channels.
+        if background_color is not None and any(
+            c > 0 for c in background_color
+        ):
+            bg = np.asarray(background_color, dtype=np.float32)
+            alpha = np.clip(images_f32.sum(axis=0), 0.0, 1.0)[..., None]
+            rgb = rgb + bg * (1.0 - alpha)
+            np.minimum(rgb, 1.0, out=rgb)
+        rgb = to_8bit(rgb)
     if invert_colors:
         rgb = 255 - rgb
     return n_locs, rgb, contrast_limits, raw_image
@@ -3578,11 +3784,14 @@ def _render_single_channel(
         )
     vmin, vmax = contrast if contrast is not None else (None, None)
     autoscale = True if contrast is None else False
-    image, contrast_limits = scale_contrast(
-        raw_image, vmin, vmax, autoscale=autoscale, return_contrast_limits=True
+    contrast_limits = _contrast_limits(raw_image, vmin, vmax, autoscale)
+    # fused kernel replacing scale_contrast -> to_8bit -> apply_colormap
+    rgb = _compose_single(
+        np.ascontiguousarray(raw_image, dtype=np.float32),
+        _resolve_cmap(single_channel_colormap),
+        contrast_limits[0],
+        contrast_limits[1],
     )
-    image = to_8bit(image)
-    rgb = apply_colormap(image, single_channel_colormap)
     if invert_colors:
         rgb = 255 - rgb
     return n_locs, rgb, contrast_limits, raw_image
@@ -3662,19 +3871,7 @@ def scale_contrast(
         The contrast limits used for scaling. Only returned if
         return_contrast_limits is True.
     """
-    if autoscale:
-        if image.ndim == 2:
-            max_ = image.max()
-        else:
-            # lowest max value from all channels, given it's not
-            # an empty image
-            max_ = min([_.max() for _ in image if _.max() > 0])
-        vmax = 0.5 * max_
-        vmin = 0.0
-    vmin = vmin if vmin is not None else image.min()
-    vmax = vmax if vmax is not None else image.max()
-    if vmin == vmax:
-        vmax = vmin + 1e-6
+    vmin, vmax = _contrast_limits(image, vmin, vmax, autoscale)
     scaled_image = (image - vmin) / (vmax - vmin)
     scaled_image[~np.isfinite(scaled_image)] = 0.0
     scaled_image = np.clip(scaled_image, 0.0, 1.0)
