@@ -2039,55 +2039,140 @@ class TestRenderPurity:
 
 
 class TestParallelChannels:
-    """The channel thread pool must produce exactly the sequential
-    result, and its width must respect the user's render CPU budget."""
+    """Chunked parallel rendering must match the sequential result,
+    stay deterministic, and respect the user's render CPU budget."""
 
-    @pytest.mark.parametrize("rotated", [False, True])
-    def test_parallel_matches_sequential(
-        self, locs, locs_3d, info, monkeypatch, rotated
-    ):
-        source = locs_3d if rotated else locs
-        channels = [source.iloc[i::3] for i in range(3)]
-        kwargs = dict(
+    CHANNEL_COLORS = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+
+    def _force_budget(self, monkeypatch, n):
+        monkeypatch.setattr(
+            lib.io,
+            "load_user_settings",
+            lambda: {"Render": {"cpu_utilization": 0.9, "max_workers": n}},
+        )
+
+    def _scene_kwargs(self, rotated, blur="gaussian"):
+        return dict(
             disp_px_size=PIXELSIZE / 10,
-            colors=[(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)],
+            colors=self.CHANNEL_COLORS,
             viewport=FULL_VIEWPORT,
-            blur_method="gaussian",
+            blur_method=blur,
             min_blur_width=0.0,
             ang=PURITY_ANG if rotated else None,
             contrast=(0.0, 5.0),
         )
-        monkeypatch.setattr(render, "_n_channel_workers", lambda n: 1)
+
+    @pytest.mark.parametrize("blur", ["gaussian", "smooth"])
+    @pytest.mark.parametrize("rotated", [False, True])
+    def test_parallel_matches_sequential(
+        self, locs, locs_3d, info, monkeypatch, rotated, blur
+    ):
+        # tiny chunk floor so the small fixture actually chunks
+        monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 50)
+        source = locs_3d if rotated else locs
+        channels = [source.iloc[i::3] for i in range(3)]
+        kwargs = self._scene_kwargs(rotated, blur)
+        self._force_budget(monkeypatch, 1)
         n_seq, rgb_seq, _, raw_seq = render._render_multi_channel(
             channels, [info] * 3, **kwargs
         )
-        monkeypatch.setattr(render, "_n_channel_workers", lambda n: 3)
+        self._force_budget(monkeypatch, 3)
         n_par, rgb_par, _, raw_par = render._render_multi_channel(
             channels, [info] * 3, **kwargs
         )
         assert n_seq == n_par
-        np.testing.assert_array_equal(raw_seq, raw_par)
-        np.testing.assert_array_equal(rgb_seq, rgb_par)
+        # chunk summing reorders float additions: equal to tolerance,
+        # not bit-exact
+        np.testing.assert_allclose(raw_par, raw_seq, rtol=1e-5, atol=1e-6)
+        diff = np.abs(rgb_par.astype(np.int16) - rgb_seq.astype(np.int16))
+        assert diff.max() <= 1
 
-    def test_single_channel_never_reads_settings(self, monkeypatch):
+    def test_parallel_is_deterministic(self, locs, info, monkeypatch):
+        monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 50)
+        self._force_budget(monkeypatch, 3)
+        channels = [locs.iloc[i::3] for i in range(3)]
+
+        def run():
+            return render._render_multi_channel(
+                channels, [info] * 3, **self._scene_kwargs(rotated=False)
+            )
+
+        _, rgb1, _, raw1 = run()
+        _, rgb2, _, raw2 = run()
+        np.testing.assert_array_equal(raw1, raw2)
+        np.testing.assert_array_equal(rgb1, rgb2)
+
+    def test_small_single_channel_never_reads_settings(
+        self, locs, info, monkeypatch
+    ):
         def _boom():
             raise AssertionError("settings must not be read")
 
         monkeypatch.setattr(lib.io, "load_user_settings", _boom)
-        assert render._n_channel_workers(1) == 1
+        ((n, image),) = render._render_channels(
+            [locs],
+            [info],
+            disp_px_size=PIXELSIZE / 10,
+            viewport=FULL_VIEWPORT,
+            blur_method="gaussian",
+            min_blur_width=0.0,
+            ang=None,
+        )
+        assert n > 0
+
+    def test_convolve_never_chunks_but_gaussian_does(
+        self, locs, info, monkeypatch
+    ):
+        monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 10)
+        self._force_budget(monkeypatch, 4)
+        calls = []
+        original = render.render
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(render, "render", counting)
+        channels = [locs.iloc[i::2] for i in range(2)]
+        common = dict(
+            disp_px_size=PIXELSIZE / 10,
+            viewport=FULL_VIEWPORT,
+            min_blur_width=0.0,
+            ang=None,
+        )
+        render._render_channels(
+            channels, [info] * 2, blur_method="convolve", **common
+        )
+        assert len(calls) == 2  # one render per channel, no chunking
+        calls.clear()
+        render._render_channels(
+            channels, [info] * 2, blur_method="gaussian", **common
+        )
+        assert len(calls) > 2  # per-loc blur chunks
 
     def test_worker_budget_caps(self, monkeypatch):
-        monkeypatch.setattr(
-            lib.io,
-            "load_user_settings",
-            lambda: {"Render": {"cpu_utilization": 0.9, "max_workers": 2}},
-        )
-        assert render._n_channel_workers(8) == 2
+        self._force_budget(monkeypatch, 2)
+        assert render._render_worker_budget() == 2
 
-    def test_bounded_by_channel_count(self, monkeypatch):
-        monkeypatch.setattr(
-            lib.io,
-            "load_user_settings",
-            lambda: {"Render": {"cpu_utilization": 0.9, "max_workers": 61}},
+    def test_chunk_tasks_plan(self):
+        sizes = [1_000_000, 100_000]
+        tasks = render._chunk_tasks(sizes, budget=4)
+        by_channel = {}
+        for i, start, stop in tasks:
+            by_channel.setdefault(i, []).append((start, stop))
+        # the big channel splits, the small one stays whole
+        assert len(by_channel[0]) > 1
+        assert by_channel[1] == [(0, 100_000)]
+        # the chunks of each channel tile it exactly, in row order
+        for i, n in enumerate(sizes):
+            spans = by_channel[i]
+            assert spans[0][0] == 0 and spans[-1][1] == n
+            for (_, stop), (start, _) in zip(spans, spans[1:]):
+                assert stop == start
+        # every *split* chunk respects the minimum size; only a whole
+        # small channel may fall below it
+        assert all(
+            stop - start >= render._MIN_CHUNK_LOCS
+            or (start, stop) == (0, sizes[i])
+            for i, start, stop in tasks
         )
-        assert render._n_channel_workers(2) <= 2

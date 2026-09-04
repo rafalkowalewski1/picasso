@@ -3286,31 +3286,66 @@ def render_scene(
         return qimage, n_locs
 
 
-def _n_channel_workers(n_channels: int) -> int:
-    """Number of worker threads for rendering ``n_channels`` channels.
+#: Blur methods whose channels may be split into row chunks rendered
+#: separately and summed ("pseudo-channels"). Per-localization methods
+#: (hist, gaussian, gaussian_iso) are additive by construction. 'smooth'
+#: is exact as well: its one-pixel blur kernel is identical for every
+#: chunk and convolution is linear; the extra per-chunk image filters
+#: are cheap next to the per-loc fill, and ``_MIN_CHUNK_LOCS`` keeps the
+#: few-locs/big-image regime whole. 'convolve' must not be chunked: its
+#: blur width is the median precision of the rendered locs, and chunk
+#: medians differ from the global median.
+_CHUNKABLE_BLUR_METHODS = (None, "gaussian", "gaussian_iso", "smooth")
 
-    Bounded by the user's render CPU budget (the ``Render`` section of
-    the user settings file, see ``lib.n_workers``). A single channel
-    never reads the settings and always renders on the calling thread.
+#: Minimum rows per chunk: below this, per-task overhead (image
+#: allocation and summing, ~1 ms) stops being negligible against the
+#: fill work it parallelizes. Found empirically on real data.
+_MIN_CHUNK_LOCS = 100_000
+
+
+def _render_worker_budget() -> int:
+    """Number of worker threads the render pool may use, from the
+    ``Render`` section of the user settings file (see
+    ``lib.n_workers``)."""
+    return lib.n_workers(
+        lib.RENDER_CPU_UTILIZATION_DEFAULT, settings_section="Render"
+    )
+
+
+def _chunk_tasks(
+    n_locs_per_channel: list[int], budget: int
+) -> list[tuple[int, int, int]]:
+    """Split channels into ``(channel, start, stop)`` row-chunk tasks.
+
+    Aims for about two tasks per worker across the whole render so the
+    pool stays load-balanced regardless of channel-size skew, while
+    keeping every chunk at least ``_MIN_CHUNK_LOCS`` rows.
 
     Parameters
     ----------
-    n_channels : int
-        Number of channels to be rendered.
+    n_locs_per_channel : list of int
+        Number of localizations per channel.
+    budget : int
+        Worker threads available to the render pool.
 
     Returns
     -------
-    n : int
-        Number of worker threads, at least 1.
+    tasks : list of (int, int, int)
+        ``(channel index, start row, stop row)`` per task; the chunks of
+        each channel tile it exactly, in ascending row order.
     """
-    if n_channels <= 1:
-        return 1
-    return min(
-        n_channels,
-        lib.n_workers(
-            lib.RENDER_CPU_UTILIZATION_DEFAULT, settings_section="Render"
-        ),
-    )
+    total = sum(n_locs_per_channel)
+    target = max(_MIN_CHUNK_LOCS, -(-total // (2 * budget)))
+    tasks = []
+    for i, n in enumerate(n_locs_per_channel):
+        k = min(
+            max(1, n // _MIN_CHUNK_LOCS),
+            max(1, -(-n // target)),
+        )
+        bounds = np.linspace(0, n, k + 1).round().astype(np.int64)
+        for start, stop in zip(bounds[:-1], bounds[1:]):
+            tasks.append((i, int(start), int(stop)))
+    return tasks
 
 
 def _render_channels(
@@ -3325,15 +3360,22 @@ def _render_channels(
     min_blur_width: float,
     ang: tuple | Rotation | None,
 ) -> list[tuple[int, lib.FloatArray2D]]:
-    """Render each channel's raw grayscale image, in parallel across
-    channels when the render CPU budget allows.
+    """Render each channel's raw grayscale image, in parallel within the
+    render CPU budget.
 
-    Channels are dispatched largest-first so the biggest channel never
-    serializes the tail of the pool; results keep input order. Threads
-    give real parallelism because the fill kernels release the GIL
-    (``nogil=True``) and never mutate their inputs, so channels share
-    nothing writable. The pool only lives for the duration of one
-    render, keeping Picasso polite on shared workstations.
+    For per-localization blur methods (``_CHUNKABLE_BLUR_METHODS``),
+    channels are additionally split into row chunks rendered as
+    independent tasks whose images are summed per channel — splatting is
+    additive, so any row partition yields the same image up to float
+    summation order. One flat task pool covers all channels and chunks,
+    so the load stays balanced regardless of channel-size skew and a
+    single large channel also renders in parallel. Chunk images are
+    summed in fixed row order, making the result deterministic for a
+    given worker budget; with a budget of 1 the exact legacy sequential
+    path runs. Threads give real parallelism because the fill kernels
+    release the GIL (``nogil=True``) and never mutate their inputs. The
+    pool only lives for the duration of one render, keeping Picasso
+    polite on shared workstations.
 
     Parameters
     ----------
@@ -3350,9 +3392,12 @@ def _render_channels(
         ``render``'s ``(n, image)`` result per channel, in input order.
     """
 
-    def render_one(i: int) -> tuple[int, lib.FloatArray2D]:
+    def render_rows(i: int, start: int, stop: int):
+        chunk = locs[i]
+        if stop - start < len(chunk):
+            chunk = chunk.iloc[start:stop]
         return render(
-            locs=locs[i],
+            locs=chunk,
             info=info[i],
             disp_px_size=disp_px_size,
             viewport=viewport,
@@ -3361,15 +3406,51 @@ def _render_channels(
             ang=ang,
         )
 
-    n_workers = _n_channel_workers(len(locs))
+    n_channels = len(locs)
+    total = sum(len(channel) for channel in locs)
+    chunkable = blur_method in _CHUNKABLE_BLUR_METHODS
+    # a single channel too small to chunk renders on the calling thread
+    # without touching the settings file
+    if n_channels == 1 and (not chunkable or total < 2 * _MIN_CHUNK_LOCS):
+        return [render_rows(0, 0, total)]
+
+    budget = _render_worker_budget()
+    if chunkable and budget > 1:
+        tasks = _chunk_tasks([len(channel) for channel in locs], budget)
+    else:
+        tasks = [(i, 0, len(channel)) for i, channel in enumerate(locs)]
+    n_workers = min(len(tasks), budget)
+
     if n_workers == 1:
-        return [render_one(i) for i in range(len(locs))]
-    order = sorted(range(len(locs)), key=lambda i: len(locs[i]), reverse=True)
-    with futures.ThreadPoolExecutor(n_workers) as executor:
-        largest_first = list(executor.map(render_one, order))
-    renderings = [None] * len(locs)
-    for i, rendering in zip(order, largest_first):
-        renderings[i] = rendering
+        chunk_results = [render_rows(*task) for task in tasks]
+    else:
+        # dispatch biggest tasks first so none serializes the tail of
+        # the pool; results are mapped back to task order
+        order = sorted(
+            range(len(tasks)),
+            key=lambda j: tasks[j][2] - tasks[j][1],
+            reverse=True,
+        )
+        chunk_results = [None] * len(tasks)
+        with futures.ThreadPoolExecutor(n_workers) as executor:
+            for j, result in zip(
+                order,
+                executor.map(lambda j: render_rows(*tasks[j]), order),
+            ):
+                chunk_results[j] = result
+
+    # sum each channel's chunk images in fixed row order, so a given
+    # worker budget always produces the same float rounding
+    per_channel = [[] for _ in range(n_channels)]
+    for (i, _, _), result in zip(tasks, chunk_results):
+        per_channel[i].append(result)
+    renderings = []
+    for results in per_channel:
+        n = sum(result[0] for result in results)
+        image = results[0][1]
+        for _, other in results[1:]:
+            image += other
+        renderings.append((n, image))
     return renderings
 
 
@@ -3484,9 +3565,11 @@ def _render_single_channel(
         raw_image = raw_image_cache
         n_locs = 0
     else:
-        n_locs, raw_image = render(
-            locs=locs,
-            info=info,
+        # route through the channel/chunk scheduler so a large single
+        # channel also renders in parallel within the CPU budget
+        ((n_locs, raw_image),) = _render_channels(
+            [locs],
+            [info],
             disp_px_size=disp_px_size,
             viewport=viewport,
             blur_method=blur_method,
