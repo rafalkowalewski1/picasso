@@ -15,6 +15,7 @@ import os
 import sys
 import copy
 import time
+import threading
 import os.path
 from math import ceil
 from collections import Counter
@@ -7549,6 +7550,64 @@ class LocsLoadWorker(QtCore.QObject):
         self.finished.emit()
 
 
+#: default target loc count for interactive preview renders (the
+#: ``interaction_subsample`` key in ``settings["Render"]`` overrides it)
+INTERACTION_SUBSAMPLE_AUTO = 500_000
+
+
+class RenderWorker(QtCore.QObject):
+    """Render scenes off the GUI thread, latest request wins.
+
+    ``submit`` (called from the GUI thread) replaces any not-yet-started
+    request, so a burst of pan/zoom events collapses into rendering the
+    newest state; a render already in flight completes and its result is
+    discarded by the receiver when superseded (checked by request id).
+    The heavy work runs with the GIL released (the render kernels are
+    ``nogil``), so the GUI stays responsive throughout.
+
+    Attributes
+    ----------
+    finished : QtCore.pyqtSignal
+        Emitted with ``(request_id, qimage, n_locs, contrast_limits,
+        raw_image)`` when a render completes.
+    """
+
+    finished = QtCore.pyqtSignal(int, object, object, int, object, object)
+    _poke = QtCore.pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._pending = None
+        # auto connection: queued once this object lives on its thread
+        self._poke.connect(self._process)
+
+    def submit(
+        self, request_id: int, scene_kwargs: dict, viewport: tuple
+    ) -> None:
+        """Queue a render request, replacing any pending one (thread
+        safe; called from the GUI thread). ``viewport`` is echoed back
+        with the result so superseded frames can still be positioned."""
+        with self._lock:
+            self._pending = (request_id, scene_kwargs, viewport)
+        self._poke.emit()
+
+    @QtCore.pyqtSlot()
+    def _process(self) -> None:
+        with self._lock:
+            pending = self._pending
+            self._pending = None
+        if pending is None:  # already handled by an earlier poke
+            return
+        request_id, scene_kwargs, viewport = pending
+        qimage, n_locs, contrast_limits, raw_image = render.render_scene(
+            **scene_kwargs
+        )
+        self.finished.emit(
+            request_id, viewport, qimage, n_locs, contrast_limits, raw_image
+        )
+
+
 class View(QtWidgets.QLabel):
     """Display localization datasets. Render localizations and draw
     objects on top, such as scale bar, legend, etc.
@@ -7664,6 +7723,10 @@ class View(QtWidgets.QLabel):
         Indicates if rendering by property is used.
     """
 
+    #: full renders run on a worker thread (see ``RenderWorker``); the
+    #: synchronous-rendering tests disable this class-wide
+    async_rendering = True
+
     def __init__(self, window: QtWidgets.QMainWindow) -> None:
         super().__init__()
         self.setAcceptDrops(True)
@@ -7712,6 +7775,28 @@ class View(QtWidgets.QLabel):
         self._load_callback = None
         self._load_fit_in_view = True
         self._load_index = 0  # file currently being read
+        # asynchronous rendering (see ``RenderWorker``): completed
+        # renders are matched against the newest request id, so stale
+        # results from superseded requests are dropped
+        self._render_request_id = 0
+        self._render_worker = RenderWorker()
+        # deliberately unparented: a parented QThread would be destroyed
+        # by Qt while still running whenever the View is torn down
+        # outside closeEvent (e.g. "Remove all localizations" rebuilds
+        # the view), which is a hard abort. The Python reference owns
+        # it; stop_render_worker() ends it.
+        self._render_thread = QtCore.QThread()
+        self._render_worker.moveToThread(self._render_thread)
+        self._render_worker.finished.connect(self._on_render_finished)
+        self._render_thread.start()
+        # interactive previews (live pan/zoom) render a subsample; the
+        # refine timer follows up with a full-quality render on idle
+        self._displayed_viewport = None  # viewport of the shown frame
+        self._current_request_interactive = False
+        self._refine_timer = QtCore.QTimer(self)
+        self._refine_timer.setSingleShot(True)
+        self._refine_timer.setInterval(150)
+        self._refine_timer.timeout.connect(self._refine_render)
 
     def _load_drift(self, info: list[dict]) -> pd.DataFrame | None:
         drift = None
@@ -9357,6 +9442,7 @@ class View(QtWidgets.QLabel):
         autoscale: bool = False,
         use_cache: bool = False,
         picks_only: bool = False,
+        interactive: bool = False,
     ) -> None:
         """Render localizations in the given viewport and draws picks,
         legend, etc.
@@ -9381,24 +9467,95 @@ class View(QtWidgets.QLabel):
             self.viewport = self.adjust_viewport_to_view(viewport)
             if not use_cache:
                 self.set_optimal_scalebar(silent=True)
-            # render locs
-            qimage = self.render_scene(
-                autoscale=autoscale, use_cache=use_cache
-            )
-            # scale image's size to the window
-            qimage = qimage.scaled(
-                self.width(),
-                self.height(),
-                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            )
-            # draw scalebar, minimap and legend
-            self.qimage_no_picks = self.draw_scalebar(qimage)
-            self.qimage_no_picks = self.draw_minimap(self.qimage_no_picks)
-            self.qimage_no_picks = self.draw_legend(self.qimage_no_picks)
-            # adjust zoom in Display Settings Dialog
-            dppvp = self.display_pixels_per_viewport_pixels()
-            self.window.display_settings_dlg.set_zoom_silently(dppvp)
-        # draw picks and points
+            if use_cache or not self.async_rendering:
+                # cache redraws (contrast/colormap tweaks) are ~40 ms
+                # since the fused post-processing and stay synchronous
+                # for instant feedback
+                qimage = self.render_scene(
+                    autoscale=autoscale, use_cache=use_cache
+                )
+                self._complete_scene(qimage)
+            else:
+                # full renders run on the worker thread; meanwhile the
+                # last frame is blitted to its position in the new
+                # viewport, so pans and zooms track the mouse instantly
+                self._show_viewport_preview()
+                self._submit_async_render(
+                    autoscale=autoscale, interactive=interactive
+                )
+        else:
+            self._draw_picks_and_show()
+
+    def _viewport_key(self) -> tuple:
+        """The current viewport as a hashable, comparable tuple."""
+        return (
+            (self.viewport[0][0], self.viewport[0][1]),
+            (self.viewport[1][0], self.viewport[1][1]),
+        )
+
+    def _show_viewport_preview(self) -> None:
+        """Instant geometric feedback while the worker renders: draw the
+        last rendered frame shifted/scaled to where it belongs in the
+        new viewport. Stale but correctly positioned pixels beat a
+        frozen frame; regions without content keep the background color
+        until the render arrives."""
+        source = getattr(self, "qimage_no_picks", None)
+        old = self._displayed_viewport
+        if source is None or old is None:
+            return
+        if old == self._viewport_key():
+            # same viewport: nothing to reposition, just refresh
+            self._draw_picks_and_show()
+            return
+        (o_y_min, o_x_min), (o_y_max, o_x_max) = old
+        (n_y_min, n_x_min), (n_y_max, n_x_max) = self.viewport
+        new_width = n_x_max - n_x_min
+        new_height = n_y_max - n_y_min
+        if new_width <= 0 or new_height <= 0:
+            return
+        target = QtGui.QImage(source.size(), source.format())
+        if self.window.dataset_dialog.wbackground.isChecked():
+            target.fill(QtGui.QColor(255, 255, 255))
+        else:
+            target.fill(QtGui.QColor(0, 0, 0))
+        px_per_cam_x = source.width() / new_width
+        px_per_cam_y = source.height() / new_height
+        dest = QtCore.QRectF(
+            (o_x_min - n_x_min) * px_per_cam_x,
+            (o_y_min - n_y_min) * px_per_cam_y,
+            (o_x_max - o_x_min) * px_per_cam_x,
+            (o_y_max - o_y_min) * px_per_cam_y,
+        )
+        painter = QtGui.QPainter(target)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawImage(dest, source)
+        painter.end()
+        self.qimage_no_picks = target
+        self._displayed_viewport = self._viewport_key()
+        self._draw_picks_and_show()
+
+    def _complete_scene(self, qimage: QtGui.QImage) -> None:
+        """Second half of ``draw_scene``: window scaling, overlays and
+        display. Runs on the GUI thread, either directly (synchronous
+        renders) or from ``_on_render_finished``."""
+        # scale image's size to the window
+        qimage = qimage.scaled(
+            self.width(),
+            self.height(),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        )
+        # draw scalebar, minimap and legend
+        self.qimage_no_picks = self.draw_scalebar(qimage)
+        self.qimage_no_picks = self.draw_minimap(self.qimage_no_picks)
+        self.qimage_no_picks = self.draw_legend(self.qimage_no_picks)
+        # adjust zoom in Display Settings Dialog
+        dppvp = self.display_pixels_per_viewport_pixels()
+        self.window.display_settings_dlg.set_zoom_silently(dppvp)
+        self._displayed_viewport = self._viewport_key()
+        self._draw_picks_and_show()
+
+    def _draw_picks_and_show(self) -> None:
+        """Draw picks and points over the rendered image and display."""
         self.qimage = self.draw_picks(self.qimage_no_picks)
         self.qimage = self.draw_points(self.qimage)
         if self._rectangle_pick_ongoing:
@@ -9412,6 +9569,156 @@ class View(QtWidgets.QLabel):
         self.pixmap = QtGui.QPixmap.fromImage(self.qimage)
         self.setPixmap(self.pixmap)
         self.window.update_info()
+
+    def _build_render_request(self, autoscale: bool = False) -> dict:
+        """Snapshot everything ``render.render_scene`` needs, on the GUI
+        thread (dialog reads and locs preparation are not thread safe).
+        Mirrors ``render_scene``'s no-cache path."""
+        kwargs = self.get_render_kwargs()
+        locs, infos = self._prepare_locs_for_rendering(
+            viewport=kwargs["viewport"]
+        )
+        cmap = self.window.display_settings_dlg.colormap.currentText()
+        if cmap == "Custom":
+            cmap = np.uint8(np.round(255 * self.custom_cmap))
+        vmin = self.window.display_settings_dlg.minimum.value()
+        vmax = self.window.display_settings_dlg.maximum.value()
+        contrast = None if autoscale else (vmin, vmax)
+        return dict(
+            locs=locs,
+            info=infos,
+            **kwargs,
+            contrast=contrast,
+            invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
+            background_color=self.window.dataset_dialog.background_color,
+            single_channel_colormap=cmap,
+            colors=self.read_colors(),
+            relative_intensities=self.read_relative_intensities(),
+            return_contrast_limits=True,
+            return_raw_image=True,
+        )
+
+    def _interaction_subsample_target(self) -> int:
+        """Target loc count for interactive preview renders, from
+        ``settings["Render"]["interaction_subsample"]`` (read per
+        gesture, so edits apply live): missing or invalid means
+        ``INTERACTION_SUBSAMPLE_AUTO``; a non-negative int sets the
+        target; 0 or ``"off"`` disables subsampling."""
+        try:
+            value = io.load_user_settings()["Render"]["interaction_subsample"]
+        except Exception:
+            value = None
+        if isinstance(value, bool):
+            return INTERACTION_SUBSAMPLE_AUTO
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, str) and value.strip().lower() == "off":
+            return 0
+        return INTERACTION_SUBSAMPLE_AUTO
+
+    def _subsample_request(self, request: dict) -> bool:
+        """Reduce a render request to a strided subsample for an
+        interactive preview. Contrast limits are scaled by the sampled
+        fraction so the preview keeps the full render's brightness.
+        Returns False when subsampling is disabled or not needed."""
+        target = self._interaction_subsample_target()
+        if target <= 0:
+            return False
+        locs = request["locs"]
+        single = isinstance(locs, pd.DataFrame)
+        channels = [locs] if single else locs
+        total = sum(len(channel) for channel in channels)
+        if total <= target:
+            return False
+        step = ceil(total / target)
+        sampled = [channel.iloc[::step] for channel in channels]
+        fraction = sum(len(channel) for channel in sampled) / total
+        request["locs"] = sampled[0] if single else sampled
+        if request["contrast"] is not None:
+            vmin, vmax = request["contrast"]
+            request["contrast"] = (vmin * fraction, vmax * fraction)
+        return True
+
+    def _submit_async_render(
+        self, autoscale: bool = False, interactive: bool = False
+    ) -> None:
+        """Post the newest render request to the worker (latest wins).
+
+        Interactive requests (live pan/zoom) render a strided subsample
+        with compensated contrast and arm the refine timer, which
+        follows up with a full-quality render once the gesture pauses.
+        """
+        request = self._build_render_request(autoscale)
+        if interactive:
+            interactive = self._subsample_request(request)
+        self._render_request_id += 1
+        self._current_request_interactive = interactive
+        self._render_worker.submit(
+            self._render_request_id, request, self._viewport_key()
+        )
+        if interactive:
+            self._refine_timer.start()
+        else:
+            self._refine_timer.stop()
+
+    def _refine_render(self) -> None:
+        """Follow the last interactive preview with a full render."""
+        if len(self.locs) and self.async_rendering:
+            self._submit_async_render()
+
+    def _on_render_finished(
+        self,
+        request_id: int,
+        viewport: tuple,
+        qimage: QtGui.QImage,
+        n_locs: int,
+        contrast_limits: tuple[float, float],
+        raw_image: np.ndarray,
+    ) -> None:
+        """Apply a completed worker render on the GUI thread.
+
+        The newest request's result is applied fully. A superseded
+        (stale) result is still fresher than whatever is on screen, so
+        rather than dropping it, it becomes the new blit source and is
+        repositioned for the current viewport — during a continuous
+        drag this keeps previews streaming in even though each lands
+        slightly outdated. Stale results never touch the raw-image
+        cache or the contrast spinboxes.
+        """
+        if request_id != self._render_request_id:
+            qimage = qimage.scaled(
+                self.width(),
+                self.height(),
+                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            )
+            qimage = self.draw_scalebar(qimage)
+            qimage = self.draw_minimap(qimage)
+            self.qimage_no_picks = self.draw_legend(qimage)
+            self._displayed_viewport = (
+                (viewport[0][0], viewport[0][1]),
+                (viewport[1][0], viewport[1][1]),
+            )
+            self._show_viewport_preview()
+            return
+        if not self._current_request_interactive:
+            # previews must not poison the raw-image cache (a subsampled
+            # cache would corrupt later contrast redraws) nor write
+            # their compensated limits into the contrast spinboxes
+            self.n_locs = n_locs
+            self.image = raw_image
+            vmin, vmax = contrast_limits
+            self.window.display_settings_dlg.silent_minimum_update(vmin)
+            self.window.display_settings_dlg.silent_maximum_update(vmax)
+        self._complete_scene(qimage)
+
+    def stop_render_worker(self) -> None:
+        """Stop the render worker thread. A render in flight is allowed
+        to finish first — destroying a live QThread aborts the
+        process."""
+        if self._render_thread is not None:
+            self._render_thread.quit()
+            self._render_thread.wait()
+            self._render_thread = None
 
     def draw_scene_slicer(
         self,
@@ -10334,7 +10641,8 @@ class View(QtWidgets.QLabel):
         x_move = dx * viewport_width
         y_move = dy * viewport_height
         viewport = render.shift_viewport(self.viewport, -x_move, -y_move)
-        self.update_scene(viewport)
+        # a gesture that may repeat rapidly: preview now, refine on idle
+        self.update_scene(viewport, interactive=True)
 
     @check_pick
     def show_trace(self) -> None:
@@ -12934,6 +13242,7 @@ class View(QtWidgets.QLabel):
         use_cache: bool = False,
         picks_only: bool = False,
         resample_locs: bool = False,
+        interactive: bool = False,
     ) -> None:
         """Update the view of rendered localizations as well as cursor.
 
@@ -12969,6 +13278,7 @@ class View(QtWidgets.QLabel):
                 autoscale=autoscale,
                 use_cache=use_cache,
                 picks_only=picks_only,
+                interactive=interactive,
             )
             self.update_cursor()
 
@@ -13027,7 +13337,8 @@ class View(QtWidgets.QLabel):
         new_viewport = render.zoom_viewport(
             self.viewport, factor, cursor_position
         )
-        self.update_scene(new_viewport)
+        # wheel ticks repeat rapidly: preview now, refine on idle
+        self.update_scene(new_viewport, interactive=True)
 
     def zoom_in(self) -> None:
         """Zoom in by a constant factor."""
@@ -13556,6 +13867,7 @@ class Window(QtWidgets.QMainWindow):
         """Update user settings and close all dialogs."""
         # destroying a running QThread aborts the process
         self.view.stop_load()
+        self.view.stop_render_worker()
         settings = io.load_user_settings()
         current_colormap = self.display_settings_dlg.colormap.currentText()
         if current_colormap == "Custom":
@@ -14627,6 +14939,9 @@ class Window(QtWidgets.QMainWindow):
     def remove_locs(self) -> None:
         """Remove all localizations and reset the window to its initial
         state by rebuilding the view, dialogs and menu bar."""
+        # the rebuilt UI replaces the view; its worker thread must stop
+        # first, or its eventual destruction aborts the process
+        self.view.stop_render_worker()
         for dialog in self.dialogs:
             dialog.close()
         self.initUI(plugins_loaded=True)

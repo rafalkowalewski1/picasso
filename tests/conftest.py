@@ -19,6 +19,7 @@ Provides:
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -708,3 +709,15 @@ def dark_movie_factory():
         return frames.astype(dtype)
 
     return camera_output
+
+
+@pytest.fixture(autouse=True)
+def synchronous_gui_rendering(monkeypatch):
+    """GUI tests assert on images immediately after ``update_scene``,
+    so the async render worker is disabled by default whenever the
+    render GUI module is loaded; async-specific tests re-enable it
+    explicitly. Zero-cost for tests that never import the GUI."""
+    gui_render = sys.modules.get("picasso.gui.render")
+    if gui_render is not None:
+        monkeypatch.setattr(gui_render.View, "async_rendering", False)
+    yield
