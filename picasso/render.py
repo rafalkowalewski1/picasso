@@ -348,6 +348,9 @@ def _render_setup3d(
     n_pixel_y = int(np.ceil(oversampling * (y_max - y_min)))
     n_pixel_x = int(np.ceil(oversampling * (x_max - x_min)))
     n_pixel_z = int(np.ceil(oversampling * (z_max - z_min)))
+    # divide on a copy -- rendering must never mutate the caller's arrays
+    # (see TestRenderPurity in test_render.py)
+    z = z.copy()
     z /= pixelsize
     in_view = (
         (x > x_min)
@@ -428,6 +431,9 @@ def _render_setup3d_anisotropic(
     n_pixel_y = int(np.ceil(oversampling_y * (y_max - y_min)))
     n_pixel_x = int(np.ceil(oversampling_x * (x_max - x_min)))
     n_pixel_z = int(np.ceil(oversampling_z * (z_max - z_min)))
+    # divide on a copy -- rendering must never mutate the caller's arrays
+    # (see TestRenderPurity in test_render.py)
+    z = z.copy()
     z /= pixelsize
     in_view = (
         (x > x_min)
@@ -1101,7 +1107,6 @@ def render_hist3d(
     )
     _fill3d(image, x, y, z)
     n = len(x)
-    z *= pixelsize  # convert back to nm
     return n, image
 
 
@@ -1174,7 +1179,6 @@ def render_hist3d_anisotropic(
     )
     _fill3d(image, x, y, z)
     n = len(x)
-    z *= pixelsize  # convert back to nm
     return n, image
 
 

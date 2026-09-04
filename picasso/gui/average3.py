@@ -804,9 +804,7 @@ class Window(QtWidgets.QMainWindow):
                     render.render_hist3d(
                         locs[i]["x"].to_numpy(),
                         locs[i]["y"].to_numpy(),
-                        locs[i]["z"]
-                        .to_numpy()
-                        .copy(),  # do not remove the copy!
+                        locs[i]["z"].to_numpy(),
                         oversampling,
                         self.t_min,
                         self.t_min,
@@ -886,7 +884,7 @@ class Window(QtWidgets.QMainWindow):
             render.render_hist3d(
                 _["x"].to_numpy(),
                 _["y"].to_numpy(),
-                _["z"].to_numpy().copy(),  # do not remove the copy!
+                _["z"].to_numpy(),
                 self.oversampling,
                 self.t_min,
                 self.t_min,
@@ -1166,7 +1164,7 @@ class Window(QtWidgets.QMainWindow):
             render.render_hist3d(
                 _["x"].to_numpy(),
                 _["y"].to_numpy(),
-                _["z"].to_numpy().copy(),  # do not remove the copy!
+                _["z"].to_numpy(),
                 self.oversampling,
                 self.t_min,
                 self.t_min,
@@ -1305,7 +1303,7 @@ class Window(QtWidgets.QMainWindow):
             render.render_hist3d(
                 _["x"].to_numpy(),
                 _["y"].to_numpy(),
-                _["z"].to_numpy().copy(),  # do not remove the copy!
+                _["z"].to_numpy(),
                 self.oversampling,
                 self.t_min,
                 self.t_min,
@@ -1521,7 +1519,7 @@ class Window(QtWidgets.QMainWindow):
             render.render_hist3d(
                 _["x"].to_numpy(),
                 _["y"].to_numpy(),
-                _["z"].to_numpy().copy(),  # do not remove the copy!
+                _["z"].to_numpy(),
                 self.oversampling,
                 self.t_min,
                 self.t_min,

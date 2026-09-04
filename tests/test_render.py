@@ -1945,3 +1945,89 @@ class TestMasking:
         # both partitions only contain valid loc indices
         all_idx = set(locs_in.index) | set(locs_out.index)
         assert all_idx == set(locs.index)
+
+
+# ---------------------------------------------------------------------------
+# Rendering purity: inputs are never mutated, repeat calls are identical
+# ---------------------------------------------------------------------------
+
+
+PURITY_ANG = (0.35, -0.6, 0.8)
+
+
+def _column_snapshot(df):
+    return {name: df[name].to_numpy().copy() for name in df.columns}
+
+
+def _assert_columns_unchanged(df, snapshot):
+    for name, before in snapshot.items():
+        np.testing.assert_array_equal(
+            df[name].to_numpy(),
+            before,
+            err_msg=f"rendering mutated input column {name!r}",
+        )
+
+
+class TestRenderPurity:
+    """Rendering must never mutate its inputs, so calling it twice with
+    the same data gives bit-identical images.
+
+    Before the in-place ``z /= pixelsize`` was removed from
+    ``_render_setup3d(_anisotropic)``, this held for the 3D histogram
+    renderers only if every caller defensively copied its z array.
+    """
+
+    @pytest.mark.parametrize("blur_method", [None] + BLUR_METHODS)
+    def test_render_2d(self, locs, info, blur_method):
+        snapshot = _column_snapshot(locs)
+        kwargs = dict(
+            disp_px_size=PIXELSIZE / 10,
+            viewport=FULL_VIEWPORT,
+            blur_method=blur_method,
+        )
+        n1, image1 = render.render(locs, info, **kwargs)
+        n2, image2 = render.render(locs, info, **kwargs)
+        _assert_columns_unchanged(locs, snapshot)
+        assert n1 == n2
+        np.testing.assert_array_equal(image1, image2)
+
+    @pytest.mark.parametrize("blur_method", [None] + BLUR_METHODS)
+    def test_render_rotated(self, locs_3d, info, blur_method):
+        snapshot = _column_snapshot(locs_3d)
+        kwargs = dict(
+            disp_px_size=PIXELSIZE / 10,
+            viewport=FULL_VIEWPORT,
+            blur_method=blur_method,
+            ang=PURITY_ANG,
+        )
+        n1, image1 = render.render(locs_3d, info, **kwargs)
+        n2, image2 = render.render(locs_3d, info, **kwargs)
+        _assert_columns_unchanged(locs_3d, snapshot)
+        assert n1 == n2
+        np.testing.assert_array_equal(image1, image2)
+
+    def test_render_hist3d(self, locs_3d):
+        x = locs_3d["x"].to_numpy()
+        y = locs_3d["y"].to_numpy()
+        z = locs_3d["z"].to_numpy()
+        before = (x.copy(), y.copy(), z.copy())
+        args = (10, 0, 0, 32, 32, -100.0, 100.0, PIXELSIZE)
+        n1, image1 = render.render_hist3d(x, y, z, *args)
+        n2, image2 = render.render_hist3d(x, y, z, *args)
+        for arr, orig in zip((x, y, z), before):
+            np.testing.assert_array_equal(arr, orig)
+        assert n1 == n2
+        np.testing.assert_array_equal(image1, image2)
+
+    def test_render_hist3d_anisotropic(self, locs_3d):
+        x = locs_3d["x"].to_numpy()
+        y = locs_3d["y"].to_numpy()
+        z = locs_3d["z"].to_numpy()
+        before = (x.copy(), y.copy(), z.copy())
+        args = (10, 10, 5, 0, 0, 32, 32, -100.0, 100.0, PIXELSIZE)
+        n1, image1 = render.render_hist3d_anisotropic(x, y, z, *args)
+        n2, image2 = render.render_hist3d_anisotropic(x, y, z, *args)
+        for arr, orig in zip((x, y, z), before):
+            np.testing.assert_array_equal(arr, orig)
+        assert n1 == n2
+        np.testing.assert_array_equal(image1, image2)

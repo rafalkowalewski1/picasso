@@ -1138,7 +1138,7 @@ class MaskGenerator:
             _, image = render.render_hist3d_anisotropic(
                 self.locs["x"].to_numpy(),
                 self.locs["y"].to_numpy(),
-                self.locs["z"].to_numpy().copy(),  # do not remove the copy!
+                self.locs["z"].to_numpy(),
                 oversampling[0],
                 oversampling[1],
                 oversampling[2],
