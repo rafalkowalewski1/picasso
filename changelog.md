@@ -2,6 +2,9 @@
 
 Last change: 04-SEP-2026 CEST
 
+## 0.12.0
+- Fast rendering
+
 ## 0.11.1
 
 ### General
