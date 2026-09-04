@@ -1,0 +1,129 @@
+"""
+picasso.render
+~~~~~~~~~~~~~~
+
+Render single molecule localizations to a super-resolution image.
+
+Provides functions for painting onto rendered images (QImage), such as
+scale bar and picks.
+
+This package splits the former single-module implementation into
+``kernels`` (numba CPU kernels), ``geometry`` (viewport and rotation
+math), ``splat`` (raw splat stage), ``overlays_qt`` (Qt overlay drawing
+and export), ``scene`` (multi-channel composition) and ``animation``.
+``picasso.render`` re-exports the full former surface, so
+``render.<name>`` keeps working unchanged.
+
+:authors: Joerg Schnitzbauer, Rafal Kowalewski
+:copyright: Copyright (c) 2015-2026 Jungmann Lab, MPI of Biochemistry
+"""
+
+from .kernels import (
+    _DRAW_MAX_SIGMA,
+    _render_setup,
+    _render_setup_anisotropic,
+    _render_setup3d,
+    _render_setup3d_anisotropic,
+    _fill,
+    _fill3d,
+    _draw_gaussian_loc,
+    _fill_gaussian,
+    _draw_gaussian_theta_loc,
+    _fill_gaussian_theta,
+    _draw_gaussian_cov3d_loc,
+    _draw_gaussian_rot_loc,
+    _draw_gaussian_rot_theta_loc,
+    _fill_gaussian_rot,
+    _fill_gaussian_rot_theta,
+    inverse_3x3,
+    determinant_3x3,
+    render_hist_numba,
+    _compose_multi_lut,
+    _quantize_rgb,
+    _compose_single,
+)
+from .geometry import (
+    rotation_matrix,
+    to_rotation,
+    closest_rotvec,
+    viewport_height,
+    viewport_width,
+    viewport_size,
+    viewport_center,
+    shift_viewport,
+    zoom_viewport,
+    adjust_viewport_to_aspect_ratio,
+    adjust_viewport_decorator,
+    map_to_view,
+)
+from .splat import (
+    render,
+    _RenderColumns,
+    _extract_render_columns,
+    _render_arrays,
+    _render_hist,
+    _render_hist_arrays,
+    render_hist3d,
+    render_hist3d_anisotropic,
+    _render_gaussian,
+    _render_gaussian_iso,
+    _render_convolve,
+    _render_smooth,
+    _fftconvolve,
+    locs_rotation,
+    _locs_rotation_arrays,
+)
+from .overlays_qt import (
+    POLYGON_POINTER_SIZE,
+    BRUSH_FILL_ALPHA,
+    export_qimage_to_pdf,
+    export_qimage_to_svg,
+    get_rectangle_pick_polygon,
+    _draw_picks_circle,
+    _draw_picks_rectangle,
+    _draw_picks_polygon,
+    _draw_picks_square,
+    _draw_picks_box,
+    brush_pick_path,
+    _draw_picks_brush,
+    draw_picks,
+    draw_points,
+    draw_scalebar,
+    draw_legend,
+    draw_minimap,
+    draw_rotation,
+    draw_rotation_angles,
+    rgb_to_qimage,
+    optimal_scalebar_length,
+)
+from .scene import (
+    N_GROUP_COLORS,
+    solid_to_lut,
+    stops_to_lut,
+    get_colors_from_colormap,
+    get_group_color,
+    render_scene,
+    _CHUNKABLE_BLUR_METHODS,
+    _MIN_CHUNK_LOCS,
+    _render_worker_budget,
+    _chunk_tasks,
+    _render_channels,
+    _contrast_limits,
+    _resolve_cmap,
+    _render_multi_channel,
+    _render_single_channel,
+    scale_contrast,
+    scale_intensities,
+    to_8bit,
+    apply_colormap,
+    split_locs_by_property,
+    split_locs_by_group,
+)
+from .animation import (
+    _normalize_animation_positions,
+    _animation_sequence,
+    build_animation,
+    _build_animation,
+    _adjust_disp_px_size,
+    _adjust_contrast,
+)

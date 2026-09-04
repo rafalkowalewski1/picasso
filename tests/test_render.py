@@ -2068,7 +2068,7 @@ class TestParallelChannels:
         self, locs, locs_3d, info, monkeypatch, rotated, blur
     ):
         # tiny chunk floor so the small fixture actually chunks
-        monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 50)
+        monkeypatch.setattr(render.scene, "_MIN_CHUNK_LOCS", 50)
         source = locs_3d if rotated else locs
         channels = [source.iloc[i::3] for i in range(3)]
         kwargs = self._scene_kwargs(rotated, blur)
@@ -2088,7 +2088,7 @@ class TestParallelChannels:
         assert diff.max() <= 1
 
     def test_parallel_is_deterministic(self, locs, info, monkeypatch):
-        monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 50)
+        monkeypatch.setattr(render.scene, "_MIN_CHUNK_LOCS", 50)
         self._force_budget(monkeypatch, 3)
         channels = [locs.iloc[i::3] for i in range(3)]
 
@@ -2123,7 +2123,7 @@ class TestParallelChannels:
     def test_convolve_never_chunks_but_gaussian_does(
         self, locs, info, monkeypatch
     ):
-        monkeypatch.setattr(render, "_MIN_CHUNK_LOCS", 10)
+        monkeypatch.setattr(render.scene, "_MIN_CHUNK_LOCS", 10)
         self._force_budget(monkeypatch, 4)
         calls = []
         original = render._render_arrays
@@ -2132,7 +2132,8 @@ class TestParallelChannels:
             calls.append(1)
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(render, "_render_arrays", counting)
+        # patch where _render_channels looks the name up (scene's global)
+        monkeypatch.setattr(render.scene, "_render_arrays", counting)
         channels = [locs.iloc[i::2] for i in range(2)]
         common = dict(
             disp_px_size=PIXELSIZE / 10,
