@@ -118,8 +118,8 @@ struct Uniforms {
     bin_cap: u32,     // tile-tier bin entries (after the whale slots)
     px_cap: u32,      // pixel-tier sorted entries
     mode: u32,        // MODE_* bits
-    _pad0: u32,
-    _pad1: u32,
+    stride: u32,      // column index = offset + i * stride (strided
+    offset: u32,      // previews read the resident buffers directly)
     rot: mat3x3<f32>,     // 3D rotation (MODE_ROT)
     center: vec2<f32>,    // rotation center (camera px)
     _pad2: vec2<f32>,
@@ -139,13 +139,20 @@ _CHANNEL_WGSL = """
 @group(1) @binding(5) var<storage, read> lpzs: array<f32>;
 @group(1) @binding(6) var<storage, read> angles: array<f32>;
 
+// index into the column buffers: a request may be a strided view
+// (interactive preview) of the resident channel
+fn src(i: u32) -> u32 {
+    return u.offset + i * u.stride;
+}
+
 // camera-pixel position, rotated about the view center when MODE_ROT
 // (as _locs_rotation_arrays does, before the in-view mask)
 fn position(i: u32) -> vec2<f32> {
-    var x = xs[i];
-    var y = ys[i];
+    let k = src(i);
+    var x = xs[k];
+    var y = ys[k];
     if ((u.mode & MODE_ROT) != 0u) {
-        let p = u.rot * vec3<f32>(x - u.center.x, y - u.center.y, zs[i]);
+        let p = u.rot * vec3<f32>(x - u.center.x, y - u.center.y, zs[k]);
         x = p.x + u.center.x;
         y = p.y + u.center.y;
     }
@@ -261,8 +268,9 @@ fn splat_params(i: u32) -> Splat {
     }
     let xp = u.os * (p.x - u.x_min);
     let yp = u.os * (p.y - u.y_min);
-    var sx = u.os * max(lpxs[i], u.min_blur);
-    var sy = u.os * max(lpys[i], u.min_blur);
+    let k = src(i);
+    var sx = u.os * max(lpxs[k], u.min_blur);
+    var sy = u.os * max(lpys[k], u.min_blur);
     if ((u.mode & MODE_ISO) != 0u) {
         let mean = 0.5 * (sx + sy);
         sx = mean;
@@ -273,15 +281,15 @@ fn splat_params(i: u32) -> Splat {
     var vxy = 0.0;
     if ((u.mode & MODE_THETA) != 0u) {
         // precision ellipse rotated in-plane by the localization's angle
-        let c = cos(angles[i]);
-        let sn = sin(angles[i]);
+        let c = cos(angles[k]);
+        let sn = sin(angles[k]);
         vxx = sx * sx * c * c + sy * sy * sn * sn;
         vyy = sx * sx * sn * sn + sy * sy * c * c;
         vxy = (sx * sx - sy * sy) * c * sn;
     }
     if ((u.mode & MODE_ROT) != 0u) {
         // 3D covariance rotated with the localizations, projected
-        let sz = u.os * max(lpzs[i], u.min_blur);
+        let sz = u.os * max(lpzs[k], u.min_blur);
         let cov = mat3x3<f32>(
             vec3<f32>(vxx, vxy, 0.0),
             vec3<f32>(vxy, vyy, 0.0),
@@ -962,6 +970,48 @@ class WgpuBackend(SplatBackend):
     def _channel_key(self, channel):
         return tuple(self._array_key(a) for a in self._column_arrays(channel))
 
+    def _resolve_view(self, array):
+        """Map a column array onto a resident upload: the array itself,
+        or a strided/offset 1-D view of a resident array (the GUI's
+        interactive previews are ``iloc[::step]`` of whole channels).
+        Returns ``(resident key, stride, offset)`` in elements, or
+        None."""
+        key = self._array_key(array)
+        if key in self._arrays:
+            return key, 1, 0
+        if array.ndim != 1 or array.dtype != np.float32:
+            return None
+        strides = array.__array_interface__.get("strides")
+        step = 1 if strides is None else strides[0] // 4
+        if strides is not None and (strides[0] % 4 or step < 1):
+            return None
+        pointer = array.__array_interface__["data"][0]
+        for base_key in self._arrays:
+            base_pointer, base_bytes, base_dtype, base_strides = base_key
+            if base_dtype != key[2] or base_strides is not None:
+                continue
+            if pointer < base_pointer or (pointer - base_pointer) % 4:
+                continue
+            offset = (pointer - base_pointer) // 4
+            if offset + max(len(array) - 1, 0) * step < base_bytes // 4:
+                return base_key, step, offset
+        return None
+
+    def _resolve_channel(self, channel):
+        """``(resident keys, stride, offset)`` when every column of the
+        channel maps onto resident uploads with one common stride and
+        offset, else None."""
+        resolved = [
+            self._resolve_view(a) for a in self._column_arrays(channel)
+        ]
+        if any(r is None for r in resolved):
+            return None
+        steps = {(step, offset) for _, step, offset in resolved}
+        if len(steps) != 1:
+            return None
+        ((step, offset),) = steps
+        return tuple(key for key, _, _ in resolved), step, offset
+
     @staticmethod
     def _channel_bytes(channel):
         """GPU bytes for one channel: 4 bytes per unique column."""
@@ -991,9 +1041,15 @@ class WgpuBackend(SplatBackend):
         if budget is not None:
             needed = {}
             for chunk, _, cache in plan:
-                if cache:
-                    for array in self._column_arrays(chunk):
-                        needed[self._array_key(array)] = len(array) * 4
+                if not cache:
+                    continue
+                resolved = self._resolve_channel(chunk)
+                if resolved is not None:  # served by resident uploads
+                    for key in resolved[0]:
+                        needed[key] = self._arrays[key][2]
+                    continue
+                for array in self._column_arrays(chunk):
+                    needed[self._array_key(array)] = len(array) * 4
             new_bytes = sum(
                 nbytes
                 for key, nbytes in needed.items()
@@ -1036,11 +1092,18 @@ class WgpuBackend(SplatBackend):
         return mode
 
     def _write_uniforms(
-        self, n_locs, geometry, mode=0, tile_base=0, bin_cap=0
+        self,
+        n_locs,
+        geometry,
+        mode=0,
+        tile_base=0,
+        bin_cap=0,
+        stride=1,
+        offset=0,
     ):
         uniforms = np.zeros(_UNIFORM_BYTES // 4, dtype=np.float32)
         uniforms[:8] = self._base_f32
-        uniforms[8:18].view(np.uint32)[:] = (
+        uniforms[8:20].view(np.uint32)[:] = (
             n_locs,
             geometry["npx"],
             geometry["npy"],
@@ -1051,6 +1114,8 @@ class WgpuBackend(SplatBackend):
             bin_cap,
             n_locs,  # px_cap: at most one sorted entry per localization
             mode,
+            stride,
+            offset,
         )
         if self._rotation is not None:
             matrix, center = self._rotation
@@ -1096,8 +1161,13 @@ class WgpuBackend(SplatBackend):
         image = self._scratch["image"][0]
         readbacks = []
         for channel, cache in entries:
+            group, stride, offset = self._channel_bind_group(channel, cache)
             self._write_uniforms(
-                len(channel), geometry, mode=self._mode(channel, False)
+                len(channel),
+                geometry,
+                mode=self._mode(channel, False),
+                stride=stride,
+                offset=offset,
             )
             encoder = device.create_command_encoder()
             encoder.clear_buffer(image, 0, image_bytes)
@@ -1105,9 +1175,7 @@ class WgpuBackend(SplatBackend):
             compute_pass = encoder.begin_compute_pass()
             compute_pass.set_pipeline(self._pipelines["cs_hist"])
             compute_pass.set_bind_group(0, self._scatter_group0)
-            compute_pass.set_bind_group(
-                1, self._channel_bind_group(channel, cache)
-            )
+            compute_pass.set_bind_group(1, group)
             compute_pass.dispatch_workgroups(self._grid(len(channel)))
             compute_pass.end()
             readbacks.append(self._readback(encoder, image_bytes))
@@ -1167,20 +1235,21 @@ class WgpuBackend(SplatBackend):
             usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ,
         )
         for c, (channel, cache) in enumerate(entries):
+            group, stride, offset = self._channel_bind_group(channel, cache)
             self._write_uniforms(
                 len(channel),
                 geometry,
                 mode=self._mode(channel, iso),
                 tile_base=c * ntiles,
+                stride=stride,
+                offset=offset,
             )
             encoder = device.create_command_encoder()
             encoder.clear_buffer(self._aux, 0, 16)
             encoder.clear_buffer(tile_atomics, 0, ntiles * 8)
             compute_pass = encoder.begin_compute_pass()
             compute_pass.set_bind_group(0, self._tiled_group0)
-            compute_pass.set_bind_group(
-                1, self._channel_bind_group(channel, cache)
-            )
+            compute_pass.set_bind_group(1, group)
             compute_pass.set_pipeline(self._pipelines["cs_bin_count"])
             compute_pass.dispatch_workgroups(self._grid(len(channel)))
             compute_pass.set_pipeline(self._pipelines["cs_scan"])
@@ -1222,12 +1291,15 @@ class WgpuBackend(SplatBackend):
         px_atomics = self._scratch["px_atomics"][0]
         readbacks = []
         for c, (channel, cache) in enumerate(entries):
+            group, stride, offset = self._channel_bind_group(channel, cache)
             self._write_uniforms(
                 len(channel),
                 geometry,
                 mode=self._mode(channel, iso),
                 tile_base=c * ntiles,
                 bin_cap=bin_cap,
+                stride=stride,
+                offset=offset,
             )
             encoder = device.create_command_encoder()
             encoder.clear_buffer(self._aux, 0, 16)
@@ -1236,9 +1308,7 @@ class WgpuBackend(SplatBackend):
             encoder.clear_buffer(image, 0, image_bytes)
             compute_pass = encoder.begin_compute_pass()
             compute_pass.set_bind_group(0, self._tiled_group0)
-            compute_pass.set_bind_group(
-                1, self._channel_bind_group(channel, cache)
-            )
+            compute_pass.set_bind_group(1, group)
             grid = self._grid(len(channel))
             compute_pass.set_pipeline(self._pipelines["cs_px_count"])
             compute_pass.dispatch_workgroups(grid)
@@ -1340,18 +1410,29 @@ class WgpuBackend(SplatBackend):
         )
 
     def _channel_bind_group(self, channel, cache=True):
-        """Bind group over one channel's column buffers (x, y, lpx,
-        lpy, z, lpz, angle; ``x`` stands in for absent ones). With
-        ``cache`` the upload is resident and reused by later renders of
-        the same memory; otherwise it is single-use (a chunk of a
-        channel larger than the VRAM budget) and freed after the
-        render."""
+        """``(bind group, stride, offset)`` over one channel's column
+        buffers (x, y, lpx, lpy, z, lpz, angle; ``x`` stands in for
+        absent ones). With ``cache`` the upload is resident and reused
+        by later renders of the same memory — including strided or
+        offset views of it, which render straight from the resident
+        buffers through ``stride``/``offset``; otherwise the upload is
+        single-use (a chunk of a channel larger than the VRAM budget)
+        and freed after the render."""
         arrays = self._column_arrays(channel)
+        if cache:
+            resolved = self._resolve_channel(channel)
+            if resolved is not None:
+                base_keys, stride, offset = resolved
+                for array_key in set(base_keys):
+                    self._arrays.move_to_end(array_key)  # most recently used
+                group = self._groups.get(base_keys)
+                if group is None:
+                    group = self._bind_group(
+                        [self._arrays[k][1] for k in base_keys]
+                    )
+                    self._groups[base_keys] = group
+                return group, stride, offset
         key = self._channel_key(channel)
-        if cache and key in self._groups:
-            for array_key in set(key):
-                self._arrays.move_to_end(array_key)  # most recently used
-            return self._groups[key]
         buffers = []
         temp = {}  # placeholders alias x: upload each array once
         for array in arrays:
@@ -1377,7 +1458,13 @@ class WgpuBackend(SplatBackend):
                 self._temp_buffers.append(buffer)
                 temp[array_key] = buffer
             buffers.append(buffer)
-        group = self._device.create_bind_group(
+        group = self._bind_group(buffers)
+        if cache:
+            self._groups[key] = group
+        return group, 1, 0
+
+    def _bind_group(self, buffers):
+        return self._device.create_bind_group(
             layout=self._group1_layout,
             entries=[
                 {
@@ -1391,9 +1478,6 @@ class WgpuBackend(SplatBackend):
                 for binding, buffer in enumerate(buffers)
             ],
         )
-        if cache:
-            self._groups[key] = group
-        return group
 
     @property
     def resident_bytes(self) -> int:

@@ -358,6 +358,31 @@ class TestResidentUploads:
         assert len(gpu._arrays) == 0  # ...but none stays resident
         assert gpu._temp_buffers == []  # and they are freed afterwards
 
+    @pytest.mark.parametrize("step,start", [(7, 0), (5, 3), (1, 1000)])
+    def test_strided_views_render_from_resident_buffers(
+        self, gpu, locs, step, start
+    ):
+        # the GUI's interactive previews are iloc[::step] of the whole
+        # channels: rendered through stride/offset, no upload at all
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        uploads = gpu.upload_count
+        subset = locs.iloc[start::step]
+        for blur in ("gaussian", None):
+            ((n_gpu, img_gpu),) = _gpu(gpu, subset, blur)
+            ((n_cpu, img_cpu),) = _cpu(subset, blur)
+            assert n_gpu == n_cpu
+            if blur:
+                _assert_parity(img_gpu, img_cpu)
+            else:
+                assert img_gpu.sum() == img_cpu.sum()
+        assert gpu.upload_count == uploads
+        assert len(gpu._arrays) == 4
+
     def test_release_uploads(self, gpu, locs):
         gpu.render_channels(
             _columns(locs, "gaussian"),

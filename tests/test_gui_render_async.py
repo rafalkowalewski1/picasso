@@ -159,7 +159,9 @@ class TestAsyncRender:
     def test_interactive_preview_and_refine(self, window, qapp, monkeypatch):
         view = window.view
         monkeypatch.setattr(
-            gui_render.View, "_interaction_subsample_target", lambda self: 500
+            gui_render.View,
+            "_interaction_subsample_target",
+            lambda self: 500,
         )
         seen = []
         original = render.render_scene
@@ -237,6 +239,7 @@ class TestAsyncRender:
 
     def test_persistent_backend_gets_whole_channels(self, window, monkeypatch):
         view = window.view
+        real_loader = gui_render.io.load_user_settings
 
         class Persistent(render.SplatBackend):
             name = "fake-gpu"
@@ -249,18 +252,61 @@ class TestAsyncRender:
 
         backend_mod = gui_render.render.backend
         zoomed = ((0.0, 0.0), (HEIGHT / 4, WIDTH / 4))
-        request = {"locs": view.locs[0], "contrast": (0.0, 1.0)}
+        request = {
+            "locs": view.locs[0],
+            "viewport": zoomed,
+            "contrast": (0.0, 1.0),
+        }
         # CPU backend: previews subsample when over the target
         monkeypatch.setattr(view, "_interaction_subsample_target", lambda: 10)
         assert view._subsample_request(dict(request))
-        # a backend with resident uploads: whole channels, no subsampling
-        monkeypatch.setattr(backend_mod, "_get_backend", lambda: Persistent())
+        # a backend with resident uploads: whole channels; previews are
+        # strided views of them (rendered from the resident buffers)
+        monkeypatch.setattr(
+            backend_mod, "_get_backend", lambda **kw: Persistent()
+        )
         locs, _ = view._prepare_locs_for_rendering(viewport=zoomed)
         locs = locs if isinstance(locs, list) else [locs]  # single channel
         assert len(locs[0]) == len(view.locs[0])
         assert locs[0] is view.locs[0]  # the very same memory, no copy
-        assert not view._subsample_request(dict(request))
-        # closing the datasets releases the resident uploads
+        preview = dict(request)
+        assert view._subsample_request(preview)
+        assert np.shares_memory(
+            preview["locs"]["x"].to_numpy(), view.locs[0]["x"].to_numpy()
+        )
+        # the subsample targets the *visible* population, as the CPU
+        # path does by restricting to the viewport first: a zoomed view
+        # keeps the same preview density instead of a sparse slice
+        monkeypatch.setattr(view, "_interaction_subsample_target", lambda: 200)
+        in_view = len(view._viewport_indices(0, zoomed))
+        assert 0 < in_view < len(view.locs[0])
+        preview = {
+            "locs": view.locs[0],
+            "viewport": zoomed,
+            "contrast": (0.0, 1.0),
+        }
+        assert view._subsample_request(preview)
+        expected_step = -(-in_view // 200)
+        assert len(preview["locs"]) == len(view.locs[0].iloc[::expected_step])
+        # the CPU path (channels already restricted) uses the row count
+        monkeypatch.setattr(
+            backend_mod, "_get_backend", render.backend._cpu_backend
+        )
+        preview = {
+            "locs": view.locs[0],
+            "viewport": zoomed,
+            "contrast": (0.0, 1.0),
+        }
+        assert view._subsample_request(preview)
+        assert len(preview["locs"]) == len(
+            view.locs[0].iloc[:: -(-len(view.locs[0]) // 200)]
+        )
+        monkeypatch.setattr(
+            backend_mod, "_get_backend", lambda **kw: Persistent()
+        )
+        # closing the datasets releases the resident uploads (the real
+        # settings are needed again: the rebuilt UI reads other keys)
+        monkeypatch.setattr(gui_render.io, "load_user_settings", real_loader)
         released = []
         monkeypatch.setattr(
             backend_mod, "release_uploads", lambda: released.append(1)

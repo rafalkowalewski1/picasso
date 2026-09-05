@@ -7568,8 +7568,9 @@ class LocsLoadWorker(QtCore.QObject):
         self.finished.emit()
 
 
-#: default target loc count for interactive preview renders (the
-#: ``interaction_subsample`` key in ``settings["Render"]`` overrides it)
+#: default target count of localizations *in the viewport* for
+#: interactive preview renders (the ``interaction_subsample`` key in
+#: ``settings["Render"]`` overrides it)
 INTERACTION_SUBSAMPLE_AUTO = 500_000
 
 #: fraction per side rendered beyond the visible viewport, so pans and
@@ -9707,8 +9708,8 @@ class View(QtWidgets.QLabel):
         return render.backend._get_backend().persistent_uploads
 
     def _interaction_subsample_target(self) -> int:
-        """Target loc count for interactive preview renders, from
-        ``settings["Render"]["interaction_subsample"]`` (read per
+        """Target count of in-view locs for interactive preview renders,
+        from ``settings["Render"]["interaction_subsample"]`` (read per
         gesture, so edits apply live): missing or invalid means
         ``INTERACTION_SUBSAMPLE_AUTO``; a non-negative int sets the
         target; 0 or ``"off"`` disables subsampling."""
@@ -9724,16 +9725,32 @@ class View(QtWidgets.QLabel):
             return 0
         return INTERACTION_SUBSAMPLE_AUTO
 
+    def _request_in_view(self, channels: list, viewport: tuple) -> int:
+        """Localizations of the request's channels inside ``viewport``.
+        Channels handed over whole (a backend with resident uploads)
+        are counted through their viewport pyramid, so the preview
+        subsample targets the visible population like the CPU path,
+        which restricts channels to the viewport before subsampling;
+        without a pyramid a channel counts in full."""
+        total = 0
+        for channel in channels:
+            count = len(channel)
+            for i, locs in enumerate(self.locs):
+                if locs is channel:
+                    indices = self._viewport_indices(i, viewport)
+                    if indices is not None:
+                        count = len(indices)
+                    break
+            total += count
+        return total
+
     def _subsample_request(self, request: dict) -> bool:
         """Reduce a render request to a strided subsample for an
         interactive preview. Contrast limits are scaled by the sampled
         fraction so the preview keeps the full render's brightness.
-        Returns False when subsampling is disabled or not needed, and
-        always for a backend with resident uploads (GPU): a subset would
-        have to be uploaded, which costs more than rendering the
-        resident full data."""
-        if self._persistent_uploads():
-            return False
+        Returns False when subsampling is disabled or not needed. The
+        strided subset is a view of the whole channels, which a backend
+        with resident uploads (GPU) renders straight from its buffers."""
         target = self._interaction_subsample_target()
         if target <= 0:
             return False
@@ -9741,9 +9758,12 @@ class View(QtWidgets.QLabel):
         single = isinstance(locs, pd.DataFrame)
         channels = [locs] if single else locs
         total = sum(len(channel) for channel in channels)
-        if total <= target:
+        in_view = total
+        if self._persistent_uploads():
+            in_view = self._request_in_view(channels, request["viewport"])
+        if in_view <= target:
             return False
-        step = ceil(total / target)
+        step = ceil(in_view / target)
         sampled = [channel.iloc[::step] for channel in channels]
         fraction = sum(len(channel) for channel in sampled) / total
         request["locs"] = sampled[0] if single else sampled
