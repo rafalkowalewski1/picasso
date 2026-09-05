@@ -189,7 +189,16 @@ _SCATTER_WGSL = (
     + """
 var<workgroup> wg_count: atomic<u32>;
 
+// Reduces the per-invocation in-view counts of a workgroup into
+// aux[0]. Workgroup memory is zeroed explicitly: WGSL promises
+// zero-initialization, but an NVIDIA RTX A5500 on Windows handed each
+// workgroup the previous one's count (n inflated ~6x) while Metal was
+// clean -- never rely on the driver for it.
 fn flush_count(local_index: u32, my_count: u32) {
+    if (local_index == 0u) {
+        atomicStore(&wg_count, 0u);
+    }
+    workgroupBarrier();
     atomicAdd(&wg_count, my_count);
     workgroupBarrier();
     if (local_index == 0u) {
@@ -392,7 +401,16 @@ fn weight(px: i32, py: i32, v: vec4<f32>, s01: f32) -> f32 {
 
 var<workgroup> wg_count: atomic<u32>;
 
+// Reduces the per-invocation in-view counts of a workgroup into
+// aux[0]. Workgroup memory is zeroed explicitly: WGSL promises
+// zero-initialization, but an NVIDIA RTX A5500 on Windows handed each
+// workgroup the previous one's count (n inflated ~6x) while Metal was
+// clean -- never rely on the driver for it.
 fn flush_count(local_index: u32, my_count: u32) {
+    if (local_index == 0u) {
+        atomicStore(&wg_count, 0u);
+    }
+    workgroupBarrier();
     atomicAdd(&wg_count, my_count);
     workgroupBarrier();
     if (local_index == 0u) {
