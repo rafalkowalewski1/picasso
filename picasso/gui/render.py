@@ -7568,10 +7568,13 @@ class LocsLoadWorker(QtCore.QObject):
         self.finished.emit()
 
 
-#: default target count of localizations *in the viewport* for
-#: interactive preview renders (the ``interaction_subsample`` key in
-#: ``settings["Render"]`` overrides it)
+#: ``auto`` interactive previews render at least this many
+#: localizations of the visible population...
 INTERACTION_SUBSAMPLE_AUTO = 500_000
+#: ...and at least this fraction of it, so faint structures of large
+#: datasets stay visible while panning (the ``interaction_subsample``
+#: key in ``settings["Render"]`` overrides both with a fixed count)
+INTERACTION_SUBSAMPLE_FRACTION = 0.1
 
 #: fraction per side rendered beyond the visible viewport, so pans and
 #: zoom-outs within the margin reveal already-rendered pixels instantly
@@ -9713,23 +9716,30 @@ class View(QtWidgets.QLabel):
         resident across renders (see ``render.backend.SplatBackend``)."""
         return render.backend._get_backend().persistent_uploads
 
-    def _interaction_subsample_target(self) -> int:
+    def _interaction_subsample_target(self, population: int = 0) -> int:
         """Target count of in-view locs for interactive preview renders,
         from ``settings["Render"]["interaction_subsample"]`` (read per
-        gesture, so edits apply live): missing or invalid means
-        ``INTERACTION_SUBSAMPLE_AUTO``; a non-negative int sets the
-        target; 0 or ``"off"`` disables subsampling."""
+        gesture, so edits apply live): a non-negative int sets the
+        target; 0 or ``"off"`` disables subsampling; missing, invalid
+        or ``auto`` means the larger of ``INTERACTION_SUBSAMPLE_AUTO``
+        and ``INTERACTION_SUBSAMPLE_FRACTION`` of the visible
+        ``population``."""
         try:
             value = self._user_settings()["Render"]["interaction_subsample"]
         except Exception:
             value = None
-        if isinstance(value, bool):
-            return INTERACTION_SUBSAMPLE_AUTO
-        if isinstance(value, int) and value >= 0:
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
             return value
         if isinstance(value, str) and value.strip().lower() == "off":
             return 0
-        return INTERACTION_SUBSAMPLE_AUTO
+        return max(
+            INTERACTION_SUBSAMPLE_AUTO,
+            int(INTERACTION_SUBSAMPLE_FRACTION * population),
+        )
 
     def _render_indices(self, viewport: tuple) -> list | None:
         """Per channel, in the order ``_prepare_locs_for_rendering``
@@ -9768,9 +9778,6 @@ class View(QtWidgets.QLabel):
         targets the visible population; the others through a strided
         view of the DataFrame, which a backend with resident uploads
         renders straight from its buffers."""
-        target = self._interaction_subsample_target()
-        if target <= 0:
-            return False
         locs = request["locs"]
         single = isinstance(locs, pd.DataFrame)
         channels = [locs] if single else locs
@@ -9781,7 +9788,8 @@ class View(QtWidgets.QLabel):
             len(channel) if idx is None else len(idx)
             for channel, idx in zip(channels, indices)
         )
-        if population <= target:
+        target = self._interaction_subsample_target(population)
+        if target <= 0 or population <= target:
             return False
         step = ceil(population / target)
         sampled = []

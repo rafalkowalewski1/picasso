@@ -161,7 +161,7 @@ class TestAsyncRender:
         monkeypatch.setattr(
             gui_render.View,
             "_interaction_subsample_target",
-            lambda self: 500,
+            lambda self, population=0: 500,
         )
         seen = []
         original = render.render_scene
@@ -207,6 +207,23 @@ class TestAsyncRender:
         assert with_value(True) == gui_render.INTERACTION_SUBSAMPLE_AUTO
         assert with_value("auto") == gui_render.INTERACTION_SUBSAMPLE_AUTO
         assert with_value(-5) == gui_render.INTERACTION_SUBSAMPLE_AUTO
+        # auto: at least the fixed count and at least a fraction of the
+        # visible population; an explicit count ignores the population
+        auto = gui_render.INTERACTION_SUBSAMPLE_AUTO
+        fraction = gui_render.INTERACTION_SUBSAMPLE_FRACTION
+        monkeypatch.setattr(
+            gui_render.io, "load_user_settings", lambda: {"Render": {}}
+        )
+        assert view._interaction_subsample_target(10**6) == auto
+        assert view._interaction_subsample_target(10**8) == int(
+            fraction * 10**8
+        )
+        monkeypatch.setattr(
+            gui_render.io,
+            "load_user_settings",
+            lambda: {"Render": {"interaction_subsample": 1234}},
+        )
+        assert view._interaction_subsample_target(10**8) == 1234
 
     def test_max_blur_width_setting(self, window, monkeypatch):
         view = window.view
@@ -258,7 +275,9 @@ class TestAsyncRender:
             "contrast": (0.0, 1.0),
         }
         # CPU backend: previews subsample when over the target
-        monkeypatch.setattr(view, "_interaction_subsample_target", lambda: 10)
+        monkeypatch.setattr(
+            view, "_interaction_subsample_target", lambda population=0: 10
+        )
         assert view._subsample_request(dict(request))
         # a backend with resident uploads: whole channels; previews are
         # strided views of them (rendered from the resident buffers)
@@ -277,7 +296,9 @@ class TestAsyncRender:
         # the request carries the pyramid's row selection per channel
         # (the zoomed view covers under 10% of the FOV, so the pyramid
         # is not bypassed) and previews subsample that selection
-        monkeypatch.setattr(view, "_interaction_subsample_target", lambda: 200)
+        monkeypatch.setattr(
+            view, "_interaction_subsample_target", lambda population=0: 200
+        )
         indices = view._render_indices(zoomed)
         assert len(indices) == 1 and indices[0] is not None
         in_view = len(indices[0])
