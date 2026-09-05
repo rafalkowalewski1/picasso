@@ -49,6 +49,7 @@ def render(
     min_blur_width: float = 0.0,
     max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
+    indices: lib.IntArray1D | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """Render localizations given FOV and blur method.
 
@@ -86,6 +87,10 @@ def render(
         quaternion) or a tuple of 3 rotation angles around the x, y
         and z axes in radians (legacy Euler convention, see
         ``rotation_matrix``). If None, locs are not rotated.
+    indices : lib.IntArray1D, optional
+        Positions of the rows of ``locs`` to render (e.g. a viewport
+        pre-selection from ``spatial_index``); the other rows are
+        ignored. If None (default), all rows are rendered.
 
     Raises
     ------
@@ -101,7 +106,9 @@ def render(
         Rendered image.
     """
     return _render_arrays(
-        _extract_render_columns(locs, blur_method, ang, max_blur_width),
+        _extract_render_columns(
+            locs, blur_method, ang, max_blur_width, indices
+        ),
         info,
         disp_px_size=disp_px_size,
         viewport=viewport,
@@ -122,9 +129,19 @@ class _RenderColumns:
     plain array views.
     """
 
-    __slots__ = ("x", "y", "lpx", "lpy", "lpz", "angle", "z")
+    __slots__ = ("x", "y", "lpx", "lpy", "lpz", "angle", "z", "indices")
 
-    def __init__(self, x, y, lpx=None, lpy=None, lpz=None, angle=None, z=None):
+    def __init__(
+        self,
+        x,
+        y,
+        lpx=None,
+        lpy=None,
+        lpz=None,
+        angle=None,
+        z=None,
+        indices=None,
+    ):
         self.x = x
         self.y = y
         self.lpx = lpx
@@ -132,12 +149,31 @@ class _RenderColumns:
         self.lpz = lpz
         self.angle = angle
         self.z = z
+        #: rows to render (positions into the column arrays), or None
+        #: for all of them: the render-index pyramid's viewport
+        #: selection travels this way, so a GPU backend keeps the whole
+        #: channel resident and reads only the selected rows
+        self.indices = indices
 
     def __len__(self) -> int:
+        """Number of rows to render."""
+        if self.indices is not None:
+            return len(self.indices)
         return len(self.x)
 
     def slice(self, start: int, stop: int) -> "_RenderColumns":
-        """Row range as array views (no copies)."""
+        """Row range (of the rows to render) as array views, no copies."""
+        if self.indices is not None:
+            return _RenderColumns(
+                self.x,
+                self.y,
+                self.lpx,
+                self.lpy,
+                self.lpz,
+                self.angle,
+                self.z,
+                self.indices[start:stop],
+            )
 
         def cut(array):
             return None if array is None else array[start:stop]
@@ -152,12 +188,33 @@ class _RenderColumns:
             cut(self.z),
         )
 
+    def materialize(self) -> "_RenderColumns":
+        """The selected rows gathered into contiguous arrays (a copy,
+        like ``DataFrame.iloc`` with the same indices); a no-op without
+        ``indices``."""
+        if self.indices is None:
+            return self
+
+        def take(array):
+            return None if array is None else array[self.indices]
+
+        return _RenderColumns(
+            self.x[self.indices],
+            self.y[self.indices],
+            take(self.lpx),
+            take(self.lpy),
+            take(self.lpz),
+            take(self.angle),
+            take(self.z),
+        )
+
 
 def _extract_render_columns(
     locs: pd.DataFrame,
     blur_method: str | None,
     ang: tuple | Rotation | None,
     max_blur_width: float | None = None,
+    indices: lib.IntArray1D | None = None,
 ) -> _RenderColumns:
     """Pull the columns ``blur_method`` (and rotation) needs out of the
     DataFrame, converting angle to radians and applying the lpz
@@ -169,7 +226,11 @@ def _extract_render_columns(
     artifacts of unfiltered data, their blur would cover a large FOV
     with a negligible intensity, and rendering them costs too much.
     Filtering here keeps every backend in agreement, including the count
-    of rendered localizations."""
+    of rendered localizations.
+
+    ``indices`` (positions into ``locs``) restrict the render to those
+    rows without copying the columns (see ``_RenderColumns``); the
+    filter above is applied to them as well."""
     need_lp = blur_method in ("gaussian", "gaussian_iso", "convolve")
     lpx = locs["lpx"].to_numpy() if need_lp else None
     lpy = locs["lpy"].to_numpy() if need_lp else None
@@ -194,9 +255,13 @@ def _extract_render_columns(
         "gaussian_iso",
     ):
         keep = (lpx <= max_blur_width) & (lpy <= max_blur_width)
-        if not keep.all():
+        if indices is not None:
+            indices = indices[keep[indices]]
+        elif not keep.all():
             columns = [None if c is None else c[keep] for c in columns]
-    return _RenderColumns(*columns)
+    if indices is not None:
+        indices = np.ascontiguousarray(indices, dtype=np.uint32)
+    return _RenderColumns(*columns, indices=indices)
 
 
 def _render_arrays(
@@ -214,6 +279,8 @@ def _render_arrays(
     """``render`` on pre-extracted column arrays (see ``render`` for
     the parameters). The chunked parallel scheduler calls this per row
     slice so no pandas work happens inside worker tasks."""
+    # a row selection is gathered first: the kernels take dense arrays
+    columns = columns.materialize()
     pixelsize = lib.get_from_metadata(info, "Pixelsize", raise_error=True)
     oversampling = pixelsize / disp_px_size
 

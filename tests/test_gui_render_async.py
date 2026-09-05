@@ -274,33 +274,37 @@ class TestAsyncRender:
         assert np.shares_memory(
             preview["locs"]["x"].to_numpy(), view.locs[0]["x"].to_numpy()
         )
-        # the subsample targets the *visible* population, as the CPU
-        # path does by restricting to the viewport first: a zoomed view
-        # keeps the same preview density instead of a sparse slice
+        # the request carries the pyramid's row selection per channel
+        # (the zoomed view covers under 10% of the FOV, so the pyramid
+        # is not bypassed) and previews subsample that selection
         monkeypatch.setattr(view, "_interaction_subsample_target", lambda: 200)
-        in_view = len(view._viewport_indices(0, zoomed))
+        indices = view._render_indices(zoomed)
+        assert len(indices) == 1 and indices[0] is not None
+        in_view = len(indices[0])
         assert 0 < in_view < len(view.locs[0])
+        full_view = view.viewport
+        view.viewport = [tuple(zoomed[0]), tuple(zoomed[1])]
+        request, _ = view._build_render_request()
+        view.viewport = full_view
+        assert request["indices"][0] is not None
         preview = {
             "locs": view.locs[0],
+            "indices": [indices[0]],
             "viewport": zoomed,
             "contrast": (0.0, 1.0),
         }
         assert view._subsample_request(preview)
         expected_step = -(-in_view // 200)
-        assert len(preview["locs"]) == len(view.locs[0].iloc[::expected_step])
-        # the CPU path (channels already restricted) uses the row count
+        assert preview["locs"] is view.locs[0]  # the channel stays whole
+        assert len(preview["indices"][0]) == len(indices[0][::expected_step])
+        # the bypass regime (large viewport) hands over no selection
+        assert view._render_indices(((0.0, 0.0), (HEIGHT, WIDTH))) == [None]
+        # the CPU path keeps its own slicing: no indices in its requests
         monkeypatch.setattr(
             backend_mod, "_get_backend", render.backend._cpu_backend
         )
-        preview = {
-            "locs": view.locs[0],
-            "viewport": zoomed,
-            "contrast": (0.0, 1.0),
-        }
-        assert view._subsample_request(preview)
-        assert len(preview["locs"]) == len(
-            view.locs[0].iloc[:: -(-len(view.locs[0]) // 200)]
-        )
+        request, _ = view._build_render_request()
+        assert request["indices"] is None
         monkeypatch.setattr(
             backend_mod, "_get_backend", lambda **kw: Persistent()
         )

@@ -2410,6 +2410,99 @@ class TestSplatBackend:
 
 
 # ---------------------------------------------------------------------------
+# Row selections (indices) through the render API
+# ---------------------------------------------------------------------------
+
+
+class TestIndexedRender:
+    """``indices`` render a selection of rows, equivalently to slicing
+    the DataFrame first, without copying the columns up front."""
+
+    KWARGS = dict(
+        disp_px_size=PIXELSIZE / 10,
+        viewport=FULL_VIEWPORT,
+        min_blur_width=0.0,
+        ang=None,
+    )
+
+    @pytest.fixture
+    def selection(self, locs):
+        rng = np.random.default_rng(11)
+        return np.sort(
+            rng.choice(len(locs), size=len(locs) // 3, replace=False)
+        ).astype(np.uint32)
+
+    @pytest.mark.parametrize("blur", [None, "gaussian", "smooth"])
+    def test_render_matches_sliced_locs(self, locs, info, selection, blur):
+        n_ref, image_ref = render.render(
+            locs.iloc[selection], info, blur_method=blur, **self.KWARGS
+        )
+        n, image = render.render(
+            locs, info, blur_method=blur, indices=selection, **self.KWARGS
+        )
+        assert n == n_ref
+        np.testing.assert_array_equal(image, image_ref)
+
+    def test_columns_keep_the_full_arrays(self, locs, selection):
+        columns = render._extract_render_columns(
+            locs, "gaussian", None, indices=selection
+        )
+        assert len(columns) == len(selection)
+        assert len(columns.x) == len(locs)  # no copy of the columns
+        assert columns.indices.dtype == np.uint32
+        part = columns.slice(5, 50)
+        assert len(part) == 45 and part.x is columns.x
+        dense = columns.materialize()
+        assert dense.indices is None and len(dense.x) == len(selection)
+        np.testing.assert_array_equal(dense.x, locs["x"].to_numpy()[selection])
+
+    def test_max_blur_width_applies_to_the_selection(self, locs, selection):
+        whaled = locs.copy()
+        whaled.loc[whaled.index[selection[:10]], "lpx"] = 50.0
+        columns = render._extract_render_columns(
+            whaled, "gaussian", None, max_blur_width=5.0, indices=selection
+        )
+        assert len(columns) == len(selection) - 10
+        assert columns.lpx.max() > 5.0  # the columns stay whole...
+        assert columns.materialize().lpx.max() <= 5.0  # ...the rows do not
+
+    def test_render_scene_takes_per_channel_indices(
+        self, locs, info, selection
+    ):
+        _, n = render.render_scene(
+            [locs, locs],
+            [info, info],
+            blur_method="gaussian",
+            indices=[selection, None],
+            **self.KWARGS,
+        )
+        _, n_ref = render.render_scene(
+            [locs.iloc[selection], locs],
+            [info, info],
+            blur_method="gaussian",
+            **self.KWARGS,
+        )
+        assert n == n_ref
+        _, n_single = render.render_scene(
+            locs,
+            info,
+            blur_method="gaussian",
+            indices=selection,
+            **self.KWARGS,
+        )
+        assert (
+            n_single
+            == render.render(
+                locs,
+                info,
+                blur_method="gaussian",
+                indices=selection,
+                **self.KWARGS,
+            )[0]
+        )
+
+
+# ---------------------------------------------------------------------------
 # Maximum blur width (useless precisions are not rendered)
 # ---------------------------------------------------------------------------
 

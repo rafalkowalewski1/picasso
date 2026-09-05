@@ -9658,6 +9658,11 @@ class View(QtWidgets.QLabel):
         locs, infos = self._prepare_locs_for_rendering(
             viewport=rendered_viewport
         )
+        # a backend with resident uploads gets whole channels plus the
+        # pyramid's row selection (the CPU path slices the channels)
+        indices = None
+        if self._persistent_uploads():
+            indices = self._render_indices(rendered_viewport)
         cmap = self.window.display_settings_dlg.colormap.currentText()
         if cmap == "Custom":
             cmap = np.uint8(np.round(255 * self.custom_cmap))
@@ -9668,6 +9673,7 @@ class View(QtWidgets.QLabel):
             dict(
                 locs=locs,
                 info=infos,
+                indices=indices,
                 **kwargs,
                 contrast=contrast,
                 invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
@@ -9725,48 +9731,75 @@ class View(QtWidgets.QLabel):
             return 0
         return INTERACTION_SUBSAMPLE_AUTO
 
-    def _request_in_view(self, channels: list, viewport: tuple) -> int:
-        """Localizations of the request's channels inside ``viewport``.
-        Channels handed over whole (a backend with resident uploads)
-        are counted through their viewport pyramid, so the preview
-        subsample targets the visible population like the CPU path,
-        which restricts channels to the viewport before subsampling;
-        without a pyramid a channel counts in full."""
-        total = 0
-        for channel in channels:
-            count = len(channel)
-            for i, locs in enumerate(self.locs):
-                if locs is channel:
-                    indices = self._viewport_indices(i, viewport)
-                    if indices is not None:
-                        count = len(indices)
-                    break
-            total += count
-        return total
+    def _render_indices(self, viewport: tuple) -> list | None:
+        """Per channel, in the order ``_prepare_locs_for_rendering``
+        returns them, the rows to render for a backend with resident
+        uploads: the viewport pyramid's selection, or None for a
+        channel where the pyramid is bypassed (the viewport covers a
+        large part of the FOV, ``spatial_index._BYPASS_COVERAGE_RATIO``)
+        or unavailable — the backend then culls the whole channel
+        itself. None altogether for the paths that rebuild channels per
+        render (render by property, group splitting, the z slicer, the
+        fast-render subset), which render whole."""
+        if self.window.display_settings_dlg.render_check.isChecked():
+            return None
+        if self.window.slicer_dialog.slicer_radio_button.isChecked():
+            return None
+        if len(self.locs) == 1 and "group" in self.locs[0].columns:
+            return None
+        if any(idx is not None for idx in self.fast_render_indices):
+            return None
+        indices = []
+        for i in range(len(self.locs)):
+            if len(self.locs) > 1 and not (
+                self.window.dataset_dialog.checks[i].isChecked()
+            ):
+                continue
+            indices.append(self._viewport_indices(i, viewport))
+        return indices
 
     def _subsample_request(self, request: dict) -> bool:
         """Reduce a render request to a strided subsample for an
         interactive preview. Contrast limits are scaled by the sampled
         fraction so the preview keeps the full render's brightness.
-        Returns False when subsampling is disabled or not needed. The
-        strided subset is a view of the whole channels, which a backend
-        with resident uploads (GPU) renders straight from its buffers."""
+        Returns False when subsampling is disabled or not needed. A
+        channel carrying a row selection (``indices``, see
+        ``_render_indices``) is subsampled through it, so the preview
+        targets the visible population; the others through a strided
+        view of the DataFrame, which a backend with resident uploads
+        renders straight from its buffers."""
         target = self._interaction_subsample_target()
         if target <= 0:
             return False
         locs = request["locs"]
         single = isinstance(locs, pd.DataFrame)
         channels = [locs] if single else locs
-        total = sum(len(channel) for channel in channels)
-        in_view = total
-        if self._persistent_uploads():
-            in_view = self._request_in_view(channels, request["viewport"])
-        if in_view <= target:
+        indices = request.get("indices")
+        if indices is None:
+            indices = [None] * len(channels)
+        population = sum(
+            len(channel) if idx is None else len(idx)
+            for channel, idx in zip(channels, indices)
+        )
+        if population <= target:
             return False
-        step = ceil(in_view / target)
-        sampled = [channel.iloc[::step] for channel in channels]
-        fraction = sum(len(channel) for channel in sampled) / total
+        step = ceil(population / target)
+        sampled = []
+        sampled_indices = []
+        n_sampled = 0
+        for channel, idx in zip(channels, indices):
+            if idx is None:
+                channel = channel.iloc[::step]
+                n_sampled += len(channel)
+            else:
+                idx = idx[::step]
+                n_sampled += len(idx)
+            sampled.append(channel)
+            sampled_indices.append(idx)
+        fraction = n_sampled / population
         request["locs"] = sampled[0] if single else sampled
+        if request.get("indices") is not None:
+            request["indices"] = sampled_indices
         if request["contrast"] is not None:
             vmin, vmax = request["contrast"]
             request["contrast"] = (vmin * fraction, vmax * fraction)

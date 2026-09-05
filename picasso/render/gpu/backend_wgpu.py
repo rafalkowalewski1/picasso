@@ -89,13 +89,14 @@ _TILE = 16  # gather tile edge in pixels; 16x16 = one thread per pixel
 _WHALE_MAX_TILES = 64
 _WHALE_CAPACITY = 1_000_000  # whale list slots at the start of the bins
 _UNIFORM_BYTES = 144
-#: storage buffers bound per compute stage (9 scratch + 7 channel
-#: columns); WebGPU's baseline guarantee is 8, desktop adapters offer
-#: far more — a refusal simply leaves rendering on the CPU
+#: storage buffers bound per compute stage (8 scratch + 7 channel
+#: columns + the index list); WebGPU's baseline guarantee is 8, desktop
+#: adapters offer far more — a refusal simply leaves rendering on the CPU
 _STORAGE_BINDINGS_WANTED = 16
 _MODE_ISO = 1  # sx = sy = mean of the two precisions
 _MODE_THETA = 2  # per-localization in-plane ellipse angle
 _MODE_ROT = 4  # 3D rotation about the view center
+_MODE_INDEXED = 8  # rows come from an index list into the columns
 
 #: the uniform block shared by both shader modules
 _UNIFORMS_WGSL = """
@@ -128,6 +129,7 @@ struct Uniforms {
 const MODE_ISO: u32 = 1u;
 const MODE_THETA: u32 = 2u;
 const MODE_ROT: u32 = 4u;
+const MODE_INDEXED: u32 = 8u;
 """
 
 _CHANNEL_WGSL = """
@@ -138,11 +140,18 @@ _CHANNEL_WGSL = """
 @group(1) @binding(4) var<storage, read> zs: array<f32>;
 @group(1) @binding(5) var<storage, read> lpzs: array<f32>;
 @group(1) @binding(6) var<storage, read> angles: array<f32>;
+// rows to render when MODE_INDEXED (the viewport pyramid's selection);
+// otherwise unused and bound to a placeholder
+@group(1) @binding(7) var<storage, read> indices: array<u32>;
 
 // index into the column buffers: a request may be a strided view
-// (interactive preview) of the resident channel
+// (interactive preview) of the resident channel, or an index list
 fn src(i: u32) -> u32 {
-    return u.offset + i * u.stride;
+    let k = u.offset + i * u.stride;
+    if ((u.mode & MODE_INDEXED) != 0u) {
+        return indices[k];
+    }
+    return k;
 }
 
 // camera-pixel position, rotated about the view center when MODE_ROT
@@ -226,21 +235,27 @@ const WHALE_MAX_TILES: u32 = {_WHALE_MAX_TILES}u;
 @group(0) @binding(1) var<storage, read_write> imagef: array<f32>;
 // aux[0] = in-view count, aux[1] = bin entries, aux[2] = whale count
 @group(0) @binding(2) var<storage, read_write> aux: array<atomic<u32>, 4>;
-// tile tier: tile_atomics[2t] = count, [2t + 1] = cursor; offsets are
-// persisted per channel; bins hold the whale list (first whale_cap
-// slots) followed by the tile-tier entries
+// tile tier: tile_atomics[2t] = count, [2t + 1] = cursor; bins hold
+// the whale list (first whale_cap slots) followed by the tile-tier
+// entries. One offsets buffer holds, in this order: the pixel tier's
+// per-pixel prefix within its tile (tile-major pixel index q = tile *
+// 256 + local, ntiles*256 entries), the pixel tier's per-tile global
+// base (ntiles entries), then the tile tier's offsets persisted per
+// channel (ntiles per channel, sliced by u.tile_base)
 @group(0) @binding(3) var<storage, read_write> tile_atomics: array<atomic<u32>>;
-@group(0) @binding(4) var<storage, read_write> tile_offsets: array<u32>;
+@group(0) @binding(4) var<storage, read_write> offsets: array<u32>;
 @group(0) @binding(5) var<storage, read_write> bins: array<u32>;
-// pixel tier, tile-major pixel index q = tile * 256 + local:
-// px_atomics[2q] = count, px_atomics[2q + 1] = cursor;
-// px_offsets[q] = prefix within the tile, px_offsets[ntiles*256 + t] =
-// the tile's global base; sorted[e] = (xp, yp, sx, sy), sorted_off[e] =
-// the off-diagonal covariance s01
+// pixel tier: px_atomics[2q] = count, px_atomics[2q + 1] = cursor;
+// sorted[e] = (xp, yp, sx, sy), sorted_off[e] = the off-diagonal
+// covariance s01
 @group(0) @binding(6) var<storage, read_write> px_atomics: array<atomic<u32>>;
-@group(0) @binding(7) var<storage, read_write> px_offsets: array<u32>;
-@group(0) @binding(8) var<storage, read_write> sorted: array<vec4<f32>>;
-@group(0) @binding(9) var<storage, read_write> sorted_off: array<f32>;
+@group(0) @binding(7) var<storage, read_write> sorted: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read_write> sorted_off: array<f32>;
+
+// start of the tile-tier offsets inside the offsets buffer
+fn tile_offsets_at(t: u32) -> u32 {
+    return u.ntx * u.nty * (TILE_PX + 1u) + u.tile_base + t;
+}
 """
     + _CHANNEL_WGSL
     + """
@@ -416,7 +431,7 @@ fn cs_scan() {
     var acc = 0u;
     let n_tiles = u.ntx * u.nty;
     for (var t = 0u; t < n_tiles; t++) {
-        tile_offsets[u.tile_base + t] = acc;
+        offsets[tile_offsets_at(t)] = acc;
         acc += atomicLoad(&tile_atomics[2u * t]);
     }
     atomicStore(&aux[1], acc);
@@ -461,9 +476,9 @@ fn cs_px_scan(
         scan_buf[lid] += add;
         workgroupBarrier();
     }
-    px_offsets[q] = scan_buf[lid] - own;  // inclusive -> exclusive
+    offsets[q] = scan_buf[lid] - own;  // inclusive -> exclusive
     if (lid == TILE_PX - 1u) {
-        px_offsets[u.ntx * u.nty * TILE_PX + tile] = scan_buf[lid];
+        offsets[u.ntx * u.nty * TILE_PX + tile] = scan_buf[lid];
     }
 }
 
@@ -473,8 +488,8 @@ fn cs_px_tile_scan() {
     var acc = 0u;
     let base = u.ntx * u.nty * TILE_PX;
     for (var t = 0u; t < u.ntx * u.nty; t++) {
-        let total = px_offsets[base + t];
-        px_offsets[base + t] = acc;
+        let total = offsets[base + t];
+        offsets[base + t] = acc;
         acc += total;
     }
 }
@@ -496,8 +511,8 @@ fn cs_bin_scatter(
         if (s.tier == 0u) {
             let q = center_q(s);
             let slot = atomicAdd(&px_atomics[2u * q + 1u], 1u);
-            let e = px_offsets[n_tiles * TILE_PX + q / TILE_PX]
-                + px_offsets[q] + slot;
+            let e = offsets[n_tiles * TILE_PX + q / TILE_PX]
+                + offsets[q] + slot;
             if (e < u.px_cap) {
                 sorted[e] = vec4<f32>(s.xp, s.yp, s.sx, s.sy);
                 if ((u.mode & (MODE_THETA | MODE_ROT)) != 0u) {
@@ -509,7 +524,7 @@ fn cs_bin_scatter(
                 for (var tx = s.j_min / i32(TILE); tx <= (s.j_max - 1) / i32(TILE); tx++) {
                     let tile = u32(ty) * u.ntx + u32(tx);
                     let slot = atomicAdd(&tile_atomics[2u * tile + 1u], 1u);
-                    let idx = tile_offsets[u.tile_base + tile] + slot;
+                    let idx = offsets[tile_offsets_at(tile)] + slot;
                     if (idx < u.bin_cap) {
                         bins[u.whale_cap + idx] = i;
                     }
@@ -553,7 +568,7 @@ fn cs_gather(
             }
             let nt = u32(qy) / TILE * u.ntx + u32(qx) / TILE;
             let q = nt * TILE_PX + (u32(qy) % TILE) * TILE + u32(qx) % TILE;
-            let start = px_offsets[n_tiles * TILE_PX + nt] + px_offsets[q];
+            let start = offsets[n_tiles * TILE_PX + nt] + offsets[q];
             let end = start + atomicLoad(&px_atomics[2u * q + 1u]);
             // the off-diagonal term is only stored (and read) when the
             // mode can produce one; uniform branch, no divergence
@@ -570,7 +585,7 @@ fn cs_gather(
     }
 
     // tile tier: stream this tile's bin through workgroup memory
-    let start = u.whale_cap + tile_offsets[u.tile_base + tile];
+    let start = u.whale_cap + offsets[tile_offsets_at(tile)];
     let count = atomicLoad(&tile_atomics[2u * tile + 1u]);
     var done = 0u;
     while (done < count) {
@@ -688,7 +703,7 @@ class WgpuBackend(SplatBackend):
         # channel columns (group 1), shared by every pipeline so the
         # cached per-channel bind groups fit them all
         self._group1_layout = device.create_bind_group_layout(
-            entries=[_storage_entry(b, read_only=True) for b in range(7)]
+            entries=[_storage_entry(b, read_only=True) for b in range(8)]
         )
         # scatter module (histogram): uniforms, u32 image, aux
         self._scatter_group0_layout = device.create_bind_group_layout(
@@ -696,7 +711,7 @@ class WgpuBackend(SplatBackend):
         )
         # tiled module (gaussian): + tier scratch
         self._tiled_group0_layout = device.create_bind_group_layout(
-            entries=[uniform_entry] + [_storage_entry(b) for b in range(1, 10)]
+            entries=[uniform_entry] + [_storage_entry(b) for b in range(1, 9)]
         )
         scatter_module = device.create_shader_module(code=_SCATTER_WGSL)
         tiled_module = device.create_shader_module(code=_TILED_WGSL)
@@ -742,6 +757,10 @@ class WgpuBackend(SplatBackend):
                 | wgpu.BufferUsage.COPY_SRC
                 | wgpu.BufferUsage.COPY_DST
             ),
+        )
+        # bound as the index list of non-indexed renders (never read)
+        self._no_indices = device.create_buffer(
+            size=4, usage=wgpu.BufferUsage.STORAGE
         )
         # one render at a time per device queue; the seam allows
         # concurrent callers (async worker + synchronous renders)
@@ -1030,6 +1049,15 @@ class WgpuBackend(SplatBackend):
         plan = []
         for index, channel in enumerate(columns):
             nbytes = self._channel_bytes(channel)
+            if (
+                channel.indices is not None
+                and budget is not None
+                and nbytes > budget
+            ):
+                # an index list needs its whole base resident; a base
+                # over the budget is gathered and chunked as rows
+                channel = channel.materialize()
+                nbytes = self._channel_bytes(channel)
             if budget is not None and nbytes > budget and len(channel) > 1:
                 n_chunks = ceil(nbytes / budget)
                 rows = ceil(len(channel) / n_chunks)
@@ -1089,6 +1117,8 @@ class WgpuBackend(SplatBackend):
             mode |= _MODE_THETA
         if self._rotation is not None:
             mode |= _MODE_ROT
+        if channel.indices is not None:
+            mode |= _MODE_INDEXED
         return mode
 
     def _write_uniforms(
@@ -1353,12 +1383,12 @@ class WgpuBackend(SplatBackend):
             "image", n_pixels * 4, clearable | wgpu.BufferUsage.COPY_SRC
         )
         self._ensure_buffer("tile_atomics", ntiles * 8, clearable)
-        self._ensure_buffer(
-            "tile_offsets", ntiles * 4 * n_channels, wgpu.BufferUsage.STORAGE
-        )
         self._ensure_buffer("px_atomics", ntiles * tile_px * 8, clearable)
+        # pixel-tier prefixes + bases, then per-channel tile offsets
         self._ensure_buffer(
-            "px_offsets", ntiles * (tile_px + 1) * 4, wgpu.BufferUsage.STORAGE
+            "offsets",
+            ntiles * (tile_px + 1 + n_channels) * 4,
+            wgpu.BufferUsage.STORAGE,
         )
         # grown on demand by _bin_phase / _render
         self._ensure_buffer(
@@ -1400,24 +1430,52 @@ class WgpuBackend(SplatBackend):
                 scratch(1, "image"),
                 entry(2, self._aux, 16),
                 scratch(3, "tile_atomics"),
-                scratch(4, "tile_offsets"),
+                scratch(4, "offsets"),
                 scratch(5, "bins"),
                 scratch(6, "px_atomics"),
-                scratch(7, "px_offsets"),
-                scratch(8, "sorted"),
-                scratch(9, "sorted_off"),
+                scratch(7, "sorted"),
+                scratch(8, "sorted_off"),
             ],
         )
 
     def _channel_bind_group(self, channel, cache=True):
         """``(bind group, stride, offset)`` over one channel's column
         buffers (x, y, lpx, lpy, z, lpz, angle; ``x`` stands in for
-        absent ones). With ``cache`` the upload is resident and reused
-        by later renders of the same memory — including strided or
-        offset views of it, which render straight from the resident
-        buffers through ``stride``/``offset``; otherwise the upload is
-        single-use (a chunk of a channel larger than the VRAM budget)
-        and freed after the render."""
+        absent ones) and its index list, if any. With ``cache`` the
+        column upload is resident and reused by later renders of the
+        same memory — including strided or offset views of it, which
+        render straight from the resident buffers through
+        ``stride``/``offset``; otherwise the upload is single-use (a
+        chunk of a channel larger than the VRAM budget) and freed after
+        the render. An index list is always a single-use upload, and
+        its bind group is not cached."""
+        buffers, stride, offset, group_key = self._column_buffers(
+            channel, cache
+        )
+        if channel.indices is not None and len(channel.indices):
+            index_buffer = self._device.create_buffer_with_data(
+                data=np.ascontiguousarray(channel.indices, dtype=np.uint32),
+                usage=wgpu.BufferUsage.STORAGE,
+            )
+            self._temp_buffers.append(index_buffer)
+            return self._bind_group(buffers + [index_buffer]), stride, offset
+        if group_key is None:
+            return (
+                self._bind_group(buffers + [self._no_indices]),
+                stride,
+                offset,
+            )
+        group = self._groups.get(group_key)
+        if group is None:
+            group = self._bind_group(buffers + [self._no_indices])
+            self._groups[group_key] = group
+        return group, stride, offset
+
+    def _column_buffers(self, channel, cache):
+        """``(column buffers, stride, offset, group key)`` for a
+        channel: resident buffers (possibly through a strided/offset
+        view) or fresh uploads; the group key is None for single-use
+        uploads."""
         arrays = self._column_arrays(channel)
         if cache:
             resolved = self._resolve_channel(channel)
@@ -1425,13 +1483,12 @@ class WgpuBackend(SplatBackend):
                 base_keys, stride, offset = resolved
                 for array_key in set(base_keys):
                     self._arrays.move_to_end(array_key)  # most recently used
-                group = self._groups.get(base_keys)
-                if group is None:
-                    group = self._bind_group(
-                        [self._arrays[k][1] for k in base_keys]
-                    )
-                    self._groups[base_keys] = group
-                return group, stride, offset
+                return (
+                    [self._arrays[k][1] for k in base_keys],
+                    stride,
+                    offset,
+                    base_keys,
+                )
         key = self._channel_key(channel)
         buffers = []
         temp = {}  # placeholders alias x: upload each array once
@@ -1458,10 +1515,7 @@ class WgpuBackend(SplatBackend):
                 self._temp_buffers.append(buffer)
                 temp[array_key] = buffer
             buffers.append(buffer)
-        group = self._bind_group(buffers)
-        if cache:
-            self._groups[key] = group
-        return group, 1, 0
+        return buffers, 1, 0, key if cache else None
 
     def _bind_group(self, buffers):
         return self._device.create_bind_group(

@@ -404,6 +404,110 @@ class TestResidentUploads:
         assert gpu.upload_count == uploads + 4
 
 
+class TestIndexedRenders:
+    """A row selection (the viewport pyramid's) renders from the
+    resident columns through an index list: no column upload, and the
+    shader's in-view mask prunes the pyramid's overspill."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, gpu):
+        gpu.release_uploads()
+        yield
+        gpu.release_uploads()
+
+    @pytest.fixture
+    def selection(self, locs):
+        # a block-like superset: rows in and around a zoomed viewport
+        x = locs["x"].to_numpy()
+        y = locs["y"].to_numpy()
+        return np.flatnonzero(
+            (x > 15) & (x < 50) & (y > 18) & (y < 46)
+        ).astype(np.uint32)
+
+    ZOOMED = dict(viewport=((20.0, 20.0), (44.0, 44.0)), disp_px_size=3.25)
+
+    @pytest.mark.parametrize("blur", ["gaussian", None, "smooth"])
+    def test_indexed_matches_cpu(self, gpu, locs, selection, blur):
+        columns = [
+            render._extract_render_columns(locs, blur, None, indices=selection)
+        ]
+        kwargs = dict(KWARGS, **self.ZOOMED)
+        ((n_gpu, img_gpu),) = gpu.render_channels(
+            columns, [INFO], blur_method=blur, **kwargs
+        )
+        ((n_cpu, img_cpu),) = _cpu(locs.iloc[selection], blur, **self.ZOOMED)
+        assert n_gpu == n_cpu
+        if blur == "gaussian":
+            _assert_parity(img_gpu, img_cpu)
+        elif blur is None:
+            assert img_gpu.sum() == img_cpu.sum()
+        else:
+            np.testing.assert_allclose(img_gpu, img_cpu, rtol=1e-4, atol=0.2)
+
+    def test_indexed_renders_reuse_resident_columns(
+        self, gpu, locs, selection
+    ):
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        uploads = gpu.upload_count
+        kwargs = dict(KWARGS, **self.ZOOMED)
+        for step in (1, 5):
+            columns = [
+                render._extract_render_columns(
+                    locs, "gaussian", None, indices=selection[::step]
+                )
+            ]
+            ((n, image),) = gpu.render_channels(
+                columns, [INFO], blur_method="gaussian", **kwargs
+            )
+            ((n_cpu, img_cpu),) = _cpu(
+                locs.iloc[selection[::step]], "gaussian", **self.ZOOMED
+            )
+            assert n == n_cpu
+            _assert_parity(image, img_cpu)
+        assert gpu.upload_count == uploads  # only index lists moved
+        assert gpu._temp_buffers == []  # and they were freed
+        assert len(gpu._arrays) == 4
+
+    def test_indexed_oversize_channel_is_gathered(
+        self, gpu, locs, selection, monkeypatch
+    ):
+        from picasso.render.gpu import backend_wgpu
+
+        monkeypatch.setattr(
+            backend_wgpu, "vram_budget_bytes", lambda: 4 * 4 * len(locs) // 3
+        )
+        columns = [
+            render._extract_render_columns(
+                locs, "gaussian", None, indices=selection
+            )
+        ]
+        kwargs = dict(KWARGS, **self.ZOOMED)
+        ((n, image),) = gpu.render_channels(
+            columns, [INFO], blur_method="gaussian", **kwargs
+        )
+        ((n_cpu, img_cpu),) = _cpu(
+            locs.iloc[selection], "gaussian", **self.ZOOMED
+        )
+        assert n == n_cpu
+        _assert_parity(image, img_cpu)
+
+    def test_empty_selection(self, gpu, locs):
+        columns = [
+            render._extract_render_columns(
+                locs, "gaussian", None, indices=np.zeros(0, np.uint32)
+            )
+        ]
+        ((n, image),) = gpu.render_channels(
+            columns, [INFO], blur_method="gaussian", **KWARGS
+        )
+        assert n == 0 and not image.any()
+
+
 class TestSeamSettings:
     """settings["Render"]["gpu"] selects the GPU; unsupported requests
     still fall back to the CPU through the seam."""
