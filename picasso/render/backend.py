@@ -48,8 +48,14 @@ class SplatBackend(abc.ABC):
     Every implementation must honor three contracts:
 
     - **Parity**: per channel, ``(n locs in view, float image)`` equal
-      to the CPU reference within the golden-scene tolerances; splatting
-      is additive, so total intensity is conserved.
+      to the CPU reference within the golden-scene tolerances
+      (``tests/test_render_goldens.py``: raw intensities within 5e-3
+      relative or 2e-3 of the image maximum, histogram counts exact up
+      to pixel-boundary rounding, total intensity within 1e-3);
+      splatting is additive, so total intensity is conserved. A
+      backend need not be bit-reproducible from run to run (the GPU
+      sums in hardware-dependent order), but its run-to-run spread
+      must stay within the same tolerances.
     - **Thread safety**: ``render_channels`` may be called concurrently
       (the asynchronous GUI render worker and a synchronous render such
       as the rotation window can overlap); implementations must

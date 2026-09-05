@@ -213,27 +213,45 @@ def _resolve_colors(spec, n_channels):
     raise ValueError(f"unknown colors spec: {spec}")
 
 
-def run_scene(scene, inputs, info):
+def run_scene(scene, inputs, info, via_backend=False):
     """Render one scene with the current implementation. Returns a dict
     of arrays keyed as in ``KIND_KEYS``."""
+    return run_scene_counted(scene, inputs, info, via_backend)[1]
+
+
+def run_scene_counted(scene, inputs, info, via_backend=False):
+    """``run_scene`` that also returns the number of localizations
+    rendered: ``(n, arrays)``.
+
+    ``via_backend`` routes the kernel-level ``render`` scenes through
+    ``render.scene._render_channels`` -- the splat-backend seam every
+    scene-level render and the GUI go through -- instead of calling
+    ``render.render`` (which always runs the CPU kernels). That is how
+    the GPU golden comparison renders the whole table on a non-CPU
+    backend; the scene-level kinds already go through the seam.
+    """
     pixelsize = lib.get_from_metadata(info, "Pixelsize", raise_error=True)
     disp_px_size = pixelsize / scene["oversampling"]
     kind = scene["kind"]
 
     if kind == "render":
-        _, image = render.render(
-            inputs[scene["input"]],
-            info,
+        kwargs = dict(
             disp_px_size=disp_px_size,
             viewport=scene["viewport"],
             blur_method=scene["blur"],
             min_blur_width=scene.get("min_blur_width", 0.0),
             ang=scene.get("ang"),
         )
-        return {"image": image}
+        if via_backend:
+            ((n, image),) = render.scene._render_channels(
+                [inputs[scene["input"]]], [info], **kwargs
+            )
+        else:
+            n, image = render.render(inputs[scene["input"]], info, **kwargs)
+        return n, {"image": image}
 
     if kind == "scene_single":
-        _, rgb, _, raw = render._render_single_channel(
+        n, rgb, _, raw = render._render_single_channel(
             inputs[scene["input"]],
             info,
             disp_px_size=disp_px_size,
@@ -245,11 +263,11 @@ def run_scene(scene, inputs, info):
             invert_colors=scene.get("invert", False),
             single_channel_colormap=scene["colormap"],
         )
-        return {"rgb": rgb, "raw": raw}
+        return n, {"rgb": rgb, "raw": raw}
 
     if kind == "scene_multi":
         channels = inputs[scene["input"]]
-        _, rgb, _, raw = render._render_multi_channel(
+        n, rgb, _, raw = render._render_multi_channel(
             channels,
             [info] * len(channels),
             disp_px_size=disp_px_size,
@@ -263,6 +281,6 @@ def run_scene(scene, inputs, info):
             invert_colors=scene.get("invert", False),
             background_color=scene.get("background"),
         )
-        return {"rgb": rgb, "raw": raw}
+        return n, {"rgb": rgb, "raw": raw}
 
     raise ValueError(f"unknown scene kind: {kind}")
