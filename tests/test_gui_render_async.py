@@ -235,6 +235,39 @@ class TestAsyncRender:
             default / view.pixelsize
         )
 
+    def test_persistent_backend_gets_whole_channels(self, window, monkeypatch):
+        view = window.view
+
+        class Persistent(render.SplatBackend):
+            name = "fake-gpu"
+            persistent_uploads = True
+
+            def render_channels(self, columns, info_arg, **kwargs):
+                return render.backend._cpu_backend().render_channels(
+                    columns, info_arg, **kwargs
+                )
+
+        backend_mod = gui_render.render.backend
+        zoomed = ((0.0, 0.0), (HEIGHT / 4, WIDTH / 4))
+        request = {"locs": view.locs[0], "contrast": (0.0, 1.0)}
+        # CPU backend: previews subsample when over the target
+        monkeypatch.setattr(view, "_interaction_subsample_target", lambda: 10)
+        assert view._subsample_request(dict(request))
+        # a backend with resident uploads: whole channels, no subsampling
+        monkeypatch.setattr(backend_mod, "_get_backend", lambda: Persistent())
+        locs, _ = view._prepare_locs_for_rendering(viewport=zoomed)
+        locs = locs if isinstance(locs, list) else [locs]  # single channel
+        assert len(locs[0]) == len(view.locs[0])
+        assert locs[0] is view.locs[0]  # the very same memory, no copy
+        assert not view._subsample_request(dict(request))
+        # closing the datasets releases the resident uploads
+        released = []
+        monkeypatch.setattr(
+            backend_mod, "release_uploads", lambda: released.append(1)
+        )
+        window.remove_locs()
+        assert released
+
     def test_ctrl_left_drag_pans_in_every_tool(self, window, qapp):
         from PyQt6 import QtCore, QtGui
 

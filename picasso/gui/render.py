@@ -872,6 +872,7 @@ class DatasetDialog(lib.Dialog):
         del self.window.view.infos[i]
         del self.window.view.index_blocks[i]
         del self.window.view.render_index[i]
+        render.backend.release_uploads()  # GPU memory of the dataset
 
         # delete zcoord from slicer dialog
         try:
@@ -9660,6 +9661,11 @@ class View(QtWidgets.QLabel):
             rendered_viewport,
         )
 
+    def _persistent_uploads(self) -> bool:
+        """Whether the active splat backend keeps localization uploads
+        resident across renders (see ``render.backend.SplatBackend``)."""
+        return render.backend._get_backend().persistent_uploads
+
     def _interaction_subsample_target(self) -> int:
         """Target loc count for interactive preview renders, from
         ``settings["Render"]["interaction_subsample"]`` (read per
@@ -9682,7 +9688,12 @@ class View(QtWidgets.QLabel):
         """Reduce a render request to a strided subsample for an
         interactive preview. Contrast limits are scaled by the sampled
         fraction so the preview keeps the full render's brightness.
-        Returns False when subsampling is disabled or not needed."""
+        Returns False when subsampling is disabled or not needed, and
+        always for a backend with resident uploads (GPU): a subset would
+        have to be uploaded, which costs more than rendering the
+        resident full data."""
+        if self._persistent_uploads():
+            return False
         target = self._interaction_subsample_target()
         if target <= 0:
             return False
@@ -12219,6 +12230,10 @@ class View(QtWidgets.QLabel):
         pyramid for efficient rendering of zoomed-in FOVs.
         """
         slicer = self.window.slicer_dialog.slicer_radio_button
+        # a backend with resident uploads (GPU) gets whole channels so
+        # its buffers are reused; it culls to the viewport itself
+        if viewport is not None and self._persistent_uploads():
+            viewport = None
         # render by property - use x_locs like multichannel rendering
         if self.window.display_settings_dlg.render_check.isChecked():
             # we assume one channel is loaded; x_locs was built from the
@@ -15065,6 +15080,7 @@ class Window(QtWidgets.QMainWindow):
         # the rebuilt UI replaces the view; its worker thread must stop
         # first, or its eventual destruction aborts the process
         self.view.stop_render_worker()
+        render.backend.release_uploads()  # GPU memory of the datasets
         for dialog in self.dialogs:
             dialog.close()
         self.initUI(plugins_loaded=True)

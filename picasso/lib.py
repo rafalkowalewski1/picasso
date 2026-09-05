@@ -148,6 +148,10 @@ RENDER_CPU_UTILIZATION_DEFAULT = 0.5
 #: rendered by the per-localization blur methods; settable per user in
 #: ``settings["Render"]["max_blur_width"]`` (see docs/render.rst)
 RENDER_MAX_BLUR_WIDTH_DEFAULT = 100.0
+#: GPU memory (MB) the render backend may keep resident for uploaded
+#: localizations; ``settings["Render"]["gpu"]["vram_budget_mb"]``, 0 =
+#: unlimited (see docs/render.rst)
+RENDER_VRAM_BUDGET_MB_DEFAULT = 2048
 
 
 def n_workers(

@@ -251,6 +251,134 @@ class TestWgpuBlurMethods:
             _gpu(gpu, locs_3d, "convolve", ang=ANG)
 
 
+class TestResidentUploads:
+    """Uploads persist across renders of the same memory, are bounded
+    by the VRAM budget (LRU), and oversize channels render in chunks."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, gpu):
+        gpu.release_uploads()
+        yield
+        gpu.release_uploads()
+
+    def _budget(self, monkeypatch, value):
+        from picasso.render.gpu import backend_wgpu
+
+        monkeypatch.setattr(backend_wgpu, "vram_budget_bytes", lambda: value)
+
+    def test_fresh_views_reuse_the_upload(self, gpu, locs):
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        uploads = gpu.upload_count
+        assert len(gpu._arrays) == 4  # x, y, lpx, lpy
+        # new column objects over the same DataFrame memory: no upload,
+        # and the histogram shares the resident x and y
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        gpu.render_channels(
+            _columns(locs, None), [INFO], blur_method=None, **KWARGS
+        )
+        assert gpu.upload_count == uploads
+        assert len(gpu._arrays) == 4
+        assert gpu.resident_bytes == 4 * 4 * len(locs)
+
+    def test_changed_data_uploads_again(self, gpu, locs):
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        uploads = gpu.upload_count
+        modified = locs.copy()  # new memory, as filtering/undrifting make
+        gpu.render_channels(
+            _columns(modified, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        assert gpu.upload_count == uploads + 4
+        assert len(gpu._arrays) == 8
+
+    def test_budget_evicts_least_recently_rendered(
+        self, gpu, locs, monkeypatch
+    ):
+        one = 4 * 4 * len(locs)
+        self._budget(monkeypatch, int(1.5 * one))
+        a, b = locs.copy(), locs.copy()
+        gpu.render_channels(
+            _columns(a, "gaussian"), [INFO], blur_method="gaussian", **KWARGS
+        )
+        gpu.render_channels(
+            _columns(b, "gaussian"), [INFO], blur_method="gaussian", **KWARGS
+        )
+        # a's least recently rendered columns were evicted to fit b
+        assert gpu.resident_bytes <= 1.5 * one
+        uploads = gpu.upload_count
+        gpu.render_channels(
+            _columns(b, "gaussian"), [INFO], blur_method="gaussian", **KWARGS
+        )
+        assert gpu.upload_count == uploads  # b is fully resident
+        # both channels in one request fit together within the budget
+        # only if nothing else is resident: eviction never touches
+        # channels of the current request
+        self._budget(monkeypatch, int(2.2 * one))
+        gpu.render_channels(
+            [c for c in _columns(a, "gaussian") + _columns(b, "gaussian")],
+            [INFO] * 2,
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        assert len(gpu._arrays) == 8
+        assert gpu.resident_bytes == 2 * one
+
+    @pytest.mark.parametrize("blur", ["gaussian", None])
+    def test_oversize_channel_renders_in_chunks(
+        self, gpu, locs, monkeypatch, blur
+    ):
+        one = 4 * 4 * len(locs)
+        self._budget(monkeypatch, one // 3)
+        uploads = gpu.upload_count
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs, blur)
+        ((n_cpu, img_cpu),) = _cpu(locs, blur)
+        assert n_gpu == n_cpu
+        if blur:
+            _assert_parity(img_gpu, img_cpu)
+        else:
+            assert img_gpu.sum() == img_cpu.sum()
+        assert gpu.upload_count > uploads  # chunk uploads happened...
+        assert len(gpu._arrays) == 0  # ...but none stays resident
+        assert gpu._temp_buffers == []  # and they are freed afterwards
+
+    def test_release_uploads(self, gpu, locs):
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        assert gpu.resident_bytes > 0
+        gpu.release_uploads()
+        assert gpu.resident_bytes == 0 and len(gpu._arrays) == 0
+        # rendering afterwards works and uploads afresh
+        uploads = gpu.upload_count
+        gpu.render_channels(
+            _columns(locs, "gaussian"),
+            [INFO],
+            blur_method="gaussian",
+            **KWARGS,
+        )
+        assert gpu.upload_count == uploads + 4
+
+
 class TestSeamOptIn:
     def test_env_var_selects_gpu_and_falls_back(
         self, gpu, locs, locs_3d, monkeypatch

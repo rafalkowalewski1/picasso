@@ -49,6 +49,15 @@ Not GPU-rendered (``SplatBackendError`` → CPU fallback): ``convolve``
 with a 3D rotation (its median blur width needs the rotated in-view
 mask on the CPU, where the whole render then belongs).
 
+Uploads are resident: a channel's columns are transferred once and
+reused by every later render of the same memory (the cache is keyed
+by the data pointers behind the arrays, so the GUI hands over whole
+channels rather than viewport slices — see
+``SplatBackend.persistent_uploads``). Residency is bounded by
+``settings["Render"]["gpu"]["vram_budget_mb"]`` with least recently
+rendered channels evicted first; a single channel larger than the
+budget is rendered in single-use row chunks whose images are summed.
+
 :authors: Rafal Kowalewski
 :copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
 """
@@ -56,13 +65,15 @@ mask on the CPU, where the whole render then belongs).
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
+from math import ceil
 from typing import Literal, TYPE_CHECKING
 
 import numpy as np
 import wgpu
 
 from ... import lib
-from ..backend import SplatBackend, SplatBackendError
+from ..backend import SplatBackend, SplatBackendError, vram_budget_bytes
 from ..geometry import to_rotation
 
 if TYPE_CHECKING:
@@ -627,6 +638,7 @@ class WgpuBackend(SplatBackend):
     """
 
     name = "wgpu"
+    persistent_uploads = True
 
     def __init__(self):
         try:
@@ -731,10 +743,20 @@ class WgpuBackend(SplatBackend):
         self._scratch = {}  # name -> (buffer, size)
         self._scatter_group0 = None
         self._tiled_group0 = None
-        # per-channel storage buffers cached by the identity of the
-        # column arrays (a reference is kept, so ids stay valid); the
-        # proper dataset-keyed invalidation is plan item P1.7
-        self._buffer_cache = {}
+        # resident uploads, one per column array, keyed by the memory
+        # behind the array (data pointer, size, dtype, strides) so fresh
+        # views of an unchanged DataFrame hit and columns shared between
+        # blur methods (x, y) are uploaded once; each entry keeps a
+        # reference to its source array so that memory cannot be
+        # recycled under the key. Least recently rendered first; bounded
+        # by the VRAM budget. Bind groups are cached per channel and
+        # dropped when any of their arrays is evicted.
+        self._arrays = OrderedDict()  # array key -> (array, buffer, nbytes)
+        self._groups = {}  # channel key -> bind group
+        self._cache_bytes = 0
+        self._temp_buffers = []  # chunked (uncached) uploads of a render
+        self.upload_count = 0  # statistics, e.g. for the bench
+        self.uploaded_bytes = 0
         self._base_f32 = None
         self._rotation = None  # (3x3 float32, center) when rotated
 
@@ -852,20 +874,31 @@ class WgpuBackend(SplatBackend):
             "ntx": ntx,
             "nty": nty,
         }
-        max_locs = max(len(c) for c in columns)
-        self._ensure_scratch(n_pixel_x * n_pixel_y, ntx * nty, len(columns))
-        if blur_method in ("gaussian", "gaussian_iso"):
-            self._ensure_buffer(
-                "sorted", max_locs * 16, wgpu.BufferUsage.STORAGE
-            )
-            self._ensure_buffer(
-                "sorted_off", max_locs * 4, wgpu.BufferUsage.STORAGE
-            )
-            iso = blur_method == "gaussian_iso"
-            bin_cap = self._bin_phase(columns, geometry, iso)
-            return self._splat_phase(columns, geometry, iso, bin_cap)
-        renderings = self._render_hist(columns, geometry)
-        if blur_method is None:
+        plan = self._plan_uploads(columns)
+        entries = [(chunk, cache) for chunk, _, cache in plan]
+        max_locs = max(len(chunk) for chunk, _, _ in plan)
+        self._ensure_scratch(n_pixel_x * n_pixel_y, ntx * nty, len(plan))
+        try:
+            if blur_method in ("gaussian", "gaussian_iso"):
+                self._ensure_buffer(
+                    "sorted", max_locs * 16, wgpu.BufferUsage.STORAGE
+                )
+                self._ensure_buffer(
+                    "sorted_off", max_locs * 4, wgpu.BufferUsage.STORAGE
+                )
+                iso = blur_method == "gaussian_iso"
+                bin_cap = self._bin_phase(entries, geometry, iso)
+                renderings = self._splat_phase(entries, geometry, iso, bin_cap)
+            else:
+                renderings = self._render_hist(entries, geometry)
+        finally:
+            # chunk uploads are single-use; the readbacks above completed,
+            # so the GPU is done with them
+            for buffer in self._temp_buffers:
+                buffer.destroy()
+            self._temp_buffers.clear()
+        renderings = self._merge_chunks(renderings, plan, len(columns))
+        if blur_method in (None, "gaussian", "gaussian_iso"):
             return renderings
         return self._filter(
             renderings,
@@ -875,6 +908,104 @@ class WgpuBackend(SplatBackend):
             min_blur_width,
             viewport,
         )
+
+    # ------------------------------------------------------------------
+    # resident uploads: budget, chunking, eviction
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _column_arrays(channel):
+        """The seven column arrays bound for a channel (``x`` stands in
+        for absent ones)."""
+        return tuple(
+            channel.x if column is None else column
+            for column in (
+                channel.x,
+                channel.y,
+                channel.lpx,
+                channel.lpy,
+                channel.z,
+                channel.lpz,
+                channel.angle,
+            )
+        )
+
+    @staticmethod
+    def _array_key(array):
+        interface = array.__array_interface__
+        return (
+            interface["data"][0],
+            array.nbytes,
+            array.dtype.str,
+            interface.get("strides"),
+        )
+
+    def _channel_key(self, channel):
+        return tuple(self._array_key(a) for a in self._column_arrays(channel))
+
+    @staticmethod
+    def _channel_bytes(channel):
+        """GPU bytes for one channel: 4 bytes per unique column."""
+        arrays = WgpuBackend._column_arrays(channel)
+        unique = {WgpuBackend._array_key(a): a for a in arrays}
+        return sum(len(a) * 4 for a in unique.values())
+
+    def _plan_uploads(self, columns):
+        """Decide per channel whether it renders from a resident upload
+        or, when larger than the VRAM budget, in single-use row chunks;
+        then evict least recently rendered channels to make room.
+
+        Returns ``(chunk_columns, channel_index, cacheable)`` entries in
+        render order."""
+        budget = vram_budget_bytes()
+        plan = []
+        for index, channel in enumerate(columns):
+            nbytes = self._channel_bytes(channel)
+            if budget is not None and nbytes > budget and len(channel) > 1:
+                n_chunks = ceil(nbytes / budget)
+                rows = ceil(len(channel) / n_chunks)
+                for start in range(0, len(channel), rows):
+                    stop = min(start + rows, len(channel))
+                    plan.append((channel.slice(start, stop), index, False))
+            else:
+                plan.append((channel, index, True))
+        if budget is not None:
+            needed = {}
+            for chunk, _, cache in plan:
+                if cache:
+                    for array in self._column_arrays(chunk):
+                        needed[self._array_key(array)] = len(array) * 4
+            new_bytes = sum(
+                nbytes
+                for key, nbytes in needed.items()
+                if key not in self._arrays
+            )
+            for key in list(self._arrays):
+                if self._cache_bytes + new_bytes <= budget:
+                    break
+                if key in needed:
+                    continue
+                self._evict(key)
+        return plan
+
+    def _evict(self, key):
+        _, buffer, nbytes = self._arrays.pop(key)
+        buffer.destroy()
+        self._cache_bytes -= nbytes
+        # bind groups over the evicted buffer are stale
+        for channel_key in [k for k in self._groups if key in k]:
+            del self._groups[channel_key]
+
+    @staticmethod
+    def _merge_chunks(renderings, plan, n_channels):
+        """Sum the chunk renderings of each channel back together."""
+        merged = [None] * n_channels
+        for (n, image), (_, index, _) in zip(renderings, plan):
+            if merged[index] is None:
+                merged[index] = [n, image]
+            else:
+                merged[index][0] += n
+                merged[index][1] += image
+        return [tuple(entry) for entry in merged]
 
     def _mode(self, channel, iso):
         mode = _MODE_ISO if iso else 0
@@ -936,7 +1067,7 @@ class WgpuBackend(SplatBackend):
             renderings.append((n, image))
         return renderings
 
-    def _render_hist(self, columns, geometry):
+    def _render_hist(self, entries, geometry):
         """Histogram: one scatter dispatch per channel (integer
         atomics; exact and deterministic)."""
         self._ensure_group0s()
@@ -944,7 +1075,7 @@ class WgpuBackend(SplatBackend):
         image_bytes = geometry["npx"] * geometry["npy"] * 4
         image = self._scratch["image"][0]
         readbacks = []
-        for channel in columns:
+        for channel, cache in entries:
             self._write_uniforms(
                 len(channel), geometry, mode=self._mode(channel, False)
             )
@@ -954,7 +1085,9 @@ class WgpuBackend(SplatBackend):
             compute_pass = encoder.begin_compute_pass()
             compute_pass.set_pipeline(self._pipelines["cs_hist"])
             compute_pass.set_bind_group(0, self._scatter_group0)
-            compute_pass.set_bind_group(1, self._channel_bind_group(channel))
+            compute_pass.set_bind_group(
+                1, self._channel_bind_group(channel, cache)
+            )
             compute_pass.dispatch_workgroups(self._grid(len(channel)))
             compute_pass.end()
             readbacks.append(self._readback(encoder, image_bytes))
@@ -1002,7 +1135,7 @@ class WgpuBackend(SplatBackend):
             out.append((n, _fftconvolve(image, blur_width, blur_height)))
         return out
 
-    def _bin_phase(self, columns, geometry, iso):
+    def _bin_phase(self, entries, geometry, iso):
         """Count tile-tier bin entries per tile per channel and
         prefix-sum the (persisted) offsets; returns the bin capacity."""
         self._ensure_group0s()
@@ -1010,10 +1143,10 @@ class WgpuBackend(SplatBackend):
         ntiles = geometry["ntx"] * geometry["nty"]
         tile_atomics = self._scratch["tile_atomics"][0]
         totals_rb = device.create_buffer(
-            size=16 * len(columns),
+            size=16 * len(entries),
             usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ,
         )
-        for c, channel in enumerate(columns):
+        for c, (channel, cache) in enumerate(entries):
             self._write_uniforms(
                 len(channel),
                 geometry,
@@ -1025,7 +1158,9 @@ class WgpuBackend(SplatBackend):
             encoder.clear_buffer(tile_atomics, 0, ntiles * 8)
             compute_pass = encoder.begin_compute_pass()
             compute_pass.set_bind_group(0, self._tiled_group0)
-            compute_pass.set_bind_group(1, self._channel_bind_group(channel))
+            compute_pass.set_bind_group(
+                1, self._channel_bind_group(channel, cache)
+            )
             compute_pass.set_pipeline(self._pipelines["cs_bin_count"])
             compute_pass.dispatch_workgroups(self._grid(len(channel)))
             compute_pass.set_pipeline(self._pipelines["cs_scan"])
@@ -1053,7 +1188,7 @@ class WgpuBackend(SplatBackend):
         self._ensure_buffer("bins", bins_bytes, wgpu.BufferUsage.STORAGE)
         return bin_cap
 
-    def _splat_phase(self, columns, geometry, iso, bin_cap):
+    def _splat_phase(self, entries, geometry, iso, bin_cap):
         """Per channel: sort the pixel tier, scatter the tile tier and
         whales, gather every pixel, add the whale pass, read back."""
         self._ensure_group0s()
@@ -1066,7 +1201,7 @@ class WgpuBackend(SplatBackend):
         tile_atomics = self._scratch["tile_atomics"][0]
         px_atomics = self._scratch["px_atomics"][0]
         readbacks = []
-        for c, channel in enumerate(columns):
+        for c, (channel, cache) in enumerate(entries):
             self._write_uniforms(
                 len(channel),
                 geometry,
@@ -1081,7 +1216,9 @@ class WgpuBackend(SplatBackend):
             encoder.clear_buffer(image, 0, image_bytes)
             compute_pass = encoder.begin_compute_pass()
             compute_pass.set_bind_group(0, self._tiled_group0)
-            compute_pass.set_bind_group(1, self._channel_bind_group(channel))
+            compute_pass.set_bind_group(
+                1, self._channel_bind_group(channel, cache)
+            )
             grid = self._grid(len(channel))
             compute_pass.set_pipeline(self._pipelines["cs_px_count"])
             compute_pass.dispatch_workgroups(grid)
@@ -1182,35 +1319,44 @@ class WgpuBackend(SplatBackend):
             ],
         )
 
-    def _channel_bind_group(self, channel):
-        """Storage buffers + bind group for one channel's columns (x,
-        y, lpx, lpy, z, lpz, angle; ``x`` stands in for absent ones),
-        cached by array identity while the arrays stay alive."""
-        arrays = tuple(
-            channel.x if column is None else column
-            for column in (
-                channel.x,
-                channel.y,
-                channel.lpx,
-                channel.lpy,
-                channel.z,
-                channel.lpz,
-                channel.angle,
-            )
-        )
-        key = tuple(id(a) for a in arrays)
-        cached = self._buffer_cache.get(key)
-        if cached is not None:
-            return cached[2]
-        uploaded = {}
+    def _channel_bind_group(self, channel, cache=True):
+        """Bind group over one channel's column buffers (x, y, lpx,
+        lpy, z, lpz, angle; ``x`` stands in for absent ones). With
+        ``cache`` the upload is resident and reused by later renders of
+        the same memory; otherwise it is single-use (a chunk of a
+        channel larger than the VRAM budget) and freed after the
+        render."""
+        arrays = self._column_arrays(channel)
+        key = self._channel_key(channel)
+        if cache and key in self._groups:
+            for array_key in set(key):
+                self._arrays.move_to_end(array_key)  # most recently used
+            return self._groups[key]
         buffers = []
+        temp = {}  # placeholders alias x: upload each array once
         for array in arrays:
-            if id(array) not in uploaded:
-                uploaded[id(array)] = self._device.create_buffer_with_data(
-                    data=np.ascontiguousarray(array, dtype=np.float32),
-                    usage=wgpu.BufferUsage.STORAGE,
-                )
-            buffers.append(uploaded[id(array)])
+            array_key = self._array_key(array)
+            if array_key in temp:
+                buffers.append(temp[array_key])
+                continue
+            resident = self._arrays.get(array_key) if cache else None
+            if resident is not None:
+                self._arrays.move_to_end(array_key)
+                buffers.append(resident[1])
+                continue
+            buffer = self._device.create_buffer_with_data(
+                data=np.ascontiguousarray(array, dtype=np.float32),
+                usage=wgpu.BufferUsage.STORAGE,
+            )
+            self.upload_count += 1
+            self.uploaded_bytes += buffer.size
+            if cache:
+                self._arrays[array_key] = (array, buffer, buffer.size)
+                self._cache_bytes += buffer.size
+            else:
+                self._temp_buffers.append(buffer)
+                temp[array_key] = buffer
+            buffers.append(buffer)
         group = self._device.create_bind_group(
             layout=self._group1_layout,
             entries=[
@@ -1225,15 +1371,26 @@ class WgpuBackend(SplatBackend):
                 for binding, buffer in enumerate(buffers)
             ],
         )
-        self._buffer_cache[key] = (arrays, tuple(uploaded.values()), group)
+        if cache:
+            self._groups[key] = group
         return group
 
+    @property
+    def resident_bytes(self) -> int:
+        """GPU bytes currently held by resident uploads."""
+        return self._cache_bytes
+
     def clear_cache(self) -> None:
-        """Drop cached channel buffers (frees GPU memory)."""
-        for _, buffers, _ in self._buffer_cache.values():
-            for buffer in buffers:
-                buffer.destroy()
-        self._buffer_cache.clear()
+        """Drop resident column uploads (frees GPU memory)."""
+        self._groups.clear()
+        for _, buffer, _ in self._arrays.values():
+            buffer.destroy()
+        self._arrays.clear()
+        self._cache_bytes = 0
+
+    def release_uploads(self) -> None:
+        """Drop resident uploads (a dataset was closed)."""
+        self.clear_cache()
 
     def close(self) -> None:
         """Release the device and all cached resources."""

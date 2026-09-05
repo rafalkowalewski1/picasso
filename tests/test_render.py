@@ -2250,6 +2250,30 @@ class TestSplatBackend:
         np.testing.assert_array_equal(image, image_ref)
         assert any("failing" in record.message for record in caplog.records)
 
+    def test_cpu_backend_has_no_resident_uploads(self, monkeypatch):
+        assert render.CpuBackend.persistent_uploads is False
+        assert render.backend._cpu_backend().persistent_uploads is False
+        # releasing is always safe, GPU backend or not
+        monkeypatch.setattr(render.backend, "_gpu_singleton", None)
+        render.backend.release_uploads()
+
+    def test_vram_budget_setting(self, monkeypatch):
+        default = lib.RENDER_VRAM_BUDGET_MB_DEFAULT * 2**20
+
+        def with_value(value):
+            settings = {"Render": {"gpu": {"vram_budget_mb": value}}}
+            monkeypatch.setattr(lib.io, "load_user_settings", lambda: settings)
+            return render.backend.vram_budget_bytes()
+
+        assert with_value(512) == 512 * 2**20
+        assert with_value(1.5) == int(1.5 * 2**20)
+        assert with_value(0) is None  # unlimited
+        assert with_value(-1) == default
+        assert with_value(True) == default
+        assert with_value("lots") == default
+        monkeypatch.setattr(lib.io, "load_user_settings", lambda: {})
+        assert render.backend.vram_budget_bytes() == default
+
     def test_concurrent_renders_are_correct(self, locs, info):
         # contract: render_channels may be called from several threads
         # at once (async worker + a synchronous render)

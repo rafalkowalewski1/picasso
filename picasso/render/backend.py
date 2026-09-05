@@ -16,6 +16,7 @@ from __future__ import annotations
 import abc
 import logging
 import os
+import threading
 from typing import Literal, TYPE_CHECKING
 
 from .. import lib
@@ -60,6 +61,10 @@ class SplatBackend(abc.ABC):
 
     #: short identifier used in logs and settings
     name: str = "abstract"
+    #: True when uploads persist across renders (GPU): callers then hand
+    #: over whole channels instead of viewport slices, so the resident
+    #: buffers are reused and nothing is transferred per view
+    persistent_uploads: bool = False
 
     @abc.abstractmethod
     def render_channels(
@@ -94,6 +99,10 @@ class SplatBackend(abc.ABC):
             order.
         """
 
+    def release_uploads(self) -> None:
+        """Drop resident localization uploads (no-op by default); the
+        GUI calls this when datasets are closed."""
+
     def close(self) -> None:
         """Release backend resources (no-op by default)."""
 
@@ -101,6 +110,7 @@ class SplatBackend(abc.ABC):
 _cpu_singleton: SplatBackend | None = None
 _gpu_singleton: SplatBackend | None = None
 _gpu_unavailable = False
+_singleton_lock = threading.Lock()  # GUI thread and render worker
 
 _log = logging.getLogger(__name__)
 
@@ -108,29 +118,56 @@ _log = logging.getLogger(__name__)
 def _cpu_backend() -> SplatBackend:
     """The process-wide CPU reference backend (also the fallback)."""
     global _cpu_singleton
-    if _cpu_singleton is None:
-        from .splat import CpuBackend
+    with _singleton_lock:
+        if _cpu_singleton is None:
+            from .splat import CpuBackend
 
-        _cpu_singleton = CpuBackend()
-    return _cpu_singleton
+            _cpu_singleton = CpuBackend()
+        return _cpu_singleton
 
 
 def _gpu_backend() -> SplatBackend | None:
     """The process-wide GPU backend, or None if it cannot start (the
     reason is logged once and never retried in this process)."""
     global _gpu_singleton, _gpu_unavailable
-    if _gpu_unavailable:
-        return None
-    if _gpu_singleton is None:
-        try:
-            from .gpu import WgpuBackend
-
-            _gpu_singleton = WgpuBackend()
-        except Exception as error:
-            _log.warning("GPU splat backend unavailable: %s", error)
-            _gpu_unavailable = True
+    with _singleton_lock:
+        if _gpu_unavailable:
             return None
-    return _gpu_singleton
+        if _gpu_singleton is None:
+            try:
+                from .gpu import WgpuBackend
+
+                _gpu_singleton = WgpuBackend()
+            except Exception as error:
+                _log.warning("GPU splat backend unavailable: %s", error)
+                _gpu_unavailable = True
+                return None
+        return _gpu_singleton
+
+
+def release_uploads() -> None:
+    """Drop the resident uploads of the GPU backend, if one is running
+    (e.g. when the GUI closes a dataset)."""
+    if _gpu_singleton is not None:
+        _gpu_singleton.release_uploads()
+
+
+def vram_budget_bytes() -> int | None:
+    """GPU memory the backend may keep resident for uploads, from
+    ``settings["Render"]["gpu"]["vram_budget_mb"]`` (read per render);
+    None means unlimited (``0`` in the settings), invalid values mean
+    ``lib.RENDER_VRAM_BUDGET_MB_DEFAULT``."""
+    try:
+        value = lib.io.load_user_settings()["Render"]["gpu"]["vram_budget_mb"]
+    except Exception:
+        value = lib.RENDER_VRAM_BUDGET_MB_DEFAULT
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or value < 0
+    ):
+        value = lib.RENDER_VRAM_BUDGET_MB_DEFAULT
+    return None if value == 0 else int(value * 2**20)
 
 
 def _get_backend() -> SplatBackend:
