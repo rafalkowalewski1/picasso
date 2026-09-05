@@ -5388,7 +5388,11 @@ class ZoomableLabel(QtWidgets.QLabel):
     def mousePressEvent(self, event) -> None:
         if not self._interactive:
             return
-        if event.button() == QtCore.Qt.MouseButton.RightButton:
+        # pan with the right button, or Ctrl (Cmd on macOS) + left
+        if event.button() == QtCore.Qt.MouseButton.RightButton or (
+            event.button() == QtCore.Qt.MouseButton.LeftButton
+            and event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier
+        ):
             self._drag_start = event.position()
 
     def mouseMoveEvent(self, event) -> None:
@@ -5405,7 +5409,10 @@ class ZoomableLabel(QtWidgets.QLabel):
             self._sync_linked()
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == QtCore.Qt.MouseButton.RightButton:
+        if event.button() in (
+            QtCore.Qt.MouseButton.RightButton,
+            QtCore.Qt.MouseButton.LeftButton,
+        ):
             self._drag_start = None
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -7762,6 +7769,7 @@ class View(QtWidgets.QLabel):
         self.group_color = []
         self._mode = "Zoom"
         self._pan = False
+        self._pan_button = None  # the button whose release ends a pan
         self._rectangle_pick_ongoing = False
         self._box_pick_ongoing = False
         self._brush_stroke_ongoing = False
@@ -10422,23 +10430,21 @@ class View(QtWidgets.QLabel):
         if not len(self.locs):
             return
 
+        # panning (right button, or Ctrl + left button in any tool)
+        if self._pan:
+            rel_x_move = (event.pos().x() - self.pan_start_x) / self.width()
+            rel_y_move = (event.pos().y() - self.pan_start_y) / self.height()
+            self.pan_relative(rel_y_move, rel_x_move)
+            self.pan_start_x = event.pos().x()
+            self.pan_start_y = event.pos().y()
+            return
+
         if self._mode == "Zoom":
             # if zooming in
             if self.rubberband.isVisible():
                 self.rubberband.setGeometry(
                     QtCore.QRect(self.origin, event.pos())
                 )
-            # if panning
-            if self._pan:
-                rel_x_move = (
-                    event.pos().x() - self.pan_start_x
-                ) / self.width()
-                rel_y_move = (
-                    event.pos().y() - self.pan_start_y
-                ) / self.height()
-                self.pan_relative(rel_y_move, rel_x_move)
-                self.pan_start_x = event.pos().x()
-                self.pan_start_y = event.pos().y()
         # if drawing a rectangular or box pick
         elif self._mode == "Pick":
             if self._pick_shape == "Rectangle":
@@ -10468,10 +10474,35 @@ class View(QtWidgets.QLabel):
                 self.update_scene(picks_only=True)
         super().leaveEvent(event)
 
+    def _start_pan(self, event: QtCore.QEvent) -> None:
+        """Begin dragging the view; ``_pan_button`` remembers which
+        button (right, or left with Ctrl) has to be released to end it."""
+        self._pan = True
+        self._pan_button = event.button()
+        self.pan_start_x = event.pos().x()
+        self.pan_start_y = event.pos().y()
+        self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
+    def _stop_pan(self) -> None:
+        """End dragging the view and restore the active tool's cursor."""
+        self._pan = False
+        self._pan_button = None
+        self.update_cursor()
+        self.update_scene()
+
     def mousePressEvent(self, event: QtCore.QEvent) -> None:
-        """Start drawing a zoom-in rectangle, start padding, start
-        drawing a pick rectangle."""
+        """Start panning, drawing a zoom-in rectangle or drawing a pick
+        shape."""
         if not len(self.locs):
+            return
+
+        # Ctrl (Cmd on macOS) + left button pans in every tool, so the
+        # view can be moved without leaving Pick or Measure
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and (
+            event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier
+        ):
+            self._start_pan(event)
             return
 
         if self._mode == "Zoom":
@@ -10486,11 +10517,7 @@ class View(QtWidgets.QLabel):
                         self.rubberband.show()
             # start panning
             elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                self._pan = True
-                self.pan_start_x = event.pos().x()
-                self.pan_start_y = event.pos().y()
-                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-                event.accept()
+                self._start_pan(event)
             else:
                 event.ignore()
         # start drawing rectangular or box pick
@@ -10514,8 +10541,8 @@ class View(QtWidgets.QLabel):
                     self._brush_last_pos = event.pos()
 
     def _mouse_release_zoom(self, event: QtCore.QEvent) -> None:
-        """Zooms in (left click) if the zoom-in rectangle is visible,
-        stops panning on right click."""
+        """Zooms in (left click) if the zoom-in rectangle is visible
+        (panning ends in ``mouseReleaseEvent``, for every tool)."""
         if (
             event.button() == QtCore.Qt.MouseButton.LeftButton
             and self.rubberband.isVisible()
@@ -10536,12 +10563,6 @@ class View(QtWidgets.QLabel):
                 viewport = [(y_min, x_min), (y_max, x_max)]
                 self.update_scene(viewport)
             self.rubberband.hide()
-        # stop panning
-        elif event.button() == QtCore.Qt.MouseButton.RightButton:
-            self._pan = False
-            self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
-            event.accept()
-            self.update_scene()
         else:
             event.ignore()
 
@@ -10635,6 +10656,13 @@ class View(QtWidgets.QLabel):
         """Zoom in, stop panning, add and remove picks, add and remove
         measure points."""
         if not len(self.locs):
+            return
+
+        # releasing the button that started a pan ends it, whatever the
+        # tool; the release is consumed so it adds no pick or point
+        if self._pan and event.button() == self._pan_button:
+            self._stop_pan()
+            event.accept()
             return
 
         if self._mode == "Zoom":

@@ -4,6 +4,8 @@ Last change: 05-SEP-2026 CEST
 
 ## 0.12.0
 - Fast rendering, `picasso.render` was turned into a submodule (no backward-compatibility issues).
+- Render: pan by dragging with Ctrl (Cmd on macOS) + the left mouse button, in every tool — so the view can be moved while picking or measuring. Dragging with the right mouse button still pans in the Zoom tool, and both also work in the Mask image dialog.
+- Render: new user setting `max_blur_width` (`Render` section of `~/.picasso/settings.yaml`, default 100 nm): localizations with a precision worse than this are not rendered by the individual-precision blur methods, see the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#cpu-usage-on-shared-workstations).
 
 ## 0.11.1
 

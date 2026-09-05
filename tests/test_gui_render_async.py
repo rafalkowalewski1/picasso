@@ -235,6 +235,71 @@ class TestAsyncRender:
             default / view.pixelsize
         )
 
+    def test_ctrl_left_drag_pans_in_every_tool(self, window, qapp):
+        from PyQt6 import QtCore, QtGui
+
+        view = window.view
+        # a rendered frame first, as in real use (picks draw onto it)
+        view.update_scene()
+        _wait_until(qapp, lambda: getattr(view, "image", None) is not None)
+        left = QtCore.Qt.MouseButton.LeftButton
+        right = QtCore.Qt.MouseButton.RightButton
+        ctrl = QtCore.Qt.KeyboardModifier.ControlModifier
+        plain = QtCore.Qt.KeyboardModifier.NoModifier
+
+        def send(kind, pos, button, modifiers):
+            event = QtGui.QMouseEvent(
+                kind,
+                QtCore.QPointF(*pos),
+                QtCore.QPointF(*pos),
+                button,
+                button,
+                modifiers,
+            )
+            handler = {
+                QtCore.QEvent.Type.MouseButtonPress: view.mousePressEvent,
+                QtCore.QEvent.Type.MouseMove: view.mouseMoveEvent,
+                QtCore.QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent,
+            }[kind]
+            handler(event)
+
+        def drag(button, modifiers):
+            send(
+                QtCore.QEvent.Type.MouseButtonPress,
+                (60, 60),
+                button,
+                modifiers,
+            )
+            assert view._pan
+            send(QtCore.QEvent.Type.MouseMove, (40, 60), button, modifiers)
+            send(
+                QtCore.QEvent.Type.MouseButtonRelease,
+                (40, 60),
+                button,
+                modifiers,
+            )
+            assert not view._pan
+
+        # Ctrl + left drag pans whatever the tool, adding no pick or point
+        for mode in ("Zoom", "Pick", "Measure"):
+            view._mode = mode
+            before = [tuple(edge) for edge in view.viewport]
+            drag(left, ctrl)
+            assert [tuple(edge) for edge in view.viewport] != before
+            assert view._picks == []
+            assert view._points == []
+        # the right button still pans in the zoom tool
+        view._mode = "Zoom"
+        before = [tuple(edge) for edge in view.viewport]
+        drag(right, plain)
+        assert [tuple(edge) for edge in view.viewport] != before
+        # and a plain left click in the pick tool still picks
+        view._mode = "Pick"
+        send(QtCore.QEvent.Type.MouseButtonPress, (60, 60), left, plain)
+        assert not view._pan
+        send(QtCore.QEvent.Type.MouseButtonRelease, (60, 60), left, plain)
+        assert len(view._picks) == 1
+
     def test_instant_geometric_preview(self, window, qapp):
         view = window.view
         # establish a fully rendered frame first
