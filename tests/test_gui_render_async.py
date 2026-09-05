@@ -13,6 +13,7 @@ re-enable it explicitly.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import numpy as np
@@ -105,9 +106,17 @@ class TestAsyncRender:
         view = window.view
         calls = []
         original = render.render_scene
+        # The worker is held inside its first render until the whole
+        # burst has been submitted, so coalescing is asserted as a
+        # property of the latest-wins queue rather than of thread
+        # scheduling: on a fast workstation this tiny render finished
+        # between two submissions and every request got rendered.
+        burst_submitted = threading.Event()
 
         def counting(*args, **kwargs):
             calls.append(1)
+            if len(calls) == 1:
+                assert burst_submitted.wait(15.0), "burst never submitted"
             return original(*args, **kwargs)
 
         monkeypatch.setattr(render, "render_scene", counting)
@@ -115,6 +124,7 @@ class TestAsyncRender:
         for _ in range(n_requests):
             view.update_scene()
         final_id = view._render_request_id
+        burst_submitted.set()
         _wait_until(qapp, lambda: getattr(view, "image", None) is not None)
         # drain any second render picked up after the first finished
         deadline = time.monotonic() + 1.0
