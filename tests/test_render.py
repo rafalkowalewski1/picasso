@@ -5,6 +5,8 @@ picasso.masking.
 :copyright: Copyright (c) 2025 Jungmann Lab, MPI of Biochemistry
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -2068,7 +2070,7 @@ class TestParallelChannels:
         self, locs, locs_3d, info, monkeypatch, rotated, blur
     ):
         # tiny chunk floor so the small fixture actually chunks
-        monkeypatch.setattr(render.scene, "_MIN_CHUNK_LOCS", 50)
+        monkeypatch.setattr(render.splat, "_MIN_CHUNK_LOCS", 50)
         source = locs_3d if rotated else locs
         channels = [source.iloc[i::3] for i in range(3)]
         kwargs = self._scene_kwargs(rotated, blur)
@@ -2088,7 +2090,7 @@ class TestParallelChannels:
         assert diff.max() <= 1
 
     def test_parallel_is_deterministic(self, locs, info, monkeypatch):
-        monkeypatch.setattr(render.scene, "_MIN_CHUNK_LOCS", 50)
+        monkeypatch.setattr(render.splat, "_MIN_CHUNK_LOCS", 50)
         self._force_budget(monkeypatch, 3)
         channels = [locs.iloc[i::3] for i in range(3)]
 
@@ -2123,7 +2125,7 @@ class TestParallelChannels:
     def test_convolve_never_chunks_but_gaussian_does(
         self, locs, info, monkeypatch
     ):
-        monkeypatch.setattr(render.scene, "_MIN_CHUNK_LOCS", 10)
+        monkeypatch.setattr(render.splat, "_MIN_CHUNK_LOCS", 10)
         self._force_budget(monkeypatch, 4)
         calls = []
         original = render._render_arrays
@@ -2132,8 +2134,8 @@ class TestParallelChannels:
             calls.append(1)
             return original(*args, **kwargs)
 
-        # patch where _render_channels looks the name up (scene's global)
-        monkeypatch.setattr(render.scene, "_render_arrays", counting)
+        # patch where CpuBackend looks the name up (splat's global)
+        monkeypatch.setattr(render.splat, "_render_arrays", counting)
         channels = [locs.iloc[i::2] for i in range(2)]
         common = dict(
             disp_px_size=PIXELSIZE / 10,
@@ -2177,6 +2179,102 @@ class TestParallelChannels:
             or (start, stop) == (0, sizes[i])
             for i, start, stop in tasks
         )
+
+
+# ---------------------------------------------------------------------------
+# Splat backend seam
+# ---------------------------------------------------------------------------
+
+
+class TestSplatBackend:
+    """_render_channels extracts columns once and routes them through
+    the backend selected by backend._get_backend(); a failing non-CPU
+    backend falls back to the CPU reference without crashing."""
+
+    KWARGS = dict(
+        disp_px_size=PIXELSIZE / 10,
+        viewport=FULL_VIEWPORT,
+        blur_method="gaussian",
+        min_blur_width=0.0,
+        ang=None,
+    )
+
+    def test_default_backend_is_cpu_singleton(self):
+        chosen = render.backend._get_backend()
+        assert isinstance(chosen, render.CpuBackend)
+        assert isinstance(chosen, render.SplatBackend)
+        assert chosen is render.backend._cpu_backend()
+        assert chosen is render.backend._get_backend()
+
+    def test_render_channels_routes_through_selected_backend(
+        self, locs, info, monkeypatch
+    ):
+        received = {}
+
+        class Fake(render.SplatBackend):
+            name = "fake"
+
+            def render_channels(self, columns, info_arg, **kwargs):
+                received["columns"] = columns
+                received["kwargs"] = kwargs
+                return render.backend._cpu_backend().render_channels(
+                    columns, info_arg, **kwargs
+                )
+
+        fake = Fake()
+        monkeypatch.setattr(render.scene, "_get_backend", lambda: fake)
+        renderings = render._render_channels([locs], [info], **self.KWARGS)
+        assert len(renderings) == 1
+        # the seam passes extracted column arrays, not DataFrames
+        assert all(
+            isinstance(c, render._RenderColumns) for c in received["columns"]
+        )
+        assert received["kwargs"]["blur_method"] == "gaussian"
+
+    def test_failing_backend_falls_back_to_cpu(
+        self, locs, info, monkeypatch, caplog
+    ):
+        class Failing(render.SplatBackend):
+            name = "failing"
+
+            def render_channels(self, columns, info_arg, **kwargs):
+                raise render.SplatBackendError("no device")
+
+        failing = Failing()
+        monkeypatch.setattr(render.scene, "_get_backend", lambda: failing)
+        with caplog.at_level(logging.WARNING, logger="picasso.render.scene"):
+            renderings = render._render_channels([locs], [info], **self.KWARGS)
+        ((n, image),) = renderings
+        n_ref, image_ref = render.render(locs, info, **self.KWARGS)
+        assert n == n_ref
+        np.testing.assert_array_equal(image, image_ref)
+        assert any("failing" in record.message for record in caplog.records)
+
+    def test_concurrent_renders_are_correct(self, locs, info):
+        # contract: render_channels may be called from several threads
+        # at once (async worker + a synchronous render)
+        from concurrent import futures
+
+        cpu = render.backend._cpu_backend()
+        channels = [locs.iloc[i::2] for i in range(2)]
+        columns = [
+            render._extract_render_columns(channel, "gaussian", None)
+            for channel in channels
+        ]
+        reference = cpu.render_channels(columns, [info] * 2, **self.KWARGS)
+        with futures.ThreadPoolExecutor(2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: cpu.render_channels(
+                        columns, [info] * 2, **self.KWARGS
+                    ),
+                    range(2),
+                )
+            )
+        for renderings in results:
+            for (n, image), (n_ref, image_ref) in zip(renderings, reference):
+                assert n == n_ref
+                np.testing.assert_array_equal(image, image_ref)
 
 
 # ---------------------------------------------------------------------------

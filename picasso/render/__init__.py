@@ -9,8 +9,9 @@ scale bar and picks.
 
 This package splits the former single-module implementation into
 ``kernels`` (numba CPU kernels), ``geometry`` (viewport and rotation
-math), ``splat`` (raw splat stage), ``overlays_qt`` (Qt overlay drawing
-and export), ``scene`` (multi-channel composition) and ``animation``.
+math), ``backend`` (splat backend contract), ``splat`` (raw splat
+stage and the CPU backend), ``overlays_qt`` (Qt overlay drawing and
+export), ``scene`` (multi-channel composition) and ``animation``.
 ``picasso.render`` re-exports the full former surface, so
 ``render.<name>`` keeps working unchanged.
 
@@ -56,8 +57,14 @@ from .geometry import (
     adjust_viewport_decorator,
     map_to_view,
 )
+from .backend import SplatBackend, SplatBackendError
 from .splat import (
     render,
+    CpuBackend,
+    _CHUNKABLE_BLUR_METHODS,
+    _MIN_CHUNK_LOCS,
+    _render_worker_budget,
+    _chunk_tasks,
     _RenderColumns,
     _extract_render_columns,
     _render_arrays,
@@ -103,10 +110,6 @@ from .scene import (
     get_colors_from_colormap,
     get_group_color,
     render_scene,
-    _CHUNKABLE_BLUR_METHODS,
-    _MIN_CHUNK_LOCS,
-    _render_worker_budget,
-    _chunk_tasks,
     _render_channels,
     _contrast_limits,
     _resolve_cmap,
