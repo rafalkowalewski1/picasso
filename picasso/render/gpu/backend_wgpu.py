@@ -640,11 +640,9 @@ class WgpuBackend(SplatBackend):
     name = "wgpu"
     persistent_uploads = True
 
-    def __init__(self):
+    def __init__(self, adapter: str = "high-performance"):
         try:
-            adapter = wgpu.gpu.request_adapter_sync(
-                power_preference="high-performance"
-            )
+            adapter = self._request_adapter(adapter)
             # raise the storage ceilings to what the adapter has;
             # channels are one f32 buffer per column, 4 bytes per loc
             wanted = (
@@ -667,6 +665,7 @@ class WgpuBackend(SplatBackend):
                 f"wgpu initialization failed: {error}"
             ) from error
         self._adapter_info = dict(adapter.info)
+        self._adapter_preference = adapter
         self._max_storage_bytes = limits.get(
             "max-storage-buffer-binding-size", 128 * 2**20
         )
@@ -759,6 +758,27 @@ class WgpuBackend(SplatBackend):
         self.uploaded_bytes = 0
         self._base_f32 = None
         self._rotation = None  # (3x3 float32, center) when rotated
+
+    @staticmethod
+    def _request_adapter(preference: str):
+        """``"high-performance"`` / ``"low-power"`` ask the system for
+        that kind of adapter; any other string selects the first
+        enumerated adapter whose name or backend contains it
+        (case-insensitive), e.g. ``"NVIDIA"`` on a dual-GPU laptop."""
+        if preference in ("high-performance", "low-power"):
+            return wgpu.gpu.request_adapter_sync(power_preference=preference)
+        wanted = preference.lower()
+        for candidate in wgpu.gpu.enumerate_adapters_sync():
+            info = candidate.info
+            label = f"{info.get('device', '')} {info.get('backend_type', '')}"
+            if wanted in label.lower():
+                return candidate
+        raise SplatBackendError(f"no GPU adapter matches '{preference}'")
+
+    def describe(self) -> str:
+        """E.g. ``"Apple M4 via Metal"``."""
+        info = self._adapter_info
+        return f"{info.get('device', 'unknown GPU')} via {info.get('backend_type', '?')}"
 
     # ------------------------------------------------------------------
     # public API

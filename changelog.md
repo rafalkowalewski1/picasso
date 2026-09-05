@@ -4,6 +4,7 @@ Last change: 05-SEP-2026 CEST
 
 ## 0.12.0
 - Fast rendering, `picasso.render` was turned into a submodule (no backward-compatibility issues).
+- **GPU rendering in Render (experimental)**: localizations are rendered on the graphics card (Metal, Direct3D 12 or Vulkan via `wgpu`, any vendor) — uploaded once, then every view is computed on the GPU, several times faster than the CPU threads. On by default where a GPU initializes (`Render > gpu > enabled: auto` in the settings file), with a silent CPU fallback; `adapter` picks the card on dual-GPU machines and `vram_budget_mb` caps the GPU memory. `View > Show info` shows the active renderer. Included in the one-click installers; pip users: `pip install picassosr[wgpu]`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#gpu-rendering).
 - Render: pan by dragging with Ctrl (Cmd on macOS) + the left mouse button, in every tool — so the view can be moved while picking or measuring. Dragging with the right mouse button still pans in the Zoom tool, and both also work in the Mask image dialog.
 - Render: new user setting `max_blur_width` (`Render` section of `~/.picasso/settings.yaml`, default 100 nm): localizations with a precision worse than this are not rendered by the individual-precision blur methods, see the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#cpu-usage-on-shared-workstations).
 

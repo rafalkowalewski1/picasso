@@ -428,7 +428,7 @@ def _render_channels(
         min_blur_width=min_blur_width,
         ang=ang,
     )
-    chosen = _get_backend()
+    chosen = _get_backend(n_locs=sum(len(c) for c in columns))
     cpu = _cpu_backend()
     if chosen is not cpu:
         try:

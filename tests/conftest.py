@@ -712,6 +712,21 @@ def dark_movie_factory():
 
 
 @pytest.fixture(autouse=True)
+def cpu_render_backend(request, monkeypatch):
+    """Rendering tests compare against CPU references, and the GPU
+    backend is selected by default wherever a GPU initializes, so every
+    test renders on the CPU unless it opts in: ``tests/test_render_gpu.py``
+    and tests marked ``gpu_backend`` see the real selection."""
+    if request.node.fspath.basename == "test_render_gpu.py":
+        return
+    if request.node.get_closest_marker("gpu_backend") is not None:
+        return
+    from picasso.render import backend
+
+    monkeypatch.setattr(backend, "_gpu_backend", lambda adapter, warn: None)
+
+
+@pytest.fixture(autouse=True)
 def synchronous_gui_rendering(monkeypatch):
     """GUI tests assert on images immediately after ``update_scene``,
     so the async render worker is disabled by default whenever the

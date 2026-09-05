@@ -379,16 +379,28 @@ class TestResidentUploads:
         assert gpu.upload_count == uploads + 4
 
 
-class TestSeamOptIn:
-    def test_env_var_selects_gpu_and_falls_back(
+class TestSeamSettings:
+    """settings["Render"]["gpu"] selects the GPU; unsupported requests
+    still fall back to the CPU through the seam."""
+
+    def _settings(self, monkeypatch, gpu):
+        from picasso import lib
+
+        monkeypatch.setattr(
+            lib.io, "load_user_settings", lambda: {"Render": {"gpu": gpu}}
+        )
+
+    def test_enabled_selects_gpu_and_falls_back(
         self, gpu, locs, locs_3d, monkeypatch
     ):
         from picasso.render.gpu import WgpuBackend
 
-        monkeypatch.setenv("PICASSO_GPU_SPLAT", "1")
+        self._settings(monkeypatch, {"enabled": "on"})
         monkeypatch.setattr(backend_mod, "_gpu_singleton", gpu)
         monkeypatch.setattr(backend_mod, "_gpu_unavailable", False)
+        monkeypatch.setattr(backend_mod, "_gpu_adapter", "high-performance")
         assert isinstance(backend_mod._get_backend(), WgpuBackend)
+        assert backend_mod.describe_active().startswith("GPU (")
         # supported: rendered on the GPU
         ((n, _),) = render._render_channels(
             [locs], [INFO], blur_method="gaussian", **KWARGS
@@ -405,8 +417,35 @@ class TestSeamOptIn:
         assert n_conv == n_cpu
         np.testing.assert_array_equal(img_conv, img_cpu)
 
-    def test_without_env_var_cpu_is_selected(self, monkeypatch):
-        monkeypatch.delenv("PICASSO_GPU_SPLAT", raising=False)
+    def test_off_selects_cpu(self, monkeypatch):
         from picasso.render.splat import CpuBackend
 
+        self._settings(monkeypatch, {"enabled": "off"})
         assert isinstance(backend_mod._get_backend(), CpuBackend)
+
+
+class TestAdapterSelection:
+    def test_name_substring_selects_the_adapter(self, gpu):
+        from picasso.render.gpu import WgpuBackend
+
+        name = gpu.describe().split(" via ")[0]
+        chosen = WgpuBackend(adapter=name[:5].lower())
+        try:
+            assert chosen.describe().startswith(name)
+        finally:
+            chosen.close()
+
+    def test_unknown_adapter_name_raises(self):
+        from picasso.render.gpu import WgpuBackend
+
+        with pytest.raises(SplatBackendError):
+            WgpuBackend(adapter="no such graphics card")
+
+    def test_low_power_preference_works(self):
+        from picasso.render.gpu import WgpuBackend
+
+        backend = WgpuBackend(adapter="low-power")
+        try:
+            assert " via " in backend.describe()
+        finally:
+            backend.close()

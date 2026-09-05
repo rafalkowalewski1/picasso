@@ -2104,23 +2104,30 @@ class TestParallelChannels:
         np.testing.assert_array_equal(raw1, raw2)
         np.testing.assert_array_equal(rgb1, rgb2)
 
-    def test_small_single_channel_never_reads_settings(
+    def test_small_single_channel_parses_settings_at_most_once(
         self, locs, info, monkeypatch
     ):
-        def _boom():
-            raise AssertionError("settings must not be read")
+        # backend selection reads the settings through an mtime cache;
+        # the CPU pool itself is not consulted for a small channel
+        calls = []
 
-        monkeypatch.setattr(lib.io, "load_user_settings", _boom)
-        ((n, image),) = render._render_channels(
-            [locs],
-            [info],
-            disp_px_size=PIXELSIZE / 10,
-            viewport=FULL_VIEWPORT,
-            blur_method="gaussian",
-            min_blur_width=0.0,
-            ang=None,
-        )
-        assert n > 0
+        def counting():
+            calls.append(1)
+            return {"Render": {"gpu": {"enabled": "off"}}}
+
+        monkeypatch.setattr(lib.io, "load_user_settings", counting)
+        for _ in range(3):
+            ((n, image),) = render._render_channels(
+                [locs],
+                [info],
+                disp_px_size=PIXELSIZE / 10,
+                viewport=FULL_VIEWPORT,
+                blur_method="gaussian",
+                min_blur_width=0.0,
+                ang=None,
+            )
+            assert n > 0
+        assert len(calls) <= 1
 
     def test_convolve_never_chunks_but_gaussian_does(
         self, locs, info, monkeypatch
@@ -2199,7 +2206,13 @@ class TestSplatBackend:
         ang=None,
     )
 
-    def test_default_backend_is_cpu_singleton(self):
+    def _settings(self, monkeypatch, gpu):
+        monkeypatch.setattr(
+            lib.io, "load_user_settings", lambda: {"Render": {"gpu": gpu}}
+        )
+
+    def test_cpu_backend_when_gpu_is_off(self, monkeypatch):
+        self._settings(monkeypatch, {"enabled": "off"})
         chosen = render.backend._get_backend()
         assert isinstance(chosen, render.CpuBackend)
         assert isinstance(chosen, render.SplatBackend)
@@ -2222,7 +2235,7 @@ class TestSplatBackend:
                 )
 
         fake = Fake()
-        monkeypatch.setattr(render.scene, "_get_backend", lambda: fake)
+        monkeypatch.setattr(render.scene, "_get_backend", lambda **kw: fake)
         renderings = render._render_channels([locs], [info], **self.KWARGS)
         assert len(renderings) == 1
         # the seam passes extracted column arrays, not DataFrames
@@ -2241,7 +2254,7 @@ class TestSplatBackend:
                 raise render.SplatBackendError("no device")
 
         failing = Failing()
-        monkeypatch.setattr(render.scene, "_get_backend", lambda: failing)
+        monkeypatch.setattr(render.scene, "_get_backend", lambda **kw: failing)
         with caplog.at_level(logging.WARNING, logger="picasso.render.scene"):
             renderings = render._render_channels([locs], [info], **self.KWARGS)
         ((n, image),) = renderings
@@ -2273,6 +2286,101 @@ class TestSplatBackend:
         assert with_value("lots") == default
         monkeypatch.setattr(lib.io, "load_user_settings", lambda: {})
         assert render.backend.vram_budget_bytes() == default
+
+    def test_gpu_settings_parsing(self, monkeypatch):
+        default_budget = lib.RENDER_VRAM_BUDGET_MB_DEFAULT * 2**20
+
+        def parsed(gpu):
+            self._settings(monkeypatch, gpu)
+            return render.backend.gpu_settings()
+
+        assert parsed({}) == {
+            "enabled": "auto",
+            "adapter": "high-performance",
+            "vram_budget_bytes": default_budget,
+        }
+        assert parsed({"enabled": "ON"})["enabled"] == "on"
+        # YAML's bare on/off parse as booleans
+        assert parsed({"enabled": True})["enabled"] == "on"
+        assert parsed({"enabled": False})["enabled"] == "off"
+        assert parsed({"enabled": "maybe"})["enabled"] == "auto"
+        assert parsed({"adapter": " NVIDIA "})["adapter"] == "NVIDIA"
+        assert parsed({"adapter": ""})["adapter"] == "high-performance"
+        assert parsed({"vram_budget_mb": 0})["vram_budget_bytes"] is None
+        assert parsed("nonsense")["enabled"] == "auto"
+        monkeypatch.setattr(lib.io, "load_user_settings", lambda: {})
+        assert render.backend.gpu_settings()["enabled"] == "auto"
+
+    def test_selection_honors_enabled_and_size(self, monkeypatch):
+        class FakeGpu(render.SplatBackend):
+            name = "fake-gpu"
+            persistent_uploads = True
+
+            def render_channels(self, *args, **kwargs):
+                raise NotImplementedError
+
+        fake = FakeGpu()
+        requested = []
+
+        def fake_gpu_backend(adapter, warn):
+            requested.append((adapter, warn))
+            return fake
+
+        monkeypatch.setattr(render.backend, "_gpu_backend", fake_gpu_backend)
+        cpu = render.backend._cpu_backend()
+        # off: the GPU is never even probed
+        self._settings(monkeypatch, {"enabled": "off"})
+        assert render.backend._get_backend() is cpu
+        assert render.backend._get_backend(n_locs=10**7) is cpu
+        assert requested == []
+        # auto / on: the GPU for large requests, the CPU for tiny ones
+        self._settings(monkeypatch, {"enabled": "auto", "adapter": "Intel"})
+        assert render.backend._get_backend() is fake
+        assert render.backend._get_backend(n_locs=10**7) is fake
+        assert requested[-1] == ("Intel", False)
+        assert (
+            render.backend._get_backend(n_locs=lib.RENDER_GPU_MIN_LOCS - 1)
+            is cpu
+        )
+        self._settings(monkeypatch, {"enabled": "on"})
+        assert render.backend._get_backend() is fake
+        assert requested[-1] == ("high-performance", True)
+        # an unavailable GPU means the CPU
+        monkeypatch.setattr(
+            render.backend, "_gpu_backend", lambda adapter, warn: None
+        )
+        assert render.backend._get_backend() is cpu
+        assert render.backend.describe_active().startswith("CPU (")
+
+    @pytest.mark.gpu_backend
+    def test_unavailable_gpu_logs_once_per_preference(
+        self, monkeypatch, caplog
+    ):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def no_wgpu(name, *args, **kwargs):
+            if name.startswith("picasso.render.gpu") or name == "wgpu":
+                raise ImportError("no wgpu here")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", no_wgpu)
+        monkeypatch.setattr(render.backend, "_gpu_singleton", None)
+        monkeypatch.setattr(render.backend, "_gpu_unavailable", False)
+        monkeypatch.setattr(render.backend, "_gpu_adapter", None)
+        with caplog.at_level(logging.INFO, logger="picasso.render.backend"):
+            assert (
+                render.backend._gpu_backend("high-performance", warn=True)
+                is None
+            )
+            assert (
+                render.backend._gpu_backend("high-performance", warn=True)
+                is None
+            )
+        unavailable = [r for r in caplog.records if "unavailable" in r.message]
+        assert len(unavailable) == 1
+        assert unavailable[0].levelno == logging.WARNING
 
     def test_concurrent_renders_are_correct(self, locs, info):
         # contract: render_channels may be called from several threads

@@ -152,6 +152,17 @@ RENDER_MAX_BLUR_WIDTH_DEFAULT = 100.0
 #: localizations; ``settings["Render"]["gpu"]["vram_budget_mb"]``, 0 =
 #: unlimited (see docs/render.rst)
 RENDER_VRAM_BUDGET_MB_DEFAULT = 2048
+#: ``settings["Render"]["gpu"]["enabled"]``: "auto" renders on the GPU
+#: whenever one initializes, "on" additionally warns when it does not,
+#: "off" never touches the GPU
+RENDER_GPU_ENABLED_DEFAULT = "auto"
+#: ``settings["Render"]["gpu"]["adapter"]``: "high-performance",
+#: "low-power", or a substring of the adapter's name
+RENDER_GPU_ADAPTER_DEFAULT = "high-performance"
+#: requests with fewer localizations render on the CPU even when the
+#: GPU is enabled: the GPU's fixed cost per render (~6 ms) exceeds the
+#: CPU's time for them
+RENDER_GPU_MIN_LOCS = 20_000
 
 
 def n_workers(

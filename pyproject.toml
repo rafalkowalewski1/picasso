@@ -64,10 +64,17 @@ cuda12 = [
 cuda13 = [
     "numba-cuda[cu13]"
 ]
-# Convenience alias for the most common CUDA toolkit (12.x). For other
-# toolkits install picassosr[cuda11] or picassosr[cuda13] instead.
+# GPU rendering in Render (WebGPU via wgpu: Metal, Direct3D 12 or
+# Vulkan; any vendor). Pinned to a minor version: the shader and API
+# surface are validated against it.
+wgpu = [
+    "wgpu>=0.32,<0.33"
+]
+# Convenience alias for all GPU features with the most common CUDA
+# toolkit (12.x). For other toolkits install picassosr[cuda11,wgpu] or
+# picassosr[cuda13,wgpu] instead.
 gpu = [
-    "picassosr[cuda12]"
+    "picassosr[cuda12,wgpu]"
 ]
 dev = [
     "build",
@@ -118,6 +125,7 @@ installer = [
     "czifile==2026.6.12",
     "liffile==2026.4.11",
     "imagecodecs==2026.6.6",
+    "wgpu==0.32.0",
     "pyinstaller==6.19.0",
     "PyImarisWriter==0.7.0; sys_platform=='win32'",
     "hdf5plugin==6.0.0; sys_platform=='win32'"
@@ -155,6 +163,7 @@ picasso = [
 markers = [
     "slow: long-running tests (multiprocessing, Bayesian fits, compare_models)",
     "gui: tests that build Qt widgets (applied automatically to anything using the qapp / qt_offscreen fixtures); deselect with -m \"not gui\"",
+    "gpu_backend: tests that exercise the real GPU render backend selection (every other test renders on the CPU reference, whatever the machine has)",
 ]
 
 [tool.black]

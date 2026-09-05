@@ -4843,8 +4843,18 @@ class InfoDialog(lib.Dialog):
         self.wh_label = QtWidgets.QLabel()
         display_grid.addWidget(self.wh_label, 3, 1)
 
+        renderer_label = QtWidgets.QLabel("Renderer:")
+        renderer_label.setToolTip(
+            "Where localizations are rendered: on the GPU (settings file,\n"
+            "Render > gpu) or by CPU worker threads (Render > "
+            "cpu_utilization)."
+        )
+        display_grid.addWidget(renderer_label, 4, 0)
+        self.renderer_label = QtWidgets.QLabel()
+        display_grid.addWidget(self.renderer_label, 4, 1)
+
         fov_buttons_layout = QtWidgets.QHBoxLayout()
-        display_grid.addLayout(fov_buttons_layout, 4, 0, 1, 2)
+        display_grid.addLayout(fov_buttons_layout, 5, 0, 1, 2)
 
         self.change_display = QtWidgets.QPushButton("Change field of view")
         self.change_display.setToolTip(
@@ -9604,6 +9614,15 @@ class View(QtWidgets.QLabel):
         dppvp = self.display_pixels_per_viewport_pixels()
         self.window.display_settings_dlg.set_zoom_silently(dppvp)
         self._compose_visible()
+        self._update_renderer_label()
+
+    def _update_renderer_label(self) -> None:
+        """Show in the info dialog where renders run (GPU or CPU)."""
+        try:
+            text = render.backend.describe_active()
+        except Exception:  # never let the info dialog break a render
+            text = "unknown"
+        self.window.info_dialog.renderer_label.setText(text)
 
     def _draw_picks_and_show(self) -> None:
         """Draw picks and points over the rendered image and display."""
@@ -9661,6 +9680,27 @@ class View(QtWidgets.QLabel):
             rendered_viewport,
         )
 
+    def _user_settings(self) -> dict:
+        """The user settings, re-read only when the settings file
+        changed: a YAML parse costs about a millisecond, too much for
+        the GUI thread on every render request. Keyed on the loader
+        as well, so a patched ``io.load_user_settings`` takes effect
+        immediately."""
+        loader = io.load_user_settings
+        try:
+            mtime = os.path.getmtime(io._user_settings_filename())
+        except OSError:
+            mtime = None
+        cached = getattr(self, "_settings_cache", None)
+        if cached is not None and cached[0] == mtime and cached[1] is loader:
+            return cached[2]
+        try:
+            settings = loader()
+        except Exception:
+            settings = {}
+        self._settings_cache = (mtime, loader, settings)
+        return settings
+
     def _persistent_uploads(self) -> bool:
         """Whether the active splat backend keeps localization uploads
         resident across renders (see ``render.backend.SplatBackend``)."""
@@ -9673,7 +9713,7 @@ class View(QtWidgets.QLabel):
         ``INTERACTION_SUBSAMPLE_AUTO``; a non-negative int sets the
         target; 0 or ``"off"`` disables subsampling."""
         try:
-            value = io.load_user_settings()["Render"]["interaction_subsample"]
+            value = self._user_settings()["Render"]["interaction_subsample"]
         except Exception:
             value = None
         if isinstance(value, bool):
@@ -10194,7 +10234,7 @@ class View(QtWidgets.QLabel):
         and a missing or invalid value means
         ``lib.RENDER_MAX_BLUR_WIDTH_DEFAULT``."""
         try:
-            value = io.load_user_settings()["Render"]["max_blur_width"]
+            value = self._user_settings()["Render"]["max_blur_width"]
         except Exception:
             return lib.RENDER_MAX_BLUR_WIDTH_DEFAULT
         if isinstance(value, str) and value.strip().lower() == "off":
