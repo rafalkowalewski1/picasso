@@ -4,8 +4,6 @@ These self-skip when ``wgpu`` is not installed or no GPU adapter is
 available.
 """
 
-import os
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,6 +21,16 @@ KWARGS = dict(
     min_blur_width=0.1,
     ang=None,
 )
+# f32 arithmetic vs the CPU's f64: measured ~1e-4 of the image maximum
+RTOL = 5e-3
+ATOL_FRACTION = 2e-3
+
+
+def _assert_parity(img_gpu, img_cpu):
+    np.testing.assert_allclose(
+        img_gpu, img_cpu, rtol=RTOL, atol=ATOL_FRACTION * img_cpu.max()
+    )
+    assert abs(img_gpu.sum() - img_cpu.sum()) < 1e-3 * img_cpu.sum()
 
 
 @pytest.fixture(scope="module")
@@ -51,41 +59,66 @@ def locs():
     )
 
 
-def _columns(locs, blur):
-    return [render._extract_render_columns(locs, blur, None)]
+@pytest.fixture(scope="module")
+def tiered_locs(locs):
+    """Precisions spanning all three GPU tiers at overview zoom:
+    sub-pixel (the bulk), tile-sized, and whole-view whales."""
+    tiered = locs.copy()
+    rng = np.random.default_rng(7)
+    tiered.loc[tiered.index[:200], ["lpx", "lpy"]] = rng.uniform(
+        0.5, 2.0, (200, 2)
+    ).astype(np.float32)
+    tiered.loc[tiered.index[200:220], ["lpx", "lpy"]] = rng.uniform(
+        5.0, 40.0, (20, 2)
+    ).astype(np.float32)
+    return tiered
 
 
-def _cpu(locs, blur):
+@pytest.fixture(scope="module")
+def locs_3d(locs):
+    """2D locs with z (camera-pixel scale, as the rotation math
+    treats it), lpz and a per-localization ellipse angle (degrees)."""
+    rng = np.random.default_rng(3)
+    locs_3d = locs.copy()
+    locs_3d["z"] = rng.uniform(-2.0, 2.0, len(locs)).astype(np.float32)
+    locs_3d["lpz"] = rng.uniform(0.05, 0.6, len(locs)).astype(np.float32)
+    locs_3d["angle"] = rng.uniform(0.0, 180.0, len(locs)).astype(np.float32)
+    return locs_3d
+
+
+ANG = (0.4, 0.2, 0.1)
+
+
+def _columns(locs, blur, ang=None):
+    return [render._extract_render_columns(locs, blur, ang)]
+
+
+def _cpu(locs, blur, **overrides):
+    kwargs = dict(KWARGS, **overrides)
     return backend_mod._cpu_backend().render_channels(
-        _columns(locs, blur), [INFO], blur_method=blur, **KWARGS
+        _columns(locs, blur, kwargs["ang"]), [INFO], blur_method=blur, **kwargs
+    )
+
+
+def _gpu(gpu, locs, blur, **overrides):
+    kwargs = dict(KWARGS, **overrides)
+    return gpu.render_channels(
+        _columns(locs, blur, kwargs["ang"]), [INFO], blur_method=blur, **kwargs
     )
 
 
 class TestWgpuParity:
     def test_gaussian_matches_cpu(self, gpu, locs):
         ((n_cpu, img_cpu),) = _cpu(locs, "gaussian")
-        ((n_gpu, img_gpu),) = gpu.render_channels(
-            _columns(locs, "gaussian"),
-            [INFO],
-            blur_method="gaussian",
-            **KWARGS,
-        )
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs, "gaussian")
         assert n_gpu == n_cpu
         assert img_gpu.shape == img_cpu.shape
         assert img_gpu.dtype == np.float32
-        # f32 arithmetic + Q16 fixed point vs the CPU's f64: bounded
-        # by ~1e-3 relative on meaningful pixels (measured ~4e-4 of
-        # the image maximum), intensity conserved
-        np.testing.assert_allclose(
-            img_gpu, img_cpu, rtol=5e-3, atol=2e-3 * img_cpu.max()
-        )
-        assert abs(img_gpu.sum() - img_cpu.sum()) < 1e-3 * img_cpu.sum()
+        _assert_parity(img_gpu, img_cpu)
 
     def test_hist_matches_cpu(self, gpu, locs):
         ((n_cpu, img_cpu),) = _cpu(locs, None)
-        ((n_gpu, img_gpu),) = gpu.render_channels(
-            _columns(locs, None), [INFO], blur_method=None, **KWARGS
-        )
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs, None)
         assert n_gpu == n_cpu
         assert img_gpu.sum() == img_cpu.sum()  # counts conserved exactly
         # locs within float rounding of a pixel boundary may land in
@@ -93,6 +126,55 @@ class TestWgpuParity:
         diff = np.abs(img_gpu - img_cpu)
         assert diff.max() <= 1
         assert (diff > 0).mean() < 1e-4
+
+    def test_all_tiers_at_overview(self, gpu, tiered_locs):
+        ((n_cpu, img_cpu),) = _cpu(tiered_locs, "gaussian", min_blur_width=0.0)
+        ((n_gpu, img_gpu),) = _gpu(
+            gpu, tiered_locs, "gaussian", min_blur_width=0.0
+        )
+        assert n_gpu == n_cpu
+        _assert_parity(img_gpu, img_cpu)
+
+    @pytest.mark.parametrize(
+        "viewport,disp_px_size",
+        [
+            (((20.0, 20.0), (44.0, 44.0)), 3.25),  # oversampling 40
+            (((30.0, 30.0), (34.0, 34.0)), 0.65),  # oversampling 200
+        ],
+    )
+    def test_zoomed_views(self, gpu, tiered_locs, viewport, disp_px_size):
+        # deeper zooms push ordinary localizations into the tile and
+        # whale tiers (footprints grow with the oversampling)
+        overrides = dict(
+            viewport=viewport, disp_px_size=disp_px_size, min_blur_width=0.0
+        )
+        ((n_cpu, img_cpu),) = _cpu(tiered_locs, "gaussian", **overrides)
+        ((n_gpu, img_gpu),) = _gpu(gpu, tiered_locs, "gaussian", **overrides)
+        assert n_gpu == n_cpu
+        _assert_parity(img_gpu, img_cpu)
+
+    def test_dense_hot_pixel(self, gpu):
+        # many localizations on one pixel center: nothing to overflow
+        # in a float gather, and the count stays exact
+        n = 200_000
+        dense = pd.DataFrame(
+            {
+                "x": np.full(n, 32.05, np.float32),
+                "y": np.full(n, 32.05, np.float32),
+                "lpx": np.full(n, 0.01, np.float32),
+                "lpy": np.full(n, 0.01, np.float32),
+            }
+        )
+        ((n_cpu, img_cpu),) = _cpu(dense, "gaussian", min_blur_width=0.0)
+        ((n_gpu, img_gpu),) = _gpu(gpu, dense, "gaussian", min_blur_width=0.0)
+        assert n_gpu == n_cpu == n
+        # 200k sequential float32 adds of ~16 accumulate ~0.1% rounding
+        # error on BOTH backends (in different orders), so compare
+        # looser than the general parity check
+        np.testing.assert_allclose(
+            img_gpu, img_cpu, rtol=1e-2, atol=1e-3 * img_cpu.max()
+        )
+        assert abs(img_gpu.sum() - img_cpu.sum()) < 1e-2 * img_cpu.sum()
 
     def test_multi_channel_order(self, gpu, locs):
         channels = [locs.iloc[i::3] for i in range(3)]
@@ -106,89 +188,73 @@ class TestWgpuParity:
         for channel, (n, image) in zip(channels, gpu_out):
             ((n_cpu, img_cpu),) = _cpu(channel, "gaussian")
             assert n == n_cpu
-            np.testing.assert_allclose(
-                image, img_cpu, rtol=5e-3, atol=2e-3 * img_cpu.max()
-            )
+            _assert_parity(image, img_cpu)
+
+    def test_empty_view(self, gpu, locs):
+        viewport = ((100.0, 100.0), (110.0, 110.0))  # no localizations
+        ((n_cpu, img_cpu),) = _cpu(locs, "gaussian", viewport=viewport)
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs, "gaussian", viewport=viewport)
+        assert n_gpu == n_cpu == 0
+        assert img_gpu.shape == img_cpu.shape
+        assert not img_gpu.any()
 
 
-class TestWgpuScope:
-    @pytest.mark.parametrize("blur", ["convolve", "smooth", "gaussian_iso"])
-    def test_unsupported_blur_raises(self, gpu, locs, blur):
-        with pytest.raises(SplatBackendError):
-            gpu.render_channels(
-                _columns(locs, blur), [INFO], blur_method=blur, **KWARGS
-            )
-
-    def test_rotation_raises(self, gpu, locs):
-        kwargs = dict(KWARGS, ang=(0.5, 0.0, 0.0))
-        with pytest.raises(SplatBackendError):
-            gpu.render_channels(
-                _columns(locs, "gaussian"),
-                [INFO],
-                blur_method="gaussian",
-                **kwargs,
-            )
-
-    def test_extreme_density_overflow_is_detected(self, gpu):
-        # a million locs exactly on one pixel center (viewport x_min=2,
-        # oversampling 10: x=32.05 -> display 300.5) with tiny
-        # precision: the pixel sum exceeds the fixed-point range at
-        # every retry scale, so the backend must refuse (the caller
-        # then renders on CPU)
-        n = 1_000_000
-        dense = pd.DataFrame(
-            {
-                "x": np.full(n, 32.05, np.float32),
-                "y": np.full(n, 32.05, np.float32),
-                "lpx": np.full(n, 2e-3, np.float32),
-                "lpy": np.full(n, 2e-3, np.float32),
-            }
-        )
-        kwargs = dict(KWARGS, min_blur_width=0.0)
-        with pytest.raises(SplatBackendError):
-            gpu.render_channels(
-                _columns(dense, "gaussian"),
-                [INFO],
-                blur_method="gaussian",
-                **kwargs,
-            )
-        # the sticky scale must not poison later ordinary renders
-        gpu._scale = 65536.0
-
-    def test_scale_adapts_and_recovers_density(self, gpu):
-        # dense but representable (pixel sum ~3e6 needs a scale coarser
-        # than Q16 but well above the minimum): the backend retries
-        # coarser and still conserves intensity
-        n = 200_000
-        dense = pd.DataFrame(
-            {
-                "x": np.full(n, 32.05, np.float32),
-                "y": np.full(n, 32.05, np.float32),
-                "lpx": np.full(n, 0.01, np.float32),
-                "lpy": np.full(n, 0.01, np.float32),
-            }
-        )
-        kwargs = dict(KWARGS, min_blur_width=0.0)
-        ((n_cpu, img_cpu),) = backend_mod._cpu_backend().render_channels(
-            _columns(dense, "gaussian"),
-            [INFO],
-            blur_method="gaussian",
-            **kwargs,
-        )
-        ((n_gpu, img_gpu),) = gpu.render_channels(
-            _columns(dense, "gaussian"),
-            [INFO],
-            blur_method="gaussian",
-            **kwargs,
-        )
+class TestWgpuBlurMethods:
+    def test_gaussian_iso_matches_cpu(self, gpu, locs):
+        ((n_cpu, img_cpu),) = _cpu(locs, "gaussian_iso")
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs, "gaussian_iso")
         assert n_gpu == n_cpu
-        assert gpu._scale < 65536.0  # adapted to the density
-        assert abs(img_gpu.sum() - img_cpu.sum()) < 1e-2 * img_cpu.sum()
-        gpu._scale = 65536.0
+        _assert_parity(img_gpu, img_cpu)
+
+    def test_angle_column_rotates_ellipses(self, gpu, locs_3d):
+        # 'gaussian' honors a per-localization ellipse angle
+        ((n_cpu, img_cpu),) = _cpu(locs_3d, "gaussian")
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs_3d, "gaussian")
+        assert n_gpu == n_cpu
+        _assert_parity(img_gpu, img_cpu)
+        # and it is not the plain (axis-aligned) rendering
+        ((_, img_plain),) = _cpu(locs_3d.drop(columns="angle"), "gaussian")
+        assert not np.allclose(img_gpu, img_plain, rtol=RTOL)
+
+    @pytest.mark.parametrize("blur", ["smooth", "convolve"])
+    def test_filtered_hist_matches_cpu(self, gpu, locs, blur):
+        # GPU histogram + the CPU backend's own image filter: identical
+        # up to the rare pixel-boundary count (spread by the filter)
+        ((n_cpu, img_cpu),) = _cpu(locs, blur)
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs, blur)
+        assert n_gpu == n_cpu
+        np.testing.assert_allclose(img_gpu, img_cpu, rtol=1e-4, atol=0.2)
+
+    @pytest.mark.parametrize(
+        "blur", [None, "smooth", "gaussian", "gaussian_iso"]
+    )
+    def test_rotated_matches_cpu(self, gpu, locs_3d, blur):
+        # 3D rotation about the view center happens in-shader in f32
+        # (the CPU rotates in f64): a handful of localizations land a
+        # pixel over or flip in/out of view, each touching the ~10
+        # pixels of its footprint, so compare by the fraction of
+        # mismatching pixels rather than pixel by pixel
+        ((n_cpu, img_cpu),) = _cpu(locs_3d, blur, ang=ANG)
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs_3d, blur, ang=ANG)
+        assert abs(n_gpu - n_cpu) <= max(3, 1e-4 * n_cpu)
+        close = np.isclose(
+            img_gpu, img_cpu, rtol=RTOL, atol=ATOL_FRACTION * img_cpu.max()
+        )
+        assert (~close).mean() < 5e-4
+        assert abs(img_gpu.sum() - img_cpu.sum()) < 1e-3 * img_cpu.sum()
+        # the rotation really was applied (differs from the 2D render)
+        ((_, img_2d),) = _cpu(locs_3d, blur)
+        assert not np.allclose(img_gpu, img_2d, rtol=RTOL, atol=1e-3)
+
+    def test_rotated_convolve_falls_to_cpu(self, gpu, locs_3d):
+        with pytest.raises(SplatBackendError):
+            _gpu(gpu, locs_3d, "convolve", ang=ANG)
 
 
 class TestSeamOptIn:
-    def test_env_var_selects_gpu_and_falls_back(self, gpu, locs, monkeypatch):
+    def test_env_var_selects_gpu_and_falls_back(
+        self, gpu, locs, locs_3d, monkeypatch
+    ):
         from picasso.render.gpu import WgpuBackend
 
         monkeypatch.setenv("PICASSO_GPU_SPLAT", "1")
@@ -199,13 +265,17 @@ class TestSeamOptIn:
         ((n, _),) = render._render_channels(
             [locs], [INFO], blur_method="gaussian", **KWARGS
         )
-        # unsupported: silently rendered on the CPU instead
+        ((n_ref, _),) = _cpu(locs, "gaussian")
+        assert n == n_ref
+        # unsupported (rotated convolve): silently rendered on the CPU,
+        # hence bit-identical to the CPU backend
+        kwargs = dict(KWARGS, ang=ANG)
         ((n_conv, img_conv),) = render._render_channels(
-            [locs], [INFO], blur_method="convolve", **KWARGS
+            [locs_3d], [INFO], blur_method="convolve", **kwargs
         )
-        ((n_ref, img_ref),) = _cpu(locs, "convolve")
-        assert n == n_ref and n_conv == n_ref
-        np.testing.assert_array_equal(img_conv, img_ref)
+        ((n_cpu, img_cpu),) = _cpu(locs_3d, "convolve", ang=ANG)
+        assert n_conv == n_cpu
+        np.testing.assert_array_equal(img_conv, img_cpu)
 
     def test_without_env_var_cpu_is_selected(self, monkeypatch):
         monkeypatch.delenv("PICASSO_GPU_SPLAT", raising=False)

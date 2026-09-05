@@ -47,6 +47,7 @@ def render(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ) = None,
     min_blur_width: float = 0.0,
+    max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """Render localizations given FOV and blur method.
@@ -75,6 +76,11 @@ def render(
         localizations which is the median localization precision.
     min_blur_width : float, optional
         Minimum size of blur (camera pixels).
+    max_blur_width : float, optional
+        Localizations whose ``lpx`` or ``lpy`` exceeds this (camera
+        pixels) are not rendered by 'gaussian' and 'gaussian_iso'
+        (see ``_extract_render_columns``). If None (default), all
+        localizations are rendered.
     ang : tuple or scipy.spatial.transform.Rotation, optional
         Rotation of locs; either a scipy Rotation (e.g. built from a
         quaternion) or a tuple of 3 rotation angles around the x, y
@@ -95,7 +101,7 @@ def render(
         Rendered image.
     """
     return _render_arrays(
-        _extract_render_columns(locs, blur_method, ang),
+        _extract_render_columns(locs, blur_method, ang, max_blur_width),
         info,
         disp_px_size=disp_px_size,
         viewport=viewport,
@@ -151,10 +157,19 @@ def _extract_render_columns(
     locs: pd.DataFrame,
     blur_method: str | None,
     ang: tuple | Rotation | None,
+    max_blur_width: float | None = None,
 ) -> _RenderColumns:
     """Pull the columns ``blur_method`` (and rotation) needs out of the
     DataFrame, converting angle to radians and applying the lpz
-    fallback once per channel."""
+    fallback once per channel.
+
+    With ``max_blur_width`` (camera pixels), the per-localization blur
+    methods (``gaussian``, ``gaussian_iso``) drop localizations whose
+    ``lpx`` or ``lpy`` exceeds it: such precisions are useless
+    artifacts of unfiltered data, their blur would cover a large FOV
+    with a negligible intensity, and rendering them costs too much.
+    Filtering here keeps every backend in agreement, including the count
+    of rendered localizations."""
     need_lp = blur_method in ("gaussian", "gaussian_iso", "convolve")
     lpx = locs["lpx"].to_numpy() if need_lp else None
     lpy = locs["lpy"].to_numpy() if need_lp else None
@@ -172,9 +187,16 @@ def _extract_render_columns(
             else:
                 # if lpz not found, make it twice the mean of lpx and lpy
                 lpz = 2 * locs[["lpx", "lpy"]].to_numpy().mean(axis=1)
-    return _RenderColumns(
-        locs["x"].to_numpy(), locs["y"].to_numpy(), lpx, lpy, lpz, angle, z
-    )
+    columns = [locs["x"].to_numpy(), locs["y"].to_numpy(), lpx, lpy, lpz]
+    columns += [angle, z]
+    if max_blur_width is not None and blur_method in (
+        "gaussian",
+        "gaussian_iso",
+    ):
+        keep = (lpx <= max_blur_width) & (lpy <= max_blur_width)
+        if not keep.all():
+            columns = [None if c is None else c[keep] for c in columns]
+    return _RenderColumns(*columns)
 
 
 def _render_arrays(

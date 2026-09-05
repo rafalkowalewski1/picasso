@@ -206,6 +206,35 @@ class TestAsyncRender:
         assert with_value("auto") == gui_render.INTERACTION_SUBSAMPLE_AUTO
         assert with_value(-5) == gui_render.INTERACTION_SUBSAMPLE_AUTO
 
+    def test_max_blur_width_setting(self, window, monkeypatch):
+        view = window.view
+        default = gui_render.lib.RENDER_MAX_BLUR_WIDTH_DEFAULT
+
+        def with_value(value):
+            settings = {"Render": {"max_blur_width": value}}
+            monkeypatch.setattr(
+                gui_render.io, "load_user_settings", lambda: settings
+            )
+            return view._max_blur_width()
+
+        assert with_value(250) == 250.0
+        assert with_value(0.5) == 0.5
+        assert with_value(0) is None
+        assert with_value("off") is None
+        assert with_value(-3) is None
+        assert with_value(True) == default
+        assert with_value("nonsense") == default
+        # missing key (the window's closeEvent expects the section)
+        monkeypatch.setattr(
+            gui_render.io, "load_user_settings", lambda: {"Render": {}}
+        )
+        assert view._max_blur_width() == default
+        # the render request carries it in camera pixels
+        kwargs = view.get_render_kwargs()
+        assert kwargs["max_blur_width"] == pytest.approx(
+            default / view.pixelsize
+        )
+
     def test_instant_geometric_preview(self, window, qapp):
         view = window.view
         # establish a fully rendered frame first

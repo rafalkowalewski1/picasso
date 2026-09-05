@@ -144,6 +144,10 @@ WINDOWS_MAX_WORKERS = 61
 #: whereas rendering runs continuously while a user interacts with the
 #: GUI, often on shared analysis workstations.
 RENDER_CPU_UTILIZATION_DEFAULT = 0.5
+#: localizations whose precision (lpx or lpy, nm) exceeds this are not
+#: rendered by the per-localization blur methods; settable per user in
+#: ``settings["Render"]["max_blur_width"]`` (see docs/render.rst)
+RENDER_MAX_BLUR_WIDTH_DEFAULT = 100.0
 
 
 def n_workers(

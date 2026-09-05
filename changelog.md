@@ -1,9 +1,9 @@
 # Changelog
 
-Last change: 04-SEP-2026 CEST
+Last change: 05-SEP-2026 CEST
 
 ## 0.12.0
-- Fast rendering
+- Fast rendering, `picasso.render` was turned into a submodule (no backward-compatibility issues).
 
 ## 0.11.1
 

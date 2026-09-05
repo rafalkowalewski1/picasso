@@ -653,9 +653,11 @@ Rendering uses a limited number of CPU worker threads so that Picasso stays poli
       cpu_utilization: 0.5
       max_workers: 4
       interaction_subsample: auto
+      max_blur_width: 100
 
 - ``cpu_utilization`` is the fraction of CPU cores that rendering may use, a number between 0 and 1 (exclusive). The default is 0.5 — lower than the 0.8 that ``Picasso: Localize`` uses for fitting (``Localize: cpu_utilization``): localization is a one-off batch job, whereas rendering runs continuously while you pan, zoom and adjust the display, often for many users at once on a shared machine. Invalid values silently fall back to the default.
 - ``max_workers`` (optional) is an absolute cap on the number of worker threads and wins over ``cpu_utilization``. For example, set it to 4 on a 64-core workstation to leave the remaining cores to your colleagues regardless of the fraction. Remove the key to disable the cap.
 - ``interaction_subsample`` controls the live previews shown *while* you pan or zoom: during a gesture, Picasso renders a subset of localizations (with the contrast compensated, so brightness does not change) and follows up with the full-quality image a moment after the gesture pauses. ``auto`` (the default) targets 500,000 localizations per preview; an integer sets a custom target; ``0`` or ``off`` disables previews so every frame renders at full quality.
+- ``max_blur_width`` (nm) applies to the two blur methods that use each localization's own precision (*Individual loc. prec.* and its isotropic variant): localizations whose ``lpx`` or ``lpy`` exceeds this value are **not rendered** at all. Unfiltered data occasionally contains localizations with absurd precisions of hundreds of pixels — their Gaussian would spread a negligible intensity over a large FOV, yet drawing one is computationally expensive. The default is 100 nm. ``0`` or ``off`` renders everything regardless of precision. We recommend removing such localizations upstream in Picasso: Filter.
 
 The settings file is read every time a render starts, so changes apply immediately, without restarting Picasso. At least one worker is always used and, on Windows, the number of workers is capped at 61 (a limitation of Python's process handling).

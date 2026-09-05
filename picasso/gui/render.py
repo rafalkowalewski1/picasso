@@ -10154,14 +10154,37 @@ class View(QtWidgets.QLabel):
             else min_blur_width
         )
         min_blur_width = float(min_blur_width / pixelsize)
+        max_blur_width = self._max_blur_width()
+        if max_blur_width is not None:
+            max_blur_width = float(max_blur_width / pixelsize)
 
         kwargs = {
             "disp_px_size": disp_px_size,
             "viewport": viewport,
             "blur_method": blur_method,
             "min_blur_width": min_blur_width,
+            "max_blur_width": max_blur_width,
         }
         return kwargs
+
+    def _max_blur_width(self) -> float | None:
+        """Maximum localization precision rendered by the individual
+        blur methods, in nm, from ``settings["Render"]["max_blur_width"]``
+        (read per render, so edits apply live): a positive number sets
+        the limit, ``0`` or ``"off"`` disables it (everything renders),
+        and a missing or invalid value means
+        ``lib.RENDER_MAX_BLUR_WIDTH_DEFAULT``."""
+        try:
+            value = io.load_user_settings()["Render"]["max_blur_width"]
+        except Exception:
+            return lib.RENDER_MAX_BLUR_WIDTH_DEFAULT
+        if isinstance(value, str) and value.strip().lower() == "off":
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return lib.RENDER_MAX_BLUR_WIDTH_DEFAULT
+        if value <= 0:
+            return None
+        return float(value)
 
     def load_single_txt(self, path: str) -> None:
         """Tries to load a single .txt file that contains either FOV

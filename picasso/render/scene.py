@@ -178,6 +178,7 @@ def render_scene(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ) = None,
     min_blur_width: float = 0.0,
+    max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
@@ -250,6 +251,10 @@ def render_scene(
         localizations which is the median localization precision.
     min_blur_width : float, optional
         Minimum size of blur (camera pixels).
+    max_blur_width : float, optional
+        Localizations whose ``lpx`` or ``lpy`` exceeds this (camera
+        pixels) are not rendered by 'gaussian' and 'gaussian_iso'.
+        If None (default), all localizations are rendered.
     ang : tuple or scipy.spatial.transform.Rotation, optional
         Rotation of locs; either a scipy Rotation (e.g. built from a
         quaternion) or a tuple of 3 rotation angles around the x, y
@@ -324,6 +329,7 @@ def render_scene(
             viewport=viewport,
             blur_method=blur_method,
             min_blur_width=min_blur_width,
+            max_blur_width=max_blur_width,
             ang=ang,
             contrast=contrast,
             invert_colors=invert_colors,
@@ -354,6 +360,7 @@ def render_scene(
             viewport=viewport,
             blur_method=blur_method,
             min_blur_width=min_blur_width,
+            max_blur_width=max_blur_width,
             ang=ang,
             contrast=contrast,
             relative_intensities=relative_intensities,
@@ -382,6 +389,7 @@ def _render_channels(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ),
     min_blur_width: float,
+    max_blur_width: float | None = None,
     ang: tuple | Rotation | None,
 ) -> list[tuple[int, lib.FloatArray2D]]:
     """Render each channel's raw grayscale image through the selected
@@ -401,7 +409,7 @@ def _render_channels(
         Localizations, one DataFrame per channel.
     info : list of list of dict
         Metadata, one entry per channel.
-    disp_px_size, viewport, blur_method, min_blur_width, ang
+    disp_px_size, viewport, blur_method, min_blur_width, max_blur_width, ang
         See ``render``.
 
     Returns
@@ -410,7 +418,8 @@ def _render_channels(
         ``render``'s ``(n, image)`` result per channel, in input order.
     """
     columns = [
-        _extract_render_columns(channel, blur_method, ang) for channel in locs
+        _extract_render_columns(channel, blur_method, ang, max_blur_width)
+        for channel in locs
     ]
     kwargs = dict(
         disp_px_size=disp_px_size,
@@ -478,6 +487,7 @@ def _render_multi_channel(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ) = None,
     min_blur_width: float = 0.0,
+    max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     contrast: tuple[float, float] | None = None,
     relative_intensities: list[float] | None = None,
@@ -507,6 +517,7 @@ def _render_multi_channel(
             viewport=viewport,
             blur_method=blur_method,
             min_blur_width=min_blur_width,
+            max_blur_width=max_blur_width,
             ang=ang,
         )
         n_locs = sum([rendering[0] for rendering in renderings])
@@ -594,6 +605,7 @@ def _render_single_channel(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ) = None,
     min_blur_width: float = 0.0,
+    max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
@@ -616,6 +628,7 @@ def _render_single_channel(
             viewport=viewport,
             blur_method=blur_method,
             min_blur_width=min_blur_width,
+            max_blur_width=max_blur_width,
             ang=ang,
         )
     vmin, vmax = contrast if contrast is not None else (None, None)

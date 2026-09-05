@@ -2278,6 +2278,95 @@ class TestSplatBackend:
 
 
 # ---------------------------------------------------------------------------
+# Maximum blur width (useless precisions are not rendered)
+# ---------------------------------------------------------------------------
+
+
+class TestMaxBlurWidth:
+    """``max_blur_width`` drops localizations with unphysical
+    precisions from the per-localization blur methods, consistently
+    for every entry point, count included."""
+
+    KWARGS = dict(
+        disp_px_size=PIXELSIZE / 10,
+        viewport=FULL_VIEWPORT,
+        min_blur_width=0.0,
+        ang=None,
+    )
+    LIMIT = 5.0  # camera pixels
+    N_WHALES = 8
+
+    @pytest.fixture
+    def whaled(self, locs):
+        whaled = locs.copy()
+        whaled.loc[whaled.index[:5], "lpx"] = 50.0
+        whaled.loc[whaled.index[5:8], "lpy"] = 50.0
+        return whaled
+
+    @pytest.mark.parametrize("blur", ["gaussian", "gaussian_iso"])
+    def test_extraction_drops_wide_precisions(self, whaled, blur):
+        columns = render._extract_render_columns(
+            whaled, blur, None, max_blur_width=self.LIMIT
+        )
+        assert len(columns) == len(whaled) - self.N_WHALES
+        assert columns.lpx.max() <= self.LIMIT
+        assert columns.lpy.max() <= self.LIMIT
+
+    @pytest.mark.parametrize("blur", [None, "smooth", "convolve"])
+    def test_other_methods_render_everything(self, whaled, blur):
+        columns = render._extract_render_columns(
+            whaled, blur, None, max_blur_width=self.LIMIT
+        )
+        assert len(columns) == len(whaled)
+
+    def test_no_limit_keeps_everything(self, whaled):
+        columns = render._extract_render_columns(whaled, "gaussian", None)
+        assert len(columns) == len(whaled)
+
+    def test_render_matches_prefiltered_locs(self, whaled, info):
+        keep = (whaled["lpx"] <= self.LIMIT) & (whaled["lpy"] <= self.LIMIT)
+        n_ref, image_ref = render.render(
+            whaled[keep], info, blur_method="gaussian", **self.KWARGS
+        )
+        n, image = render.render(
+            whaled,
+            info,
+            blur_method="gaussian",
+            max_blur_width=self.LIMIT,
+            **self.KWARGS,
+        )
+        assert n == n_ref
+        np.testing.assert_array_equal(image, image_ref)
+        # without the limit the whales are drawn (and counted)
+        n_all, image_all = render.render(
+            whaled, info, blur_method="gaussian", **self.KWARGS
+        )
+        assert n_all > n
+        assert not np.array_equal(image_all, image)
+
+    def test_render_scene_plumbs_the_limit(self, whaled, info):
+        _, n = render.render_scene(
+            whaled,
+            info,
+            blur_method="gaussian",
+            max_blur_width=self.LIMIT,
+            **self.KWARGS,
+        )
+        _, n_all = render.render_scene(
+            whaled, info, blur_method="gaussian", **self.KWARGS
+        )
+        assert n < n_all
+        _, n_multi = render.render_scene(
+            [whaled, whaled],
+            [info, info],
+            blur_method="gaussian",
+            max_blur_width=self.LIMIT,
+            **self.KWARGS,
+        )
+        assert n_multi == 2 * n
+
+
+# ---------------------------------------------------------------------------
 # Fused post-processing vs the legacy numpy chain
 # ---------------------------------------------------------------------------
 
