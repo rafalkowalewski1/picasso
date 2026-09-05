@@ -14,6 +14,8 @@ universal fallback; a GPU backend implements the same contract.
 from __future__ import annotations
 
 import abc
+import logging
+import os
 from typing import Literal, TYPE_CHECKING
 
 from .. import lib
@@ -97,6 +99,10 @@ class SplatBackend(abc.ABC):
 
 
 _cpu_singleton: SplatBackend | None = None
+_gpu_singleton: SplatBackend | None = None
+_gpu_unavailable = False
+
+_log = logging.getLogger(__name__)
 
 
 def _cpu_backend() -> SplatBackend:
@@ -109,10 +115,34 @@ def _cpu_backend() -> SplatBackend:
     return _cpu_singleton
 
 
+def _gpu_backend() -> SplatBackend | None:
+    """The process-wide GPU backend, or None if it cannot start (the
+    reason is logged once and never retried in this process)."""
+    global _gpu_singleton, _gpu_unavailable
+    if _gpu_unavailable:
+        return None
+    if _gpu_singleton is None:
+        try:
+            from .gpu import WgpuBackend
+
+            _gpu_singleton = WgpuBackend()
+        except Exception as error:
+            _log.warning("GPU splat backend unavailable: %s", error)
+            _gpu_unavailable = True
+            return None
+    return _gpu_singleton
+
+
 def _get_backend() -> SplatBackend:
     """The splat backend for the next render.
 
-    Always the CPU reference implementation for now; GPU selection via
-    ``settings["Render"]["gpu"]`` plugs in here (plan item P1.6).
+    The CPU reference implementation, unless the experimental
+    ``PICASSO_GPU_SPLAT=1`` environment variable opts into the GPU
+    backend (spike P1.3); the settings-driven choice via
+    ``settings["Render"]["gpu"]`` replaces this in plan item P1.6.
     """
+    if os.environ.get("PICASSO_GPU_SPLAT") == "1":
+        backend = _gpu_backend()
+        if backend is not None:
+            return backend
     return _cpu_backend()
