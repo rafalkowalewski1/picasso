@@ -253,12 +253,23 @@ class TestRendererParity:
         idx = spatial_index.query_viewport(pyr, viewport)
         filtered = locs.iloc[idx]
 
+        # 'convolve' blurs with the channel's global precision, which
+        # the GUI computes once over the whole channel and passes with
+        # every request; without it the median of the rows given
+        # would differ between the two calls
+        global_precision = None
+        if blur_method == "convolve":
+            global_precision = (
+                float(np.median(locs["lpx"])),
+                float(np.median(locs["lpy"])),
+            )
         n_full, img_full = render.render(
             locs,
             info,
             disp_px_size=30,
             viewport=viewport,
             blur_method=blur_method,
+            global_precision=global_precision,
         )
         n_filt, img_filt = render.render(
             filtered,
@@ -266,6 +277,7 @@ class TestRendererParity:
             disp_px_size=30,
             viewport=viewport,
             blur_method=blur_method,
+            global_precision=global_precision,
         )
 
         assert n_full == n_filt

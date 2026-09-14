@@ -55,7 +55,12 @@ from ..lib import (
     FloatArray1D,
     FloatArray2D,
 )
-from .render_worker import RenderWorker, subsample_request
+from .render_worker import (  # noqa: F401
+    RenderWorker,
+    global_precision_of,
+    global_precisions_for,
+    subsample_request,
+)
 from .rotation import RotationWindow, source_key
 from .app import run_gui
 
@@ -4857,7 +4862,15 @@ class InfoDialog(lib.Dialog):
         display_grid.addWidget(renderer_label, 4, 0)
         renderer_row = QtWidgets.QHBoxLayout()
         self.renderer_label = QtWidgets.QLabel()
-        self.renderer_label.setWordWrap(True)  # long GPU names
+        # long GPU names wrap inside the width the other rows define
+        # instead of widening the dialog: a wrapping label still asks
+        # for its single-line width unless its policy ignores it
+        self.renderer_label.setWordWrap(True)
+        self.renderer_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        self.renderer_label.setMinimumWidth(0)
         renderer_row.addWidget(self.renderer_label, 1)
         self.renderer_help = lib.HelpButton(self.GPU_DOCS_URL)
         self.renderer_help.setToolTip(
@@ -9640,6 +9653,9 @@ class View(QtWidgets.QLabel):
                 locs=locs,
                 info=infos,
                 indices=indices,
+                global_precision=self._global_precisions(
+                    locs, kwargs["blur_method"]
+                ),
                 **kwargs,
                 contrast=contrast,
                 invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
@@ -9678,6 +9694,38 @@ class View(QtWidgets.QLabel):
         """Whether the active splat backend keeps localization uploads
         resident across renders (see ``render.backend.SplatBackend``)."""
         return render.backend._get_backend().persistent_uploads
+
+    def _global_precision(self, channel: int) -> tuple[float, float] | None:
+        """The blur of *Global loc. prec.* for ``channel``: the median
+        ``lpx`` and ``lpy`` (camera pixels) of all its localizations,
+        computed once per loaded DataFrame and remembered, so the blur
+        is the same at every zoom level and rotation and no render
+        recomputes it. None when the channel has no precision columns."""
+        return global_precision_of(self.locs[channel], self._precision_cache)
+
+    def _global_precisions(self, locs, blur_method: str | None):
+        """``render_scene``'s ``global_precision`` for the prepared
+        ``locs`` (see ``_prepare_locs_for_rendering``): per rendered
+        frame, its source channel's global precision; None unless the
+        blur method is 'convolve'."""
+        if blur_method != "convolve":
+            return None
+        return global_precisions_for(
+            locs,
+            self.locs,
+            self._precision_cache,
+            checked=lambda i: (
+                len(self.locs) == 1
+                or self.window.dataset_dialog.checks[i].isChecked()
+            ),
+        )
+
+    @property
+    def _precision_cache(self) -> dict:
+        cache = getattr(self, "_precision_cache_", None)
+        if cache is None:
+            cache = self._precision_cache_ = {}
+        return cache
 
     def _interaction_subsample_target(self, population: int = 0) -> int:
         """Target count of in-view locs for interactive preview renders,
@@ -12117,6 +12165,9 @@ class View(QtWidgets.QLabel):
         qimage, n_locs, (vmin, vmax), raw_image = render.render_scene(
             locs=locs,
             info=infos,
+            global_precision=self._global_precisions(
+                locs, kwargs["blur_method"]
+            ),
             **kwargs,
             contrast=contrast,
             invert_colors=self.window.dataset_dialog.wbackground.isChecked(),

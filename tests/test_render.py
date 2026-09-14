@@ -2399,6 +2399,44 @@ class TestSplatBackend:
         assert render.backend._get_backend() is cpu
         assert render.backend.describe_active().startswith("CPU (")
 
+    def test_convolve_blur_is_the_global_precision(self, locs, info):
+        """'convolve' blurs with the caller's global precision, else with
+        the median precision of the rows rendered (not of those in
+        view), so the blur is the same at every zoom and rotation."""
+        zoomed = ((8.0, 8.0), (20.0, 20.0))
+        kwargs = dict(disp_px_size=PIXELSIZE / 4, blur_method="convolve")
+        n, default = render.render(locs, info, viewport=zoomed, **kwargs)
+        medians = (
+            float(np.median(locs["lpx"])),
+            float(np.median(locs["lpy"])),
+        )
+        _, explicit = render.render(
+            locs, info, viewport=zoomed, global_precision=medians, **kwargs
+        )
+        np.testing.assert_array_equal(default, explicit)
+        # an explicit blur is honored: wider blurs are flatter, and the
+        # intensity is conserved
+        _, narrow = render.render(
+            locs, info, viewport=zoomed, global_precision=(0.5, 0.5), **kwargs
+        )
+        _, wide = render.render(
+            locs, info, viewport=zoomed, global_precision=(2.0, 2.0), **kwargs
+        )
+        assert wide.max() < narrow.max() < default.max()
+        # a wider blur spills a little more intensity over the border
+        assert 0.9 * narrow.sum() < wide.sum() <= narrow.sum()
+        # the scene entry point takes one pair per channel
+        _, _, raw = render.render_scene(
+            [locs, locs],
+            [info, info],
+            viewport=zoomed,
+            global_precision=[(0.5, 0.5), (2.0, 2.0)],
+            return_raw_image=True,
+            **kwargs,
+        )
+        np.testing.assert_array_equal(raw[0], narrow)
+        np.testing.assert_array_equal(raw[1], wide)
+
     def test_rotated_renders_reach_the_gpu_sooner(
         self, locs_3d, info, monkeypatch
     ):

@@ -246,9 +246,32 @@ class TestWgpuBlurMethods:
         ((_, img_2d),) = _cpu(locs_3d, blur)
         assert not np.allclose(img_gpu, img_2d, rtol=RTOL, atol=1e-3)
 
-    def test_rotated_convolve_falls_to_cpu(self, gpu, locs_3d):
-        with pytest.raises(SplatBackendError):
-            _gpu(gpu, locs_3d, "convolve", ang=ANG)
+    def test_rotated_convolve_matches_cpu(self, gpu, locs_3d):
+        # the blur is the channel's global precision on both backends,
+        # so no rotated in-view mask is needed and the GPU renders it
+        ((n_cpu, img_cpu),) = _cpu(locs_3d, "convolve", ang=ANG)
+        ((n_gpu, img_gpu),) = _gpu(gpu, locs_3d, "convolve", ang=ANG)
+        assert abs(n_gpu - n_cpu) <= max(3, 1e-4 * n_cpu)
+        np.testing.assert_allclose(img_gpu, img_cpu, rtol=1e-4, atol=0.2)
+
+    def test_global_precision_sets_the_convolve_blur(self, gpu, locs):
+        wide = render._extract_render_columns(
+            locs, "convolve", None, global_precision=(0.6, 0.6)
+        )
+        narrow = render._extract_render_columns(
+            locs, "convolve", None, global_precision=(0.1, 0.1)
+        )
+        ((_, img_wide),) = gpu.render_channels(
+            [wide], [INFO], blur_method="convolve", **KWARGS
+        )
+        ((_, img_narrow),) = gpu.render_channels(
+            [narrow], [INFO], blur_method="convolve", **KWARGS
+        )
+        assert img_wide.max() < img_narrow.max()  # wider blur, flatter
+        ((_, img_cpu),) = backend_mod._cpu_backend().render_channels(
+            [wide], [INFO], blur_method="convolve", **KWARGS
+        )
+        np.testing.assert_allclose(img_wide, img_cpu, rtol=1e-4, atol=0.2)
 
 
 class TestResidentUploads:
@@ -536,13 +559,19 @@ class TestSeamSettings:
         )
         ((n_ref, _),) = _cpu(locs, "gaussian")
         assert n == n_ref
-        # unsupported (rotated convolve): silently rendered on the CPU,
-        # hence bit-identical to the CPU backend
+        # a request the GPU refuses (a 3D rotation of data without z)
+        # is silently rendered on the CPU, hence bit-identical to it
         kwargs = dict(KWARGS, ang=ANG)
-        ((n_conv, img_conv),) = render._render_channels(
-            [locs_3d], [INFO], blur_method="convolve", **kwargs
+        flat = locs_3d.assign(z=0.0)
+        monkeypatch.setattr(
+            gpu,
+            "render_channels",
+            lambda *a, **k: (_ for _ in ()).throw(SplatBackendError("forced")),
         )
-        ((n_cpu, img_cpu),) = _cpu(locs_3d, "convolve", ang=ANG)
+        ((n_conv, img_conv),) = render._render_channels(
+            [flat], [INFO], blur_method="convolve", **kwargs
+        )
+        ((n_cpu, img_cpu),) = _cpu(flat, "convolve", ang=ANG)
         assert n_conv == n_cpu
         np.testing.assert_array_equal(img_conv, img_cpu)
 

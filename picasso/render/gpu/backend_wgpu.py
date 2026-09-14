@@ -45,9 +45,9 @@ summed follows the (parallel, nondeterministic) bin order, so repeated
 renders may differ in the last float bits — unlike the CPU backend,
 which is deterministic for a given worker budget.
 
-Not GPU-rendered (``SplatBackendError`` → CPU fallback): ``convolve``
-with a 3D rotation (its median blur width needs the rotated in-view
-mask on the CPU, where the whole render then belongs).
+Every blur method is GPU-rendered, rotated or not: ``convolve``'s blur
+is the channel's global precision (``splat.global_blur``), so no
+in-view mask is ever needed.
 
 Uploads are resident: a channel's columns are transferred once and
 reused by every later render of the same memory (the cache is keyed
@@ -854,10 +854,6 @@ class WgpuBackend(SplatBackend):
         if viewport is None:
             raise SplatBackendError("GPU rendering needs an explicit viewport")
         if ang is not None:
-            if blur_method == "convolve":
-                raise SplatBackendError(
-                    "convolve with 3D rotation is CPU-rendered"
-                )
             if any(c.z is None for c in columns):
                 raise SplatBackendError("3D rotation needs z")
         if blur_method in ("gaussian", "gaussian_iso"):
@@ -966,12 +962,7 @@ class WgpuBackend(SplatBackend):
         if blur_method in (None, "gaussian", "gaussian_iso"):
             return renderings
         return self._filter(
-            renderings,
-            columns,
-            blur_method,
-            oversampling,
-            min_blur_width,
-            viewport,
+            renderings, columns, blur_method, oversampling, min_blur_width
         )
 
     # ------------------------------------------------------------------
@@ -1233,19 +1224,12 @@ class WgpuBackend(SplatBackend):
         return self._collect(readbacks, geometry, as_float=False)
 
     def _filter(
-        self,
-        renderings,
-        columns,
-        blur_method,
-        oversampling,
-        min_blur_width,
-        viewport,
+        self, renderings, columns, blur_method, oversampling, min_blur_width
     ):
         """``smooth`` / ``convolve``: the CPU image filter on the GPU
         histogram, with the CPU backend's exact blur widths."""
-        from ..splat import _fftconvolve
+        from ..splat import _fftconvolve, global_blur
 
-        (y_min, x_min), (y_max, x_max) = viewport
         out = []
         for channel, (n, image) in zip(columns, renderings):
             if n == 0:
@@ -1254,20 +1238,10 @@ class WgpuBackend(SplatBackend):
             if blur_method == "smooth":
                 out.append((n, _fftconvolve(image, 1, 1)))
                 continue
-            # convolve: global blur = median precision of the in-view
-            # localizations (non-rotated, so the mask is the plain one)
-            in_view = (
-                (channel.x > x_min)
-                & (channel.y > y_min)
-                & (channel.x < x_max)
-                & (channel.y < y_max)
-            )
-            blur_width = oversampling * max(
-                np.median(channel.lpx[in_view]), min_blur_width
-            )
-            blur_height = oversampling * max(
-                np.median(channel.lpy[in_view]), min_blur_width
-            )
+            # convolve: the channel's global blur, as on the CPU
+            lpx, lpy = global_blur(channel)
+            blur_width = oversampling * max(lpx, min_blur_width)
+            blur_height = oversampling * max(lpy, min_blur_width)
             out.append((n, _fftconvolve(image, blur_width, blur_height)))
         return out
 

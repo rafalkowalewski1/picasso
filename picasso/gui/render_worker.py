@@ -20,6 +20,7 @@ import threading
 from collections.abc import Callable
 from math import ceil
 
+import numpy as np
 import pandas as pd
 from PyQt6 import QtCore
 
@@ -77,6 +78,60 @@ class RenderWorker(QtCore.QObject):
         self.finished.emit(
             request_id, viewport, qimage, n_locs, contrast_limits, raw_image
         )
+
+
+def global_precision_of(
+    locs: pd.DataFrame, cache: dict
+) -> tuple[float, float] | None:
+    """The blur of *Global loc. prec.* for one channel: the median
+    ``lpx`` and ``lpy`` (camera pixels) of all its localizations,
+    computed once per DataFrame and kept in ``cache`` (keyed on the
+    DataFrame's identity and length, so a replaced channel is
+    recomputed). None when the channel lacks the precision columns."""
+    key = (id(locs), len(locs))
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    if (
+        len(locs) == 0
+        or "lpx" not in locs.columns
+        or "lpy" not in locs.columns
+    ):
+        value = None
+    else:
+        value = (
+            float(np.median(locs["lpx"].to_numpy())),
+            float(np.median(locs["lpy"].to_numpy())),
+        )
+    cache.clear()  # one entry per channel is plenty; drop stale ones
+    cache[key] = value
+    return value
+
+
+def global_precisions_for(
+    prepared, channels: list, cache: dict, checked: Callable[[int], bool]
+):
+    """``render_scene``'s ``global_precision`` argument for the frames a
+    view prepared from its ``channels``: with a single channel every
+    frame (a group or property split) gets its precision; with several,
+    the frames are the checked channels in order. None when the frames
+    cannot be matched to channels (the renderer then takes the median
+    of the rows it renders). A single DataFrame gets a single pair."""
+    single = isinstance(prepared, pd.DataFrame)
+    frames = [prepared] if single else prepared
+    caches = cache.setdefault("per_channel", {})
+    if len(channels) == 1:
+        value = global_precision_of(channels[0], caches.setdefault(0, {}))
+        values = [value] * len(frames)
+    else:
+        selected = [i for i in range(len(channels)) if checked(i)]
+        if len(selected) != len(frames):
+            return None
+        values = [
+            global_precision_of(channels[i], caches.setdefault(i, {}))
+            for i in selected
+        ]
+    return values[0] if single else values
 
 
 def subsample_request(request: dict, target_for: Callable[[int], int]) -> bool:

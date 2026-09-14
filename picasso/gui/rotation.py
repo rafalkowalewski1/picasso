@@ -22,7 +22,11 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from scipy.spatial.transform import Rotation
 
 from .. import io, render, lib, __version__
-from .render_worker import RenderWorker, subsample_request
+from .render_worker import (
+    RenderWorker,
+    global_precisions_for,
+    subsample_request,
+)
 
 
 DEFAULT_OVERSAMPLING = 1.0
@@ -1433,6 +1437,9 @@ class ViewRotation(QtWidgets.QLabel):
         return dict(
             locs=locs,
             info=infos,
+            global_precision=self._global_precisions(
+                locs, kwargs["blur_method"]
+            ),
             **kwargs,
             ang=self._R,
             contrast=contrast,
@@ -1443,6 +1450,26 @@ class ViewRotation(QtWidgets.QLabel):
             raw_image_cache=raw_image,
             return_contrast_limits=True,
             return_raw_image=True,
+        )
+
+    def _global_precisions(self, locs, blur_method: str | None):
+        """``render_scene``'s ``global_precision`` for the prepared
+        ``locs``: per frame, its channel's median precision, computed
+        once per loaded channel (see ``render_worker.global_precision_of``);
+        None unless the blur method is 'convolve'."""
+        if blur_method != "convolve":
+            return None
+        cache = getattr(self, "_precision_cache", None)
+        if cache is None:
+            cache = self._precision_cache = {}
+        return global_precisions_for(
+            locs,
+            self.locs,
+            cache,
+            checked=lambda i: (
+                len(self.locs) == 1
+                or self.window.dataset_dialog.checks[i].isChecked()
+            ),
         )
 
     def _adopt_render_result(

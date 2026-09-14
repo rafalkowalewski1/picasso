@@ -50,6 +50,7 @@ def render(
     max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     indices: lib.IntArray1D | None = None,
+    global_precision: tuple[float, float] | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """Render localizations given FOV and blur method.
 
@@ -74,7 +75,8 @@ def render(
         'gaussian_iso' is similar but averages x and y localization
         precisions, so that blur is isotropic. 'smooth' applies a one
         pixel blur. 'convolve' applies the same blur to all
-        localizations which is the median localization precision.
+        localizations: ``global_precision``, or else the median
+        localization precision of the rows rendered.
     min_blur_width : float, optional
         Minimum size of blur (camera pixels).
     max_blur_width : float, optional
@@ -91,6 +93,12 @@ def render(
         Positions of the rows of ``locs`` to render (e.g. a viewport
         pre-selection from ``spatial_index``); the other rows are
         ignored. If None (default), all rows are rendered.
+    global_precision : tuple of float, optional
+        ``(lpx, lpy)`` blur of the 'convolve' method in camera pixels,
+        e.g. the median precision of the whole dataset computed once
+        by the caller, so the blur is the same at every zoom level and
+        rotation and nothing is recomputed per render. If None
+        (default), the median of the rows rendered is used.
 
     Raises
     ------
@@ -107,7 +115,7 @@ def render(
     """
     return _render_arrays(
         _extract_render_columns(
-            locs, blur_method, ang, max_blur_width, indices
+            locs, blur_method, ang, max_blur_width, indices, global_precision
         ),
         info,
         disp_px_size=disp_px_size,
@@ -129,7 +137,17 @@ class _RenderColumns:
     plain array views.
     """
 
-    __slots__ = ("x", "y", "lpx", "lpy", "lpz", "angle", "z", "indices")
+    __slots__ = (
+        "x",
+        "y",
+        "lpx",
+        "lpy",
+        "lpz",
+        "angle",
+        "z",
+        "indices",
+        "global_lp",
+    )
 
     def __init__(
         self,
@@ -141,6 +159,7 @@ class _RenderColumns:
         angle=None,
         z=None,
         indices=None,
+        global_lp=None,
     ):
         self.x = x
         self.y = y
@@ -154,6 +173,10 @@ class _RenderColumns:
         #: selection travels this way, so a GPU backend keeps the whole
         #: channel resident and reads only the selected rows
         self.indices = indices
+        #: ``(lpx, lpy)`` blur of the ``convolve`` method (camera px,
+        #: the channel's median precision), or None to take the median
+        #: of the rows given; a GUI computes it once per channel
+        self.global_lp = global_lp
 
     def __len__(self) -> int:
         """Number of rows to render."""
@@ -173,6 +196,7 @@ class _RenderColumns:
                 self.angle,
                 self.z,
                 self.indices[start:stop],
+                global_lp=self.global_lp,
             )
 
         def cut(array):
@@ -186,6 +210,7 @@ class _RenderColumns:
             cut(self.lpz),
             cut(self.angle),
             cut(self.z),
+            global_lp=self.global_lp,
         )
 
     def materialize(self) -> "_RenderColumns":
@@ -206,6 +231,7 @@ class _RenderColumns:
             take(self.lpz),
             take(self.angle),
             take(self.z),
+            global_lp=self.global_lp,
         )
 
 
@@ -215,6 +241,7 @@ def _extract_render_columns(
     ang: tuple | Rotation | None,
     max_blur_width: float | None = None,
     indices: lib.IntArray1D | None = None,
+    global_precision: tuple[float, float] | None = None,
 ) -> _RenderColumns:
     """Pull the columns ``blur_method`` (and rotation) needs out of the
     DataFrame, converting angle to radians and applying the lpz
@@ -230,7 +257,9 @@ def _extract_render_columns(
 
     ``indices`` (positions into ``locs``) restrict the render to those
     rows without copying the columns (see ``_RenderColumns``); the
-    filter above is applied to them as well."""
+    filter above is applied to them as well. ``global_precision`` is
+    the ``(lpx, lpy)`` blur of the ``convolve`` method (camera pixels),
+    see ``render``."""
     need_lp = blur_method in ("gaussian", "gaussian_iso", "convolve")
     lpx = locs["lpx"].to_numpy() if need_lp else None
     lpy = locs["lpy"].to_numpy() if need_lp else None
@@ -261,7 +290,14 @@ def _extract_render_columns(
             columns = [None if c is None else c[keep] for c in columns]
     if indices is not None:
         indices = np.ascontiguousarray(indices, dtype=np.uint32)
-    return _RenderColumns(*columns, indices=indices)
+    if global_precision is not None:
+        global_precision = (
+            float(global_precision[0]),
+            float(global_precision[1]),
+        )
+    return _RenderColumns(
+        *columns, indices=indices, global_lp=global_precision
+    )
 
 
 def _render_arrays(
@@ -802,13 +838,26 @@ def _render_convolve(
         return 0, image
     else:
         _fill(image, x, y)
-        blur_width = oversampling * max(
-            np.median(columns.lpx[in_view]), min_blur_width
-        )
-        blur_height = oversampling * max(
-            np.median(columns.lpy[in_view]), min_blur_width
-        )
+        lpx, lpy = global_blur(columns)
+        blur_width = oversampling * max(lpx, min_blur_width)
+        blur_height = oversampling * max(lpy, min_blur_width)
         return n, _fftconvolve(image, blur_width, blur_height)
+
+
+def global_blur(columns: _RenderColumns) -> tuple[float, float]:
+    """The ``convolve`` blur of a channel in camera pixels: the caller's
+    ``global_precision`` when given (see ``render``), else the median
+    ``lpx`` and ``lpy`` of the rows to render. The same for every
+    backend, zoom level and rotation, so an in-view mask (which a 3D
+    rotation would make expensive) is never needed."""
+    if columns.global_lp is not None:
+        return columns.global_lp
+    lpx, lpy = columns.lpx, columns.lpy
+    if columns.indices is not None:
+        lpx, lpy = lpx[columns.indices], lpy[columns.indices]
+    if len(lpx) == 0:
+        return 0.0, 0.0
+    return float(np.median(lpx)), float(np.median(lpy))
 
 
 def _render_smooth(

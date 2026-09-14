@@ -34,6 +34,14 @@ def test_info_dialog_renderer_row_has_help_and_wraps(qt_offscreen):
     window = gui_render.Window(plugins_loaded=True)
     dialog = window.info_dialog
     assert dialog.renderer_label.wordWrap()
+    # a long GPU name wraps inside the dialog instead of widening it
+    policy = dialog.renderer_label.sizePolicy().horizontalPolicy()
+    assert policy == QtWidgets.QSizePolicy.Policy.Ignored
+    width = dialog.sizeHint().width()
+    dialog.renderer_label.setText(
+        "GPU (NVIDIA GeForce RTX 4090 Laptop GPU with Max-Q Design via Vulkan)"
+    )
+    assert dialog.sizeHint().width() == width
     assert dialog.renderer_help.help_url.endswith("#gpu-rendering")
     assert "GPU" in dialog.renderer_help.toolTip()
     window.view.stop_render_worker()

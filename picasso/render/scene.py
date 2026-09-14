@@ -181,6 +181,7 @@ def render_scene(
     max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     indices: list | None = None,
+    global_precision: list | tuple[float, float] | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
     single_channel_colormap: str | lib.FloatArray2D = "magma",
@@ -256,6 +257,11 @@ def render_scene(
         Localizations whose ``lpx`` or ``lpy`` exceeds this (camera
         pixels) are not rendered by 'gaussian' and 'gaussian_iso'.
         If None (default), all localizations are rendered.
+    global_precision : list of tuple or tuple, optional
+        For each channel (a single ``(lpx, lpy)`` for a single ``locs``
+        DataFrame), the blur of the 'convolve' method in camera pixels
+        (see ``render``); None entries use the median precision of the
+        rows rendered.
     indices : list of lib.IntArray1D, optional
         For each channel (a single array for a single ``locs``
         DataFrame), the positions of the rows to render, e.g. a
@@ -338,6 +344,7 @@ def render_scene(
             max_blur_width=max_blur_width,
             ang=ang,
             indices=indices,
+            global_precision=global_precision,
             contrast=contrast,
             invert_colors=invert_colors,
             single_channel_colormap=single_channel_colormap,
@@ -370,6 +377,7 @@ def render_scene(
             max_blur_width=max_blur_width,
             ang=ang,
             indices=indices,
+            global_precision=global_precision,
             contrast=contrast,
             relative_intensities=relative_intensities,
             invert_colors=invert_colors,
@@ -400,6 +408,7 @@ def _render_channels(
     max_blur_width: float | None = None,
     ang: tuple | Rotation | None,
     indices: list | None = None,
+    global_precision: list | None = None,
 ) -> list[tuple[int, lib.FloatArray2D]]:
     """Render each channel's raw grayscale image through the selected
     splat backend.
@@ -423,6 +432,9 @@ def _render_channels(
     indices : list of lib.IntArray1D or None, optional
         Per channel, the rows to render (see ``render``); None entries
         (or None) render every row.
+    global_precision : list of tuple or None, optional
+        Per channel, the 'convolve' blur (see ``render``); None entries
+        (or None) use the median precision of the rows rendered.
 
     Returns
     -------
@@ -431,11 +443,20 @@ def _render_channels(
     """
     if indices is None:
         indices = [None] * len(locs)
+    if global_precision is None:
+        global_precision = [None] * len(locs)
     columns = [
         _extract_render_columns(
-            channel, blur_method, ang, max_blur_width, channel_indices
+            channel,
+            blur_method,
+            ang,
+            max_blur_width,
+            channel_indices,
+            channel_precision,
         )
-        for channel, channel_indices in zip(locs, indices)
+        for channel, channel_indices, channel_precision in zip(
+            locs, indices, global_precision
+        )
     ]
     kwargs = dict(
         disp_px_size=disp_px_size,
@@ -512,6 +533,7 @@ def _render_multi_channel(
     max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     indices: list | None = None,
+    global_precision: list | None = None,
     contrast: tuple[float, float] | None = None,
     relative_intensities: list[float] | None = None,
     invert_colors: bool = False,
@@ -543,6 +565,7 @@ def _render_multi_channel(
             max_blur_width=max_blur_width,
             ang=ang,
             indices=indices,
+            global_precision=global_precision,
         )
         n_locs = sum([rendering[0] for rendering in renderings])
         raw_image = np.array([rendering[1] for rendering in renderings])
@@ -632,6 +655,7 @@ def _render_single_channel(
     max_blur_width: float | None = None,
     ang: tuple | Rotation | None = None,
     indices: list | None = None,
+    global_precision: tuple[float, float] | list | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
     single_channel_colormap: str = "magma",
@@ -648,6 +672,12 @@ def _render_single_channel(
         # channel also renders in parallel within the CPU budget
         if indices is not None and not isinstance(indices, (list, tuple)):
             indices = [indices]  # a single channel's own index array
+        if global_precision is not None and not (
+            isinstance(global_precision, list)
+            and len(global_precision) == 1
+            and not np.isscalar(global_precision[0])
+        ):
+            global_precision = [global_precision]  # one channel's pair
         ((n_locs, raw_image),) = _render_channels(
             [locs],
             [info],
@@ -658,6 +688,7 @@ def _render_single_channel(
             max_blur_width=max_blur_width,
             ang=ang,
             indices=indices,
+            global_precision=global_precision,
         )
     vmin, vmax = contrast if contrast is not None else (None, None)
     autoscale = True if contrast is None else False

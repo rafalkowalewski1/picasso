@@ -254,6 +254,47 @@ class TestAsyncRotationRender:
             visible_sampled = len(request["locs"]) * visible / n_loaded
             assert 150 <= visible_sampled <= 315
 
+    def test_global_precision_is_computed_once_per_channel(
+        self, rotation_view, monkeypatch
+    ):
+        import picasso.gui.render_worker as worker_mod
+
+        view = rotation_view
+        calls = []
+        original = worker_mod.np.median
+
+        def counting(values, *args, **kwargs):
+            calls.append(len(values))
+            return original(values, *args, **kwargs)
+
+        monkeypatch.setattr(worker_mod.np, "median", counting)
+        view._precision_cache = {}  # the fixture's renders warmed it
+        locs, _ = view._prepare_locs_for_rendering()
+        assert view._global_precisions(locs, "gaussian") is None
+        first = view._global_precisions(locs, "convolve")
+        expected = (
+            float(original(view.locs[0]["lpx"])),
+            float(original(view.locs[0]["lpy"])),
+        )
+        assert first == pytest.approx(expected)
+        assert len(calls) == 2  # lpx and lpy, once
+        assert view._global_precisions(locs, "convolve") == first
+        assert len(calls) == 2  # remembered
+        # the main view remembers per channel the same way
+        main = view.window.window.view
+        main._precision_cache_ = {}
+        main_locs, _ = main._prepare_locs_for_rendering(viewport=main.viewport)
+        value = main._global_precisions(main_locs, "convolve")
+        assert value == pytest.approx(
+            (
+                float(original(main.locs[0]["lpx"])),
+                float(original(main.locs[0]["lpy"])),
+            )
+        )
+        n_calls = len(calls)
+        main._global_precisions(main_locs, "convolve")
+        assert len(calls) == n_calls
+
     def test_cache_redraw_bypasses_the_worker(
         self, rotation_view, qapp, monkeypatch
     ):
