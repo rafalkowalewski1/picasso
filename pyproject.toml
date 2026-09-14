@@ -96,7 +96,7 @@ lif = [
 formats = [
     "picassosr[czi,lif]",
 ]
-# Not for general use: the installer / installer_gpu extras exist only to
+# Not for general use: the installer / installer_cuda extras exist only to
 # build the one-click installers, where every version is pinned exactly so
 # the frozen bundles stay reproducible and stable. Regular users should
 # install picassosr (optionally with [gpu] / [formats]) instead.
@@ -130,9 +130,10 @@ installer = [
     "PyImarisWriter==0.7.0; sys_platform=='win32'",
     "hdf5plugin==6.0.0; sys_platform=='win32'"
 ]
-# GPU build: identical to the CPU installer plus the CUDA runtime.
+# CUDA build: identical to the CPU installer plus the CUDA runtime
+# (GPU rendering via wgpu is in both; this one adds CUDA fitting).
 # Reuse picassosr[installer] so the pinned versions never drift apart.
-installer_gpu = [
+installer_cuda = [
     "picassosr[installer]",
     "numba-cuda[cu12]==0.30.2"
 ]
