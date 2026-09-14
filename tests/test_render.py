@@ -1922,6 +1922,53 @@ class TestBuildAnimation:
         assert yaml_path.exists()
         assert yaml_path.stat().st_size > 0
 
+    def test_reports_progress_and_completion(self, locs_3d, info, tmp_path):
+        out_path = tmp_path / "anim.mp4"
+        positions = [
+            (Rotation.identity(), FULL_VIEWPORT),
+            (Rotation.from_rotvec([0.1, 0.0, 0.0]), FULL_VIEWPORT),
+        ]
+        frames = []
+        completed = render.build_animation(
+            str(out_path),
+            locs_3d,
+            info,
+            positions=positions,
+            durations=[1.0],
+            disp_px_size=PIXELSIZE,
+            image_size=(64, 64),
+            fps=3,
+            progress_callback=frames.append,
+        )
+        assert completed is True
+        assert frames == [0, 1, 2, 3]  # each frame, then the total
+
+    def test_cancel_leaves_no_partial_output(self, locs_3d, info, tmp_path):
+        """A build cancelled part-way removes the incomplete video and
+        never writes the sidecar, and reports that it did not finish."""
+        out_path = tmp_path / "anim.mp4"
+        positions = [
+            (Rotation.identity(), FULL_VIEWPORT),
+            (Rotation.from_rotvec([0.1, 0.0, 0.0]), FULL_VIEWPORT),
+        ]
+        rendered = []
+        completed = render.build_animation(
+            str(out_path),
+            locs_3d,
+            info,
+            positions=positions,
+            durations=[2.0],
+            disp_px_size=PIXELSIZE,
+            image_size=(64, 64),
+            fps=5,
+            progress_callback=rendered.append,
+            cancel=lambda: len(rendered) >= 3,
+        )
+        assert completed is False
+        assert len(rendered) < 10  # stopped early
+        assert not out_path.exists()
+        assert not out_path.with_suffix(".yaml").exists()
+
 
 # ---------------------------------------------------------------------------
 # Masking

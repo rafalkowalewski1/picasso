@@ -12,6 +12,7 @@ import.
 """
 
 import os
+import threading
 from functools import partial
 
 import numpy as np
@@ -482,7 +483,54 @@ class AnimationDialog(lib.Dialog):
         self.stay.clicked.connect(partial(self.add_position, True))
         controls.addWidget(self.stay, 1, 3)
 
+        # output resolution, independent of the window's size; follows
+        # the window until edited by hand (see ``showEvent``)
+        size_label = QtWidgets.QLabel("Resolution (px): ")
+        size_label.setToolTip(
+            "Width and height of the video in pixels (rounded up to a "
+            "multiple of 16 for the encoder). Defaults to the window's "
+            "size; the frames are rendered at this resolution, whatever "
+            "the window's."
+        )
+        controls.addWidget(size_label, 0, 4)
+        size_row = QtWidgets.QHBoxLayout()
+        self.width_px = QtWidgets.QSpinBox()
+        self.width_px.setRange(16, 8192)
+        self.height_px = QtWidgets.QSpinBox()
+        self.height_px.setRange(16, 8192)
+        self._size_edited = False
+        for box in (self.width_px, self.height_px):
+            box.setValue(512)
+            box.valueChanged.connect(self._mark_size_edited)
+        size_row.addWidget(self.width_px)
+        size_row.addWidget(QtWidgets.QLabel("x"))
+        size_row.addWidget(self.height_px)
+        controls.addLayout(size_row, 1, 4)
+
         main_layout.addLayout(controls)
+
+        # the build in progress: its thread, worker and the cancel flag
+        self._build_thread = None
+        self._build_worker = None
+        self._build_cancel = None
+        self._build_progress = None
+
+    def _mark_size_edited(self) -> None:
+        self._size_edited = True
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        """Default the output resolution to the window's size until the
+        user sets one."""
+        if not self._size_edited:
+            view = self.window.view_rot
+            for box, value in (
+                (self.width_px, view.width()),
+                (self.height_px, view.height()),
+            ):
+                box.blockSignals(True)
+                box.setValue(max(16, value))
+                box.blockSignals(False)
+        super().showEvent(event)
 
     def add_position(self, freeze: bool = False) -> None:
         """Add a new position to the animation sequence.
@@ -630,47 +678,162 @@ class AnimationDialog(lib.Dialog):
         path, ext = lib.get_save_filename_ext_dialog(
             self, "Save animation", out_path, filter="*.mp4", check_ext=".yaml"
         )
-        if path:
-            disp_dlg = self.window.display_settings_dlg
-            data_dlg = self.window.window.dataset_dialog
-            pixelsize = self.window.window.view.pixelsize
-            locs, infos = self.window.view_rot._prepare_locs_for_rendering()
-            n_frames = int(self.fps.value() * sum(durations))
-            progress = lib.ProgressDialog(
-                "Rendering frames", 0, n_frames, self.window
+        if not path:
+            return
+        if self._build_thread is not None:
+            QtWidgets.QMessageBox.information(
+                self, "Build an animation", "An animation is being built."
             )
-            adjust_display_pixel = disp_dlg.dynamic_disp_px.isChecked()
-            intensities = self.window.window.view.read_relative_intensities()
-            positions = [(p["R"], p["viewport"]) for p in self.positions]
-            segment_rotations = [
-                p["segment_rotvec"] for p in self.positions[1:]
-            ]
-            render.build_animation(
-                path,
-                locs,
-                infos,
-                positions=positions,
-                durations=durations,
-                segment_rotations=segment_rotations,
-                disp_px_size=disp_dlg.disp_px_size.value(),
-                image_size=(
-                    self.window.view_rot.width(),
-                    self.window.view_rot.height(),
-                ),
-                blur_method=disp_dlg.blur_methods[
-                    disp_dlg.blur_buttongroup.checkedButton()
-                ],
-                min_blur_width=disp_dlg.min_blur_width.value() / pixelsize,
-                contrast=(disp_dlg.minimum.value(), disp_dlg.maximum.value()),
-                invert_colors=data_dlg.wbackground.isChecked(),
-                single_channel_colormap=disp_dlg.colormap.currentText(),
-                colors=self.window.window.view.read_colors(),
-                relative_intensities=intensities,
-                fps=self.fps.value(),
-                adjust_pixel_size=adjust_display_pixel,
-                progress_callback=progress.set_value,
+            return
+        disp_dlg = self.window.display_settings_dlg
+        data_dlg = self.window.window.dataset_dialog
+        pixelsize = self.window.window.view.pixelsize
+        view = self.window.view_rot
+        locs, infos = view._prepare_locs_for_rendering()
+        if view._pan_z:
+            locs = view._apply_pan_z(locs)
+        n_frames = int(self.fps.value() * sum(durations))
+        adjust_display_pixel = disp_dlg.dynamic_disp_px.isChecked()
+        intensities = self.window.window.view.read_relative_intensities()
+        positions = [(p["R"], p["viewport"]) for p in self.positions]
+        segment_rotations = [p["segment_rotvec"] for p in self.positions[1:]]
+        # the frames are rendered at the output resolution: the display
+        # pixel size follows from the last position's field of view
+        width, height = self.width_px.value(), self.height_px.value()
+        last_viewport = positions[-1][1]
+        disp_px_size = pixelsize * render.viewport_width(last_viewport) / width
+        kwargs = dict(
+            positions=positions,
+            durations=durations,
+            segment_rotations=segment_rotations,
+            disp_px_size=float(disp_px_size),
+            image_size=(width, height),
+            blur_method=disp_dlg.blur_methods[
+                disp_dlg.blur_buttongroup.checkedButton()
+            ],
+            min_blur_width=disp_dlg.min_blur_width.value() / pixelsize,
+            contrast=(disp_dlg.minimum.value(), disp_dlg.maximum.value()),
+            invert_colors=data_dlg.wbackground.isChecked(),
+            single_channel_colormap=disp_dlg.colormap.currentText(),
+            colors=self.window.window.view.read_colors(),
+            relative_intensities=intensities,
+            fps=self.fps.value(),
+            adjust_pixel_size=adjust_display_pixel,
+        )
+        self._start_build(path, locs, infos, kwargs, n_frames)
+
+    def _start_build(self, path, locs, infos, kwargs, n_frames) -> None:
+        """Render and encode the frames on a worker thread, with a
+        cancellable, non-modal progress dialog; the windows stay
+        usable meanwhile."""
+        self._build_cancel = threading.Event()
+        progress = QtWidgets.QProgressDialog(
+            "Rendering animation frames", "Cancel", 0, n_frames, self
+        )
+        progress.setWindowTitle("Build an animation")
+        progress.setModal(False)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.canceled.connect(self._build_cancel.set)
+        progress.show()
+        self._build_progress = progress
+        self.build.setEnabled(False)
+
+        worker = AnimationBuilder(
+            path, locs, infos, kwargs, cancel=self._build_cancel.is_set
+        )
+        thread = QtCore.QThread()  # unparented, see ViewRotation
+        worker.moveToThread(thread)
+        worker.progress.connect(progress.setValue)
+        worker.finished.connect(self._build_finished)
+        self._build_thread = thread
+        self._build_worker = worker
+        thread.start()
+        # the work runs inside the thread's event loop (queued signal),
+        # not from ``started``: a build that finished before the loop
+        # began would swallow the ``quit()`` and ``wait()`` forever
+        worker.start()
+
+    def _build_finished(self, completed: bool, error: str) -> None:
+        """Wrap up a build on the GUI thread."""
+        thread = self._build_thread
+        self._build_thread = None
+        self._build_worker = None
+        if thread is not None:
+            thread.quit()
+            thread.wait()
+        if self._build_progress is not None:
+            self._build_progress.close()
+            self._build_progress = None
+        self.build.setEnabled(True)
+        if error:
+            QtWidgets.QMessageBox.warning(
+                self, "Build an animation", f"Building failed:\n\n{error}"
             )
-            progress.close()
+
+    def stop_build(self) -> None:
+        """Cancel a build in progress and wait for its thread (a live
+        QThread must never be destroyed)."""
+        if self._build_cancel is not None:
+            self._build_cancel.set()
+        thread = self._build_thread
+        if thread is not None:
+            thread.quit()
+            thread.wait()
+            self._build_thread = None
+            self._build_worker = None
+        if self._build_progress is not None:
+            self._build_progress.close()
+            self._build_progress = None
+        self.build.setEnabled(True)
+
+
+class AnimationBuilder(QtCore.QObject):
+    """Runs ``render.build_animation`` on a worker thread.
+
+    Attributes
+    ----------
+    progress : QtCore.pyqtSignal
+        The frame number just rendered (drives the progress dialog).
+    finished : QtCore.pyqtSignal
+        Emitted with ``(completed, error)``: ``completed`` is False when
+        cancelled, ``error`` the message of a failure (empty otherwise).
+    """
+
+    progress = QtCore.pyqtSignal(int)
+    finished = QtCore.pyqtSignal(bool, str)
+    _start = QtCore.pyqtSignal()
+
+    def __init__(self, path, locs, infos, kwargs, cancel):
+        super().__init__()
+        self._path = path
+        self._locs = locs
+        self._infos = infos
+        self._kwargs = kwargs
+        self._cancel = cancel
+        # auto connection: queued once this object lives on its thread
+        self._start.connect(self.run)
+
+    def start(self) -> None:
+        """Begin the build on the thread this object was moved to."""
+        self._start.emit()
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            completed = render.build_animation(
+                self._path,
+                self._locs,
+                self._infos,
+                progress_callback=self.progress.emit,
+                cancel=self._cancel,
+                **self._kwargs,
+            )
+        except Exception as error:  # reported in the GUI, never lost
+            self.finished.emit(False, f"{type(error).__name__}: {error}")
+            return
+        self.finished.emit(bool(completed), "")
 
 
 class RotateByAngleDialog(lib.Dialog):
@@ -2673,6 +2836,7 @@ class RotationWindow(QtWidgets.QMainWindow):
         thread stops too (it restarts with the next asynchronous
         render when the window is opened again)."""
         self.display_settings_dlg.close()
+        self.animation_dialog.stop_build()
         self.animation_dialog.close()
         self.view_rot.stop_render_worker()
         QtWidgets.QMainWindow.closeEvent(self, event)

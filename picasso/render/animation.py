@@ -145,7 +145,8 @@ def build_animation(
     progress_callback: (
         Callable[[int], None] | Literal["console"] | None
     ) = None,
-) -> None:
+    cancel: Callable[[], bool] | None = None,
+) -> bool:
     """Build an animation of rendered localizations given the
     checkpoints (rotation, viewport, etc) and the time between them.
 
@@ -241,6 +242,16 @@ def build_animation(
         argument after each frame is rendered. If "console", a progress
         bar is printed to the console. If None, no progress is reported.
         Default is None.
+    cancel : callable, optional
+        Polled before each frame; when it returns True the build stops,
+        the incomplete video file is removed and no settings file is
+        written. Default is None (never cancelled).
+
+    Returns
+    -------
+    completed : bool
+        True when the animation and its settings file were written,
+        False when the build was cancelled.
     """
     assert isinstance(path, str) and path.endswith(
         ".mp4"
@@ -333,8 +344,9 @@ def build_animation(
         or progress_callback == "console"
         or callable(progress_callback)
     ), "progress_callback must be None, 'console', or a callable."
+    assert cancel is None or callable(cancel), "cancel must be a callable."
 
-    _build_animation(
+    return _build_animation(
         path=path,
         locs=locs,
         info=info,
@@ -353,6 +365,7 @@ def build_animation(
         fps=fps,
         adjust_pixel_size=adjust_pixel_size,
         progress_callback=progress_callback,
+        cancel=cancel,
     )
 
 
@@ -377,7 +390,8 @@ def _build_animation(
     fps: int,
     adjust_pixel_size: bool,
     progress_callback: Callable[[int], None] | Literal["console"] | None,
-) -> None:
+    cancel: Callable[[], bool] | None = None,
+) -> bool:
     """Internal function to build an animation of rendered localizations
     given the checkpoints. See ``build_animation`` for more details."""
     rotations, viewports = _animation_sequence(
@@ -401,6 +415,14 @@ def _build_animation(
         iter_range = range(len(rotations))
 
     for i in iter_range:
+        if cancel is not None and cancel():
+            # leave nothing half-written behind
+            video_writer.close()
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
         if callable(progress_callback):
             progress_callback(i)
 
@@ -470,6 +492,7 @@ def _build_animation(
     }
     info_path = os.path.splitext(path)[0] + ".yaml"
     io.save_info(info_path, [anim_settings])
+    return True
 
 
 def _adjust_disp_px_size(

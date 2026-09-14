@@ -108,7 +108,7 @@ The user may perform multiple actions in the rotation window, including: saving 
 
 Rendering in the rotation window runs in the background, as in the main window: rotating and panning never block the interface, a burst of mouse movements renders only the newest orientation, and large picks are previewed with a subset of the localizations while you drag (``interaction_subsample``, see *CPU usage on shared workstations*) and sharpened as soon as the drag pauses. The renders use the GPU when it is enabled (see *GPU rendering*).
 
-Note that to build animations, the user must have ``ffmpeg`` installed on their system.
+**Animation:** the frames are rendered in the background, at the resolution set in the animation dialog (``Resolution (px)``, by default the window's size, e.g. 1920 x 1080 for a full-HD video whatever the window's size), so the windows stay usable while the video is built; a progress dialog shows the frames done and lets you cancel, in which case no partial video is left behind. The frames use the GPU when it is enabled.
 
 When rotating by a specified angle, the dialog offers a ``Rotate around`` choice between **Localizations** (the default) and **World**. ``Localizations`` rotates around the data's own axes - the axes shown by the axes icon, which rotate together with the data - so each entered angle changes the corresponding displayed angle by exactly that amount. ``World`` rotates around the fixed screen/camera axes instead.
 
