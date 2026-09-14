@@ -836,10 +836,6 @@ class DatasetDialog(lib.Dialog):
                     else:
                         self.checks[i].setText(new_title)
                     self.update_viewport()
-                    # change name in the fast render dialog
-                    self.window.fast_render_dialog.channel.setItemText(
-                        i + 1, new_title
-                    )
                     self._fit_scroll_width()
                 break
 
@@ -885,10 +881,6 @@ class DatasetDialog(lib.Dialog):
             self.window.slicer_dialog.zcoord[i]
         except Exception:
             pass
-
-        # delete attributes from the fast render dialog
-        del self.window.view.fast_render_indices[i]
-        self.window.fast_render_dialog.on_file_closed(i)
 
         # remove z slicing attribute
         self.window.slicer_dialog.zcoord.pop(i)
@@ -7103,97 +7095,6 @@ class DisplaySettingsDialog(lib.Dialog):
         self.window.view.update_scene(use_cache=True)
 
 
-class FastRenderDialog(lib.Dialog):
-    """Randomly sample a given percentage of locs to increase the speed
-    of rendering.
-
-    ...
-
-    Attributes
-    ----------
-    channel : QComboBox
-        Contains the channel where fast rendering is to be applied.
-    fraction : QSpinBox
-        Contains the percentage of locs to be sampled.
-    fractions : list
-        Contains the percentages for all channels of locs to be sampled.
-    sample_button : QPushButton
-        Click to sample locs according to the percentages specified by
-        self.fractions.
-    window : QMainWindow
-        Instance of the main window.
-    """
-
-    def __init__(self, window: QtWidgets.QMainWindow) -> None:
-        super().__init__()
-        self.window = window
-        self.setWindowTitle("Fast Render")
-        self.setWindowIcon(self.window.icon)
-        self.layout = QtWidgets.QGridLayout()
-        self.setLayout(self.layout)
-        self.fractions = [100]
-
-        # info explaining what is this dialog
-        explanation = (
-            "Change percentage of localizations displayed in each\n"
-            "channel to increase the speed of rendering."
-        )
-        self.layout.addWidget(QtWidgets.QLabel(explanation), 0, 0, 1, 2)
-
-        # choose channel
-        self.layout.addWidget(QtWidgets.QLabel("Channel: "), 1, 0)
-        self.channel = QtWidgets.QComboBox(self)
-        self.channel.setEditable(False)
-        self.channel.addItem("All channels")
-        self.channel.activated.connect(self.on_channel_changed)
-        self.layout.addWidget(self.channel, 1, 1)
-
-        # choose percentage
-        self.layout.addWidget(
-            QtWidgets.QLabel("Percentage of localizations\nto be displayed"),
-            2,
-            0,
-        )
-        self.fraction = QtWidgets.QSpinBox(self)
-        self.fraction.setSingleStep(1)
-        self.fraction.setMinimum(1)
-        self.fraction.setMaximum(100)
-        self.fraction.setValue(100)
-        self.fraction.valueChanged.connect(self.on_fraction_changed)
-        self.layout.addWidget(self.fraction, 2, 1)
-
-        # randomly draw localizations in each channel
-        self.sample_button = QtWidgets.QPushButton(
-            "Randomly sample\nlocalizations"
-        )
-        self.sample_button.clicked.connect(
-            lambda: self.window.view.update_scene(resample_locs=True)
-        )
-        self.layout.addWidget(self.sample_button, 3, 1)
-
-    def on_channel_changed(self) -> None:
-        """Retrieve value in self.fraction to the last chosen one."""
-        idx = self.channel.currentIndex()
-        self.fraction.blockSignals(True)
-        self.fraction.setValue(self.fractions[idx])
-        self.fraction.blockSignals(False)
-
-    def on_file_added(self) -> None:
-        """Add new item in self.channel."""
-        self.channel.addItem(self.window.dataset_dialog.checks[-1].text())
-        self.fractions.append(100)
-
-    def on_file_closed(self, idx: int) -> None:
-        """Remove item from self.channel."""
-        self.channel.removeItem(idx + 1)
-        del self.fractions[idx + 1]
-
-    def on_fraction_changed(self) -> None:
-        """Update self.fractions."""
-        idx = self.channel.currentIndex()
-        self.fractions[idx] = self.fraction.value()
-
-
 class SlicerDialog(lib.Dialog):
     """Customize slicing 3D data in z axis.
 
@@ -7649,11 +7550,6 @@ class View(QtWidgets.QLabel):
         None if not calculated yet.
     infos : list of dicts
         Contains a dictionary with metadata for each channel.
-    fast_render_indices : list
-        One entry per channel. ``None`` means no fast-render
-        subsampling; otherwise a ``np.uint32`` array of row positions
-        into ``self.locs[channel]`` selecting the rows to display. See
-        ``_display_locs`` and ``_resample_fast_render``.
     locs : list of pd.DataFrames
         Contains a pd.DataFrame with localizations for each channel.
     locs_paths : list
@@ -7754,7 +7650,6 @@ class View(QtWidgets.QLabel):
         self.window = window
         self._pixmap = None
         self.locs = []
-        self.fast_render_indices = []
         self.infos = []
         self.locs_paths = []
         self.group_color = []
@@ -7967,7 +7862,6 @@ class View(QtWidgets.QLabel):
 
         # append loaded data
         self.locs.append(locs)
-        self.fast_render_indices.append(None)
         self.infos.append(info)
         self.locs_paths.append(path)
         self.index_blocks.append(None)
@@ -8025,9 +7919,6 @@ class View(QtWidgets.QLabel):
         self.window.setWindowTitle(
             f"Picasso v{__version__}: Render. File: {os.path.basename(path)}"
         )
-
-        # fast rendering add channel
-        self.window.fast_render_dialog.on_file_added()
 
         # add channel to test clustering dialog
         self.window.test_clusterer_dialog.channels.addItem(
@@ -9760,15 +9651,13 @@ class View(QtWidgets.QLabel):
         large part of the FOV, ``spatial_index._BYPASS_COVERAGE_RATIO``)
         or unavailable — the backend then culls the whole channel
         itself. None altogether for the paths that rebuild channels per
-        render (render by property, group splitting, the z slicer, the
-        fast-render subset), which render whole."""
+        render (render by property, group splitting, the z slicer),
+        which render whole."""
         if self.window.display_settings_dlg.render_check.isChecked():
             return None
         if self.window.slicer_dialog.slicer_radio_button.isChecked():
             return None
         if len(self.locs) == 1 and "group" in self.locs[0].columns:
-            return None
-        if any(idx is not None for idx in self.fast_render_indices):
             return None
         indices = []
         for i in range(len(self.locs)):
@@ -9862,12 +9751,10 @@ class View(QtWidgets.QLabel):
         """Localization count for the visible viewport. The render
         covers a margin beyond the view, so the count is corrected via
         the per-channel viewport pyramid where available; when a
-        channel has no pyramid, or the slicer / fast-render subsampling
-        is active, the rendered count (which then includes the margin
-        ring) is reported instead."""
+        channel has no pyramid, or the slicer is active, the rendered
+        count (which then includes the margin ring) is reported
+        instead."""
         if self.window.slicer_dialog.slicer_radio_button.isChecked():
-            return rendered_n
-        if any(idx is not None for idx in self.fast_render_indices):
             return rendered_n
         total = 0
         for i in range(len(self.locs)):
@@ -11854,25 +11741,13 @@ class View(QtWidgets.QLabel):
         ) = None,
     ) -> lib.IntArray1D | None:
         """Positional indices into ``self.locs[channel]`` selected for
-        display, or ``None`` when the full set is used. Combines the
-        fast-render subset and the viewport pyramid filter.
+        display, or ``None`` when the full set is used: the viewport
+        pyramid's selection when a viewport is given and a pyramid is
+        available.
         """
-        if viewport is not None:
-            viewport_indices = self._viewport_indices(channel, viewport)
-        else:
-            viewport_indices = None
-        fast_idx = self.fast_render_indices[channel]
-        if viewport_indices is None and fast_idx is None:
+        if viewport is None:
             return None
-        if fast_idx is None:
-            return viewport_indices
-        if viewport_indices is None:
-            return fast_idx
-        # Intersect via boolean mask -- viewport_indices is the larger
-        # set so testing membership against fast_idx is cheaper.
-        mask = np.zeros(len(self.locs[channel]), dtype=bool)
-        mask[fast_idx] = True
-        return viewport_indices[mask[viewport_indices]]
+        return self._viewport_indices(channel, viewport)
 
     def _display_locs(
         self,
@@ -11882,10 +11757,8 @@ class View(QtWidgets.QLabel):
         ) = None,
     ) -> pd.DataFrame:
         """Return the localizations currently selected for display in
-        ``channel``. When ``fast_render_indices[channel]`` is ``None``
-        the full set is returned; otherwise the rows selected by the
-        fast-render dialog. If ``viewport`` is given and a render-index
-        pyramid is available for the channel, the result is also
+        ``channel``: the full set, or, if ``viewport`` is given and a
+        render-index pyramid is available for the channel, the rows
         spatially restricted to that viewport. Always returns a
         ``pd.DataFrame``."""
         idx = self._display_indices(channel, viewport)
@@ -13409,50 +13282,6 @@ class View(QtWidgets.QLabel):
         """Updates number of picks in Info Dialog."""
         self.window.info_dialog.n_picks.setText(str(len(self._picks)))
 
-    def _resample_fast_render_channel(self, i: int, fraction: int) -> float:
-        """Refresh ``self.fast_render_indices[i]`` for one channel at the
-        given percentage. Stores ``None`` when no subsampling is needed.
-        Returns the contrast factor (new displayed count / old displayed
-        count) for ``silent_maximum_update``."""
-        n_locs = len(self.locs[i])
-        old_idx = self.fast_render_indices[i]
-        old_disp_nlocs = n_locs if old_idx is None else len(old_idx)
-        target = int(n_locs * fraction / 100)
-        if fraction == 100 or target >= n_locs:
-            self.fast_render_indices[i] = None
-            new_disp_nlocs = n_locs
-        else:
-            rand_idx = np.random.choice(
-                n_locs, size=target, replace=False
-            ).astype(np.uint32)
-            self.fast_render_indices[i] = rand_idx
-            new_disp_nlocs = rand_idx.size
-        return new_disp_nlocs / old_disp_nlocs
-
-    def _resample_fast_render(self) -> None:
-        """Refresh ``self.fast_render_indices`` from the fractions stored
-        on the fast-render dialog, refresh ``group_color`` if needed,
-        and adjust contrast accordingly. Does not redraw on its own —
-        call ``update_scene`` for that."""
-        dlg = self.window.fast_render_dialog
-        idx = dlg.channel.currentIndex()
-        if idx == 0:  # all channels share the same fraction
-            for i in range(len(self.locs_paths)):
-                factor = self._resample_fast_render_channel(
-                    i, dlg.fractions[0]
-                )
-        else:  # each channel individually
-            factors = [
-                self._resample_fast_render_channel(i, dlg.fractions[i + 1])
-                for i in range(len(self.locs_paths))
-            ]
-            factor = np.mean(factors)  # to adjust contrast
-        if len(dlg.fractions) == 2 and "group" in self.locs[0].columns:
-            self.group_color = render.get_group_color(self.locs[0])
-        self.window.display_settings_dlg.silent_maximum_update(
-            factor * self.window.display_settings_dlg.maximum.value()
-        )
-
     def update_scene(
         self,
         viewport: (
@@ -13481,8 +13310,7 @@ class View(QtWidgets.QLabel):
         resample_locs : bool, optional
             True if ``self.locs`` changed: the cached spatial indices of
             every channel are dropped (see
-            ``self.invalidate_locs_index``) and the fast-render
-            subsample is refreshed before redrawing. Use after
+            ``self.invalidate_locs_index``) before redrawing. Use after
             operations that mutate ``self.locs`` (link, undrift, remove
             pick, etc.). Default is False.
         """
@@ -13491,7 +13319,6 @@ class View(QtWidgets.QLabel):
         if len(self.locs):
             if resample_locs:
                 self.invalidate_locs_index()
-                self._resample_fast_render()
             viewport = viewport or self.viewport
             self.draw_scene(
                 viewport,
@@ -13604,9 +13431,6 @@ class Window(QtWidgets.QMainWindow):
         Instance of the dialog for display settings.
     info_dialog : InfoDialog
         Instance of the dialog storing information about data and picks.
-    fast_render_dialog: FastRenderDialog
-        Instance of the dialog for sampling a fraction of locs to speed
-        up rendering.
     mask_settings_dialog : MaskSettingsDialog
         Instance of the dialog for masking image.
     menu_bar : QMenuBar
@@ -13678,7 +13502,6 @@ class Window(QtWidgets.QMainWindow):
         self.info_dialog = InfoDialog(self)
         self.metadata_dialog = lib.MetadataDialog(self)
         self.dataset_dialog = DatasetDialog(self)
-        self.fast_render_dialog = FastRenderDialog(self)
         self.window_rot = RotationWindow(self)
         self.test_clusterer_dialog = TestClustererDialog(self)
         self.user_settings_dialog = lib.UserSettingsDialog(self)
@@ -13693,7 +13516,6 @@ class Window(QtWidgets.QMainWindow):
             self.tools_settings_dialog,
             self.slicer_dialog,
             self.window_rot,
-            self.fast_render_dialog,
             self.test_clusterer_dialog,
             self.user_settings_dialog,
         ]
@@ -13946,10 +13768,6 @@ class Window(QtWidgets.QMainWindow):
         tools_menu.addSeparator()
         mask_action = tools_menu.addAction("Mask image...")
         mask_action.triggered.connect(self.mask_settings_dialog.init_dialog)
-
-        tools_menu.addSeparator()
-        fast_render_action = tools_menu.addAction("Fast rendering...")
-        fast_render_action.triggered.connect(self.fast_render_dialog.show)
 
         # menu bar - Postprocess
         postprocess_menu = self.menu_bar.addMenu("Postprocess")

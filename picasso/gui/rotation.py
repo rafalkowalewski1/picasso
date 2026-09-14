@@ -1248,25 +1248,16 @@ class ViewRotation(QtWidgets.QLabel):
         else:
             self.x_locs = []
 
-    def _collect_picked_locs(self, w, fast_render):
+    def _collect_picked_locs(self, w):
         n_channels = len(self.paths)
         self.locs = []
         self.infos = []
         for i in range(n_channels):
             # only one pick, take the first element
             temp = w.view.picked_locs(i, add_group=False)[0]
-            # restrict to the exact rows the main view is currently
-            # displaying (intersection of the pick with the fast-render
-            # subsample) so the rotation window shows the same locs
-            if fast_render:
-                main_idx = w.view.fast_render_indices[i]
-                if main_idx is not None and len(temp) > 0:
-                    temp = temp.loc[temp.index.isin(main_idx)].reset_index(
-                        drop=True
-                    )
             self._append_channel(temp, w.view.infos[i])
 
-    def _collect_fov_locs(self, w, fast_render):
+    def _collect_fov_locs(self, w):
         """The localizations of each channel inside this window's
         viewport (the main window's field of view when opened, shifted
         with the arrow keys since), copied like a pick's."""
@@ -1286,10 +1277,6 @@ class ViewRotation(QtWidgets.QLabel):
                 idx = np.flatnonzero(
                     (x >= x_min) & (x < x_max) & (y >= y_min) & (y < y_max)
                 )
-            if fast_render:
-                main_idx = w.view.fast_render_indices[i]
-                if main_idx is not None:
-                    idx = np.intersect1d(idx, main_idx)
             temp = locs.iloc[idx].reset_index(drop=True)
             self._append_channel(temp, w.view.infos[i])
 
@@ -1348,16 +1335,15 @@ class ViewRotation(QtWidgets.QLabel):
             (a pick before the window was first opened).
         """
         w = self.window.window  # main window
-        fast_render = update_window
         if source is not None:
             self._source = source
         if update_window:
             self._sync_from_main_window(w)
 
         if self._source == "fov":
-            self._collect_fov_locs(w, fast_render)
+            self._collect_fov_locs(w)
         else:
-            self._collect_picked_locs(w, fast_render)
+            self._collect_picked_locs(w)
 
         # shift z positions of locs so that the middle of the dataset is
         # at z = 0

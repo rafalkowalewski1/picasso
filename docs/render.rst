@@ -537,10 +537,6 @@ Opens a dialog that allows the user to specify a mask for filtering localization
 
 The images can be zoomed in/out (Ctrl/Cmd + scrolling) and panned (dragging with the right mouse button, or with Ctrl/Cmd + the left mouse button). Double clicking resets the zoom.
 
-Fast rendering
-^^^^^^^^^^^^^^
-Allows the user to display only a fraction of localizations to speed up rendering.
-
 Postprocess
 ~~~~~~~~~~~
 

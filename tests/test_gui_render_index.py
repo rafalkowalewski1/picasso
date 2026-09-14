@@ -67,7 +67,6 @@ class _ViewStub:
         self.infos = [_info()]
         self.index_blocks = [None]
         self.render_index = [None]
-        self.fast_render_indices = [None]
 
 
 def _brute_force(locs: pd.DataFrame, viewport) -> pd.DataFrame:
