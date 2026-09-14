@@ -1952,7 +1952,8 @@ class ViewRotation(QtWidgets.QLabel):
         new_viewport = [(y_min + dy, x_min + dx), (y_max + dy, x_max + dx)]
         self.viewport = new_viewport
         self.load_locs()  # the (moved) pick's locs, or the new viewport's
-        self.update_scene(viewport=new_viewport)
+        self._reanchor_pivot()
+        self.update_scene(viewport=self.viewport)
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         """Block axes if 'X', 'Y' or 'Z' is pressed on the keyboard."""
@@ -2093,14 +2094,14 @@ class ViewRotation(QtWidgets.QLabel):
         # ``_pan_z`` before ``pan_relative`` because ``pan_relative`` calls
         # ``update_scene`` internally and we want both deltas in one frame.
         self._pan_z -= float(world_delta[2])
-        # pan_relative takes (dy, dx) in *relative* viewport units and
-        # subtracts ``dx * vw`` from the viewport X (and similarly for Y),
-        # which is exactly ``viewport_center -= world_delta[:2]``.
-        self.pan_relative(
-            float(world_delta[1]) / vh,
-            float(world_delta[0]) / vw,
-            interactive=True,
-        )
+        # ``viewport_center -= world_delta[:2]``
+        (y_min, x_min), (y_max, x_max) = self.viewport
+        dx, dy = float(world_delta[0]), float(world_delta[1])
+        self.viewport = [(y_min - dy, x_min - dx), (y_max - dy, x_max - dx)]
+        # the pan's z component has moved the pivot off the data; put it
+        # back at the depth of what is shown (the image does not change)
+        self._reanchor_pivot()
+        self.update_scene(interactive=True)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         """Define actions taken when pressing mouse buttons, for
@@ -2312,8 +2313,78 @@ class ViewRotation(QtWidgets.QLabel):
 
     def zoom(self, factor: float) -> None:
         """Change zoom relatively to factor by changing viewport."""
-        new_viewport = render.zoom_viewport(self.viewport, factor)
-        self.update_scene(new_viewport)
+        self.viewport = render.zoom_viewport(self.viewport, factor)
+        # what is in view changed: keep the pivot at its depth
+        self._reanchor_pivot()
+        self.update_scene()
+
+    # --- rotation pivot --- #
+    # The render pipeline rotates about the world point at the screen
+    # center: the viewport center in x/y at depth ``_pan_z`` (z is
+    # shifted by ``-_pan_z`` before rotating, see ``_apply_pan_z``).
+    # A screen-space pan while the view is tilted has a z component in
+    # world coordinates, which would accumulate in ``_pan_z`` and leave
+    # the pivot in front of or behind the structure at the screen
+    # center - rotations then make it orbit. Under the orthographic
+    # projection the pivot can slide along the viewing direction without
+    # changing the image, so after every pan or zoom it is slid to the
+    # median depth of the localizations in view.
+    _PIVOT_SAMPLE = 200_000  # localizations sampled for the median depth
+
+    def _in_view_median_z(self) -> float | None:
+        """Median z (camera pixels, the loaded frame) of the localizations
+        whose rotated position falls inside the viewport; None when no
+        localization is in view."""
+        if not self.locs or self.viewport is None:
+            return None
+        channels = [
+            locs
+            for locs in self.locs
+            if len(locs) and {"x", "y", "z"} <= set(locs.columns)
+        ]
+        if not channels:
+            return None
+        total = sum(len(locs) for locs in channels)
+        step = max(1, -(-total // self._PIVOT_SAMPLE))
+        xyz = np.concatenate(
+            [
+                locs[["x", "y", "z"]].to_numpy(dtype=float)[::step]
+                for locs in channels
+            ]
+        )
+        (y_min, x_min), (y_max, x_max) = self.viewport
+        pivot = np.array(
+            [
+                x_min + (x_max - x_min) / 2,
+                y_min + (y_max - y_min) / 2,
+                self._pan_z,
+            ]
+        )
+        screen = self._R.apply(xyz - pivot)
+        in_view = (np.abs(screen[:, 0]) <= (x_max - x_min) / 2) & (
+            np.abs(screen[:, 1]) <= (y_max - y_min) / 2
+        )
+        if not in_view.any():
+            return None
+        return float(np.median(xyz[in_view, 2]))
+
+    def _reanchor_pivot(self) -> None:
+        """Slide the rotation pivot along the viewing direction to the
+        median depth of the localizations in view (see the note above);
+        the viewport and ``_pan_z`` move together, the image does not."""
+        if not self.locs or self.viewport is None:
+            return
+        direction = self._R.inv().apply([0.0, 0.0, 1.0])  # screen normal
+        if abs(direction[2]) < 0.2:
+            return  # nearly edge-on: no well-defined depth along the ray
+        z_ref = self._in_view_median_z()
+        if z_ref is None:
+            return
+        t = (z_ref - self._pan_z) / direction[2]
+        dx, dy = t * float(direction[0]), t * float(direction[1])
+        (y_min, x_min), (y_max, x_max) = self.viewport
+        self.viewport = [(y_min + dy, x_min + dx), (y_max + dy, x_max + dx)]
+        self._pan_z = z_ref
 
     def set_mode(self, action: QtGui.QAction) -> None:
         """Set ``self._mode`` for QMouseEvents.

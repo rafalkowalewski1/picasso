@@ -191,15 +191,19 @@ class TestAsyncRotationRender:
 
         monkeypatch.setattr(view, "_adopt_render_result", recording)
         view.apply_rotation(np.array([0.0, 0.4, 0.0]))
+        shown_before = _qimage_bytes(view.qimage)
         view.update_scene(interactive=True)
         assert view._current_request_interactive
         assert view._refine_timer.isActive()
+        # hold the refine so the preview's landing is observed on its
+        # own (a cold first render can outlast the 150 ms idle timer)
+        view._refine_timer.stop()
         # the preview lands and is shown, but the cache is untouched
-        shown_before = _qimage_bytes(view.qimage)
         _wait_until(qapp, lambda: _qimage_bytes(view.qimage) != shown_before)
         assert adopted == []
         np.testing.assert_array_equal(view.image, full_raw)
         # the refine render follows on idle and is adopted in full
+        view._refine_render()
         _wait_until(qapp, lambda: len(adopted) == 1)
         assert not view._current_request_interactive
         assert not np.array_equal(view.image, full_raw)  # rotated now
