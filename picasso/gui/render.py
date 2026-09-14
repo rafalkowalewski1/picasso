@@ -33,7 +33,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 # selects the PyQt6 binding (picasso core no longer imports PyQt6)
 from matplotlib.backends.backend_qt5agg import FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
-from scipy.ndimage.filters import gaussian_filter
+from scipy.ndimage import gaussian_filter
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.cluster import KMeans
 

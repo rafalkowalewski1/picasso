@@ -29,7 +29,7 @@ from .app import run_gui
 
 from cmath import rect, phase
 
-import scipy.ndimage.filters
+import scipy.ndimage
 
 DEFAULT_OVERSAMPLING = 1.0
 INITIAL_REL_MAXIMUM = 2.0
@@ -1494,9 +1494,7 @@ class Window(QtWidgets.QMainWindow):
             model_x, model_y, model_z, proplane, pixelsize
         )
 
-        self.template_img = scipy.ndimage.filters.gaussian_filter(
-            template_img, blur
-        )
+        self.template_img = scipy.ndimage.gaussian_filter(template_img, blur)
 
     def model_preview(self):
 
