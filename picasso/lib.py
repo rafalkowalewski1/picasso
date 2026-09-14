@@ -155,7 +155,7 @@ RENDER_INTERACTION_SUBSAMPLE_DEFAULT = "auto"
 #: GPU memory (MB) the render backend may keep resident for uploaded
 #: localizations; ``settings["Render"]["gpu"]["vram_budget_mb"]``, 0 =
 #: unlimited (see docs/render.rst)
-RENDER_VRAM_BUDGET_MB_DEFAULT = 2048
+RENDER_VRAM_BUDGET_MB_DEFAULT = 8192
 #: ``settings["Render"]["gpu"]["enabled"]``: "auto" renders on the GPU
 #: whenever one initializes, "on" additionally warns when it does not,
 #: "off" never touches the GPU
