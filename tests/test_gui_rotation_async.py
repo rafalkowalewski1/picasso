@@ -211,6 +211,49 @@ class TestAsyncRotationRender:
         # preview of 100 of them would be
         assert view.image.sum() > adopted[0].sum() * 0.99
 
+    def test_previews_are_sized_by_what_is_in_view(
+        self, rotation_view, qapp, monkeypatch
+    ):
+        from picasso.gui.render_worker import subsample_request
+
+        view = rotation_view
+        main_view = view.window.window.view
+        # the main view's rule, with a small target so the pick is thinned
+        monkeypatch.setattr(
+            main_view,
+            "_interaction_subsample_target",
+            lambda population=0: 300,
+        )
+        n_loaded = len(view.locs[0])
+        assert n_loaded > 600
+        # the whole pick in view: thinned to the target
+        request = view._build_render_request()
+        assert subsample_request(request, view._interaction_subsample_target)
+        assert len(request["locs"]) == pytest.approx(300, rel=0.05)
+        # zoomed in on a small part of it: far fewer in view than the
+        # target, so the preview renders every localization
+        for _ in range(6):
+            view.zoom_in()
+        assert view._visible_fraction() * n_loaded < 300
+        request = view._build_render_request()
+        assert not subsample_request(
+            request, view._interaction_subsample_target
+        )
+        assert len(request["locs"]) == n_loaded
+        # a view over more than the target thins so that about the
+        # target stays in view (an integer stride: between half the
+        # target and the target itself)
+        for _ in range(3):
+            view.zoom_out()
+        visible = view._visible_fraction() * n_loaded
+        if visible > 300:
+            request = view._build_render_request()
+            assert subsample_request(
+                request, view._interaction_subsample_target
+            )
+            visible_sampled = len(request["locs"]) * visible / n_loaded
+            assert 150 <= visible_sampled <= 315
+
     def test_cache_redraw_bypasses_the_worker(
         self, rotation_view, qapp, monkeypatch
     ):

@@ -1614,11 +1614,26 @@ class ViewRotation(QtWidgets.QLabel):
             self._submit_async_render()
 
     def _interaction_subsample_target(self, population: int = 0) -> int:
-        """The preview target of the main view (one setting for both
-        windows, see ``render.View._interaction_subsample_target``)."""
-        return self.window.window.view._interaction_subsample_target(
-            population
-        )
+        """Preview target for a request of ``population`` loaded
+        localizations, sized by what is in view.
+
+        The main view's rule (one setting for both windows, see
+        ``render.View._interaction_subsample_target``) is applied to the
+        *visible* population - the requests of this window carry every
+        loaded localization, and the preview stride applies to all of
+        them alike - and scaled back to the loaded population. Zoomed
+        in on a few localizations, a preview therefore renders them
+        all; only a view over many localizations is thinned.
+        """
+        rule = self.window.window.view._interaction_subsample_target
+        fraction = self._visible_fraction()
+        visible = int(round(fraction * population))
+        if visible <= 0:
+            return population  # nothing (or no sample) in view: no thinning
+        target = rule(visible)
+        if target <= 0:
+            return 0  # previews disabled
+        return int(np.ceil(target * population / visible))
 
     def _on_render_finished(
         self,
@@ -2331,10 +2346,10 @@ class ViewRotation(QtWidgets.QLabel):
     # median depth of the localizations in view.
     _PIVOT_SAMPLE = 200_000  # localizations sampled for the median depth
 
-    def _in_view_median_z(self) -> float | None:
-        """Median z (camera pixels, the loaded frame) of the localizations
-        whose rotated position falls inside the viewport; None when no
-        localization is in view."""
+    def _in_view_sample(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """A sample of at most ``_PIVOT_SAMPLE`` localizations (x, y, z
+        in the loaded frame) and, per row, whether its rotated position
+        falls inside the viewport; None when nothing is loaded."""
         if not self.locs or self.viewport is None:
             return None
         channels = [
@@ -2364,9 +2379,28 @@ class ViewRotation(QtWidgets.QLabel):
         in_view = (np.abs(screen[:, 0]) <= (x_max - x_min) / 2) & (
             np.abs(screen[:, 1]) <= (y_max - y_min) / 2
         )
+        return xyz, in_view
+
+    def _in_view_median_z(self) -> float | None:
+        """Median z (camera pixels, the loaded frame) of the localizations
+        whose rotated position falls inside the viewport; None when no
+        localization is in view."""
+        sample = self._in_view_sample()
+        if sample is None:
+            return None
+        xyz, in_view = sample
         if not in_view.any():
             return None
         return float(np.median(xyz[in_view, 2]))
+
+    def _visible_fraction(self) -> float:
+        """Fraction of the loaded localizations whose rotated position
+        falls inside the viewport (estimated from a sample); 1.0 when
+        nothing is loaded."""
+        sample = self._in_view_sample()
+        if sample is None:
+            return 1.0
+        return float(sample[1].mean())
 
     def _reanchor_pivot(self) -> None:
         """Slide the rotation pivot along the viewing direction to the

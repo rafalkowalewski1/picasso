@@ -106,7 +106,7 @@ The 3D rotation window allows the user to render 3D localization data. Open it w
 
 The user may perform multiple actions in the rotation window, including: saving rotated localizations, building animations (.mp4 format), rotating by a specified angle, etc.
 
-Rendering in the rotation window runs in the background, as in the main window: rotating and panning never block the interface, a burst of mouse movements renders only the newest orientation, and large picks are previewed with a subset of the localizations while you drag (``interaction_subsample``, see *CPU usage on shared workstations*) and sharpened as soon as the drag pauses. The renders use the GPU when it is enabled (see *GPU rendering*).
+Rendering in the rotation window runs in the background, as in the main window: rotating and panning never block the interface, a burst of mouse movements renders only the newest orientation, and large picks are previewed with a subset of the localizations while you drag (``interaction_subsample``, see *CPU usage on shared workstations*, counted over the localizations in view) and sharpened as soon as the drag pauses. The renders use the GPU when it is enabled (see *GPU rendering*).
 
 **Animation:** the frames are rendered in the background, at the resolution set in the animation dialog (``Resolution (px)``, by default the window's size, e.g. 1920 x 1080 for a full-HD video whatever the window's size), so the windows stay usable while the video is built; a progress dialog shows the frames done and lets you cancel, in which case no partial video is left behind. The frames use the GPU when it is enabled.
 
