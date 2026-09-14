@@ -295,7 +295,9 @@ def _get_backend(n_locs: int | None = None) -> SplatBackend:
     the GPU when enabled and available, else the CPU reference. Requests
     of fewer than ``lib.RENDER_GPU_MIN_LOCS`` localizations (``n_locs``)
     stay on the CPU, which is faster for them than the GPU's fixed cost
-    per render."""
+    per render. ``n_locs`` is a cost measure rather than a count: the
+    caller weights localizations that are expensive on the CPU (a
+    rotated 3D render, ``lib.RENDER_ROTATED_COST_FACTOR``)."""
     settings = gpu_settings()
     if settings["enabled"] == "off":
         return _cpu_backend()

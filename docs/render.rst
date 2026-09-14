@@ -106,6 +106,8 @@ The 3D rotation window allows the user to render 3D localization data. To use it
 
 The user may perform multiple actions in the rotation window, including: saving rotated localizations, building animations (.mp4 format), rotating by a specified angle, etc.
 
+Rendering in the rotation window runs in the background, as in the main window: rotating and panning never block the interface, a burst of mouse movements renders only the newest orientation, and large picks are previewed with a subset of the localizations while you drag (``interaction_subsample``, see *CPU usage on shared workstations*) and sharpened as soon as the drag pauses. The renders use the GPU when it is enabled (see *GPU rendering*).
+
 Note that to build animations, the user must have ``ffmpeg`` installed on their system.
 
 When rotating by a specified angle, the dialog offers a ``Rotate around`` choice between **Localizations** (the default) and **World**. ``Localizations`` rotates around the data's own axes - the axes shown by the axes icon, which rotate together with the data - so each entered angle changes the corresponding displayed angle by exactly that amount. ``World`` rotates around the fixed screen/camera axes instead.
@@ -679,7 +681,7 @@ Localizations can be rendered on the graphics card instead of the CPU, which mak
         adapter: high-performance
         vram_budget_mb: 2048
 
-- ``enabled``: ``auto`` (the default) renders on the GPU whenever one can be initialized and silently uses the CPU otherwise; ``on`` does the same but records a warning in the log (``~/.picasso/logs/picasso.log``) when the GPU cannot be used, for troubleshooting; ``off`` never touches the GPU. Whatever the setting, a problem on the GPU never interrupts your work: the affected image is simply rendered on the CPU. Very small renders (fewer than 20,000 localizations) always use the CPU, which is faster for them. ``View > Show info`` shows which renderer is in use.
+- ``enabled``: ``auto`` (the default) renders on the GPU whenever one can be initialized and silently uses the CPU otherwise; ``on`` does the same but records a warning in the log (``~/.picasso/logs/picasso.log``) when the GPU cannot be used, for troubleshooting; ``off`` never touches the GPU. Whatever the setting, a problem on the GPU never interrupts your work: the affected image is simply rendered on the CPU. Very small renders (fewer than 20,000 localizations) always use the CPU, which is faster for them; a rotated 3D render counts twenty-fold, as it costs the CPU that much more, so the rotation window uses the GPU from about a thousand localizations on. ``View > Show info`` shows which renderer is in use.
 - ``adapter``: which graphics card to use on computers with several, e.g. laptops with an integrated and a dedicated GPU. ``high-performance`` (the default) asks the system for the dedicated one, ``low-power`` for the integrated one; any other text selects the first adapter whose name contains it, e.g. ``NVIDIA`` or ``Intel``. The chosen adapter is recorded in the log.
 - ``vram_budget_mb`` caps the GPU memory (in MB) the uploaded localizations may occupy. When the cap is reached, the least recently rendered channels are released, and a single channel larger than the cap is rendered in pieces instead of failing. ``0`` removes the cap. As a rule of thumb, a two-dimensional dataset needs 16 bytes per localization (about 1 GB for 60 milion localizations), a three-dimensional one with per-localization angles up to 28 bytes.
 

@@ -749,4 +749,9 @@ def synchronous_gui_rendering(monkeypatch):
     gui_render = sys.modules.get("picasso.gui.render")
     if gui_render is not None:
         monkeypatch.setattr(gui_render.View, "async_rendering", False)
+    gui_rotation = sys.modules.get("picasso.gui.rotation")
+    if gui_rotation is not None:
+        monkeypatch.setattr(
+            gui_rotation.ViewRotation, "async_rendering", False
+        )
     yield

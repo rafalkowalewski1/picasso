@@ -444,7 +444,13 @@ def _render_channels(
         min_blur_width=min_blur_width,
         ang=ang,
     )
-    chosen = _get_backend(n_locs=sum(len(c) for c in columns))
+    n_locs = sum(len(c) for c in columns)
+    if ang is not None:
+        # a rotated 3D localization costs the CPU far more than a 2D
+        # one (see lib.RENDER_ROTATED_COST_FACTOR), so the small-render
+        # cutoff of the selection is reached that much sooner
+        n_locs *= lib.RENDER_ROTATED_COST_FACTOR
+    chosen = _get_backend(n_locs=n_locs)
     cpu = _cpu_backend()
     if chosen is not cpu:
         try:

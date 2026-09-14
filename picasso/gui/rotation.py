@@ -21,6 +21,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from scipy.spatial.transform import Rotation
 
 from .. import io, render, lib, __version__
+from .render_worker import RenderWorker, subsample_request
 
 
 DEFAULT_OVERSAMPLING = 1.0
@@ -809,11 +810,33 @@ class ViewRotation(QtWidgets.QLabel):
         loaded.
     window : QMainWindow
         Instance of the rotation window.
+    async_rendering : bool
+        Class attribute: full renders run on a worker thread
+        (``render_worker.RenderWorker``, latest request wins) and the
+        result is shown when it lands, so a drag never blocks the GUI.
+        False renders synchronously on the GUI thread (tests, and the
+        fallback that stays available).
     """
+
+    async_rendering = True
 
     def __init__(self, window: QtWidgets.QMainWindow) -> None:
         super().__init__(window)
         self.window = window
+        self.image = None  # raw image of the last full render (cache)
+        # asynchronous rendering: completed renders are matched against
+        # the newest request id (see ``_on_render_finished``); the
+        # worker thread starts with the first asynchronous request
+        self._render_request_id = 0
+        self._current_request_interactive = False
+        self._render_worker = None
+        self._render_thread = None
+        # interactive requests (drags) render a subsample; the refine
+        # timer follows up with a full-quality render on idle
+        self._refine_timer = QtCore.QTimer(self)
+        self._refine_timer.setSingleShot(True)
+        self._refine_timer.setInterval(150)
+        self._refine_timer.timeout.connect(self._refine_render)
         self._R = Rotation.identity()
         self._rotvec = np.zeros(3)
         self._anchor_R = Rotation.identity()
@@ -1141,6 +1164,25 @@ class ViewRotation(QtWidgets.QLabel):
         qimage : QImage
             Shows rendered locs; 8 bit, scaled.
         """
+        request = self._build_render_request(
+            viewport=viewport, autoscale=autoscale, use_cache=use_cache
+        )
+        qimage, _, contrast_limits, raw_image = render.render_scene(**request)
+        self._adopt_render_result(contrast_limits, raw_image, cache=cache)
+        return qimage
+
+    def _build_render_request(
+        self,
+        viewport: (
+            tuple[tuple[float, float], tuple[float, float]] | None
+        ) = None,
+        autoscale: bool = False,
+        use_cache: bool = False,
+    ) -> dict:
+        """Snapshot everything ``render.render_scene`` needs, on the GUI
+        thread (dialog reads and locs preparation are not thread safe).
+        The current rotation goes along as ``ang``, so the request
+        renders the same on either thread and either backend."""
         # get disp px size, blur method, etc
         kwargs = self.get_render_kwargs(viewport=viewport)
         locs, infos = self._prepare_locs_for_rendering()
@@ -1152,8 +1194,7 @@ class ViewRotation(QtWidgets.QLabel):
         contrast = None if autoscale else (vmin, vmax)
         raw_image = self.image if use_cache else None
         intensities = self.window.window.view.read_relative_intensities()
-
-        qimage, n_locs, (vmin, vmax), raw_image = render.render_scene(
+        return dict(
             locs=locs,
             info=infos,
             **kwargs,
@@ -1167,17 +1208,29 @@ class ViewRotation(QtWidgets.QLabel):
             return_contrast_limits=True,
             return_raw_image=True,
         )
+
+    def _adopt_render_result(
+        self,
+        contrast_limits: tuple[float, float],
+        raw_image: np.ndarray,
+        cache: bool = True,
+    ) -> None:
+        """Keep a completed render's raw image as the cache of the
+        contrast redraws and show its contrast limits in the display
+        settings dialog."""
         if cache:
             self.image = raw_image
+        vmin, vmax = contrast_limits
         self.window.display_settings_dlg.silent_minimum_update(vmin)
         self.window.display_settings_dlg.silent_maximum_update(vmax)
-        return qimage
 
     def update_scene(
         self,
         viewport: tuple[float, float, float, float] | None = None,
         autoscale: bool = False,
         use_cache: bool = False,
+        interactive: bool = False,
+        synchronous: bool = False,
     ) -> None:
         """Update the view of rendered localizations.
 
@@ -1190,11 +1243,23 @@ class ViewRotation(QtWidgets.QLabel):
             True if optimally adjust contrast.
         use_cache : bool, optional
             True if the rendered scene should be taken from cache.
+        interactive : bool, optional
+            True during a drag: the render may be a subsampled preview,
+            followed by a full-quality render once the drag pauses.
+        synchronous : bool, optional
+            True to render on the GUI thread and return with the new
+            image on screen (exports), whatever ``async_rendering``.
         """
         n_channels = len(self.locs)
         if n_channels:
             viewport = viewport or self.viewport
-            self.draw_scene(viewport, autoscale=autoscale, use_cache=use_cache)
+            self.draw_scene(
+                viewport,
+                autoscale=autoscale,
+                use_cache=use_cache,
+                interactive=interactive,
+                synchronous=synchronous,
+            )
 
         # update current position in the animation dialog
         angx = np.round(self.angx * 180 / np.pi, 1)
@@ -1209,6 +1274,8 @@ class ViewRotation(QtWidgets.QLabel):
         viewport: tuple[float, float, float, float],
         autoscale: bool = False,
         use_cache: bool = False,
+        interactive: bool = False,
+        synchronous: bool = False,
     ) -> None:
         """Render localizations in the given viewport and draws legend,
         rotation, etc.
@@ -1222,13 +1289,32 @@ class ViewRotation(QtWidgets.QLabel):
             True if contrast should be optimally adjusted.
         use_cache : bool, optional
             True if the rendered scene should be taken from cache.
+        interactive, synchronous : bool, optional
+            See ``update_scene``.
         """
         # make sure viewport has the same shape as the main window
         self.viewport = self.adjust_viewport_to_view(viewport)
         if not use_cache:
             self.set_optimal_scalebar(silent=True)
-        # render locs
-        qimage = self.render_scene(autoscale=autoscale, use_cache=use_cache)
+        if use_cache or synchronous or not self.async_rendering:
+            # cache redraws (contrast, colormap, the live measuring
+            # cross) are cheap and stay synchronous for instant feedback
+            qimage = self.render_scene(
+                autoscale=autoscale, use_cache=use_cache
+            )
+            self._complete_scene(qimage)
+        else:
+            # full renders run on the worker thread; the last frame
+            # stays on screen until the new one lands
+            self._submit_async_render(
+                autoscale=autoscale, interactive=interactive
+            )
+
+    def _complete_scene(self, qimage: QtGui.QImage) -> None:
+        """Second half of ``draw_scene``: scale the rendered frame to
+        the window, draw the overlays and show it. Runs on the GUI
+        thread, directly for synchronous renders or from
+        ``_on_render_finished``."""
         # scale image's size to the window
         self.qimage = qimage.scaled(
             self.width(),
@@ -1245,6 +1331,96 @@ class ViewRotation(QtWidgets.QLabel):
         # convert to pixmap
         self.pixmap = QtGui.QPixmap.fromImage(self.qimage)
         self.setPixmap(self.pixmap)
+
+    # --- asynchronous rendering --- #
+    def _ensure_render_worker(self) -> RenderWorker:
+        """The worker and its thread, started on first use so a window
+        that never shows 3D data never runs a thread."""
+        if self._render_thread is None:
+            self._render_worker = RenderWorker()
+            # deliberately unparented: a parented QThread would be
+            # destroyed by Qt while still running whenever the window
+            # is torn down outside closeEvent, which is a hard abort;
+            # the Python reference owns it and stop_render_worker()
+            # ends it
+            self._render_thread = QtCore.QThread()
+            self._render_worker.moveToThread(self._render_thread)
+            self._render_worker.finished.connect(self._on_render_finished)
+            self._render_thread.start()
+        return self._render_worker
+
+    def _submit_async_render(
+        self, autoscale: bool = False, interactive: bool = False
+    ) -> None:
+        """Post the newest render request to the worker (latest wins).
+
+        Interactive requests (drags) render a strided subsample with
+        compensated contrast, by the main view's ``interaction_subsample``
+        rule, and arm the refine timer, which follows up with a
+        full-quality render once the drag pauses.
+        """
+        request = self._build_render_request(autoscale=autoscale)
+        if interactive:
+            interactive = subsample_request(
+                request, self._interaction_subsample_target
+            )
+        self._render_request_id += 1
+        self._current_request_interactive = interactive
+        self._ensure_render_worker().submit(
+            self._render_request_id, request, self.viewport
+        )
+        if interactive:
+            self._refine_timer.start()
+        else:
+            self._refine_timer.stop()
+
+    def _refine_render(self) -> None:
+        """Follow the last interactive preview with a full render."""
+        if len(self.locs) and self.async_rendering:
+            self._submit_async_render()
+
+    def _interaction_subsample_target(self, population: int = 0) -> int:
+        """The preview target of the main view (one setting for both
+        windows, see ``render.View._interaction_subsample_target``)."""
+        return self.window.window.view._interaction_subsample_target(
+            population
+        )
+
+    def _on_render_finished(
+        self,
+        request_id: int,
+        viewport: tuple,
+        qimage: QtGui.QImage,
+        n_locs: int,
+        contrast_limits: tuple[float, float],
+        raw_image: np.ndarray,
+    ) -> None:
+        """Apply a completed worker render on the GUI thread.
+
+        Every frame is shown: a superseded one is still fresher than
+        what is on screen and, during a drag, an intermediate
+        orientation on the way to the newest request. Only the newest
+        full-quality render updates the raw-image cache and the
+        contrast spinboxes — a preview's subsampled image would corrupt
+        later contrast redraws, and its compensated limits are not the
+        user's.
+        """
+        if (
+            request_id == self._render_request_id
+            and not self._current_request_interactive
+        ):
+            self._adopt_render_result(contrast_limits, raw_image)
+        self._complete_scene(qimage)
+
+    def stop_render_worker(self) -> None:
+        """Stop the render worker thread, if one was started. A render
+        in flight is allowed to finish first — destroying a live
+        QThread aborts the process."""
+        if self._render_thread is not None:
+            self._render_thread.quit()
+            self._render_thread.wait()
+            self._render_thread = None
+            self._render_worker = None
 
     def draw_scalebar(self, image: QtGui.QImage) -> QtGui.QImage:
         """Draw a scalebar.
@@ -1657,7 +1833,7 @@ class ViewRotation(QtWidgets.QLabel):
                 ax = 0.0
             delta_R = render.rotation_matrix(ax, ay, az)
             self.apply_rotation(delta_R.as_rotvec())
-        self.update_scene()
+        self.update_scene(interactive=True)
 
     def _pan_drag(self, event: QtGui.QMouseEvent) -> None:
         """Inverse-rotation panning: convert the screen-space mouse delta
@@ -1686,7 +1862,9 @@ class ViewRotation(QtWidgets.QLabel):
         # subtracts ``dx * vw`` from the viewport X (and similarly for Y),
         # which is exactly ``viewport_center -= world_delta[:2]``.
         self.pan_relative(
-            float(world_delta[1]) / vh, float(world_delta[0]) / vw
+            float(world_delta[1]) / vh,
+            float(world_delta[0]) / vw,
+            interactive=True,
         )
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -1755,13 +1933,17 @@ class ViewRotation(QtWidgets.QLabel):
         )
         return x_movie, y_movie
 
-    def pan_relative(self, dy: float, dx: float) -> None:
+    def pan_relative(
+        self, dy: float, dx: float, interactive: bool = False
+    ) -> None:
         """Move viewport by a given relative distance.
 
         Parameters
         ----------
         dy, dx : float
             Relative displacement of the viewport in y or x axis.
+        interactive : bool, optional
+            True during a drag, see ``update_scene``.
         """
         viewport_height, viewport_width = render.viewport_size(self.viewport)
         x_move = dx * viewport_width
@@ -1771,7 +1953,7 @@ class ViewRotation(QtWidgets.QLabel):
         y_min = self.viewport[0][0] - y_move
         y_max = self.viewport[1][0] - y_move
         self.viewport = [(y_min, x_min), (y_max, x_max)]
-        self.update_scene()
+        self.update_scene(interactive=interactive)
 
     def add_point(
         self,
@@ -1847,10 +2029,10 @@ class ViewRotation(QtWidgets.QLabel):
             if not scalebar:
                 self.set_optimal_scalebar(force=True)
                 scalebar_box.setChecked(True)
-                self.update_scene()
+                self.update_scene(synchronous=True)
                 self.qimage.save(os.path.splitext(path)[0] + "_scalebar.png")
                 scalebar_box.setChecked(False)
-                self.update_scene()
+                self.update_scene(synchronous=True)
 
     def export_current_view_info(self, path: str) -> None:
         """Export current view's information."""
@@ -2409,7 +2591,10 @@ class RotationWindow(QtWidgets.QMainWindow):
         QtWidgets.QMainWindow.hideEvent(self, event)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        """Close all children dialogs and self."""
+        """Close all children dialogs and self; the render worker
+        thread stops too (it restarts with the next asynchronous
+        render when the window is opened again)."""
         self.display_settings_dlg.close()
         self.animation_dialog.close()
+        self.view_rot.stop_render_worker()
         QtWidgets.QMainWindow.closeEvent(self, event)

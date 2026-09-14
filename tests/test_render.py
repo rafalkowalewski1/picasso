@@ -2352,6 +2352,44 @@ class TestSplatBackend:
         assert render.backend._get_backend() is cpu
         assert render.backend.describe_active().startswith("CPU (")
 
+    def test_rotated_renders_reach_the_gpu_sooner(
+        self, locs_3d, info, monkeypatch
+    ):
+        # a rotated 3D localization costs the CPU ~20x a 2D one, so the
+        # small-render cutoff counts it that many times
+        cpu = render.backend._cpu_backend()
+        served = []
+
+        class FakeGpu(render.SplatBackend):
+            name = "fake-gpu"
+
+            def render_channels(self, columns, info_arg, **kwargs):
+                served.append(sum(len(c) for c in columns))
+                return cpu.render_channels(columns, info_arg, **kwargs)
+
+        fake = FakeGpu()
+        monkeypatch.setattr(
+            render.backend, "_gpu_backend", lambda adapter, warn: fake
+        )
+        self._settings(monkeypatch, {"enabled": "auto"})
+        n = lib.RENDER_GPU_MIN_LOCS // lib.RENDER_ROTATED_COST_FACTOR + 1
+        repeats = -(-n // len(locs_3d))  # the fixture is smaller than n
+        small = pd.concat([locs_3d] * repeats).iloc[:n].reset_index(drop=True)
+        assert len(small) == n < lib.RENDER_GPU_MIN_LOCS
+        assert n * lib.RENDER_ROTATED_COST_FACTOR >= lib.RENDER_GPU_MIN_LOCS
+        kwargs = dict(
+            disp_px_size=PIXELSIZE / 4,
+            viewport=((0.0, 0.0), (32.0, 32.0)),
+            blur_method="gaussian",
+            min_blur_width=0.0,
+        )
+        render.scene._render_channels([small], [info], ang=None, **kwargs)
+        assert served == []  # 2D: below the cutoff, the CPU
+        render.scene._render_channels(
+            [small], [info], ang=(0.3, 0.2, 0.1), **kwargs
+        )
+        assert served == [n]  # rotated: weighted past the cutoff
+
     @pytest.mark.gpu_backend
     def test_unavailable_gpu_logs_once_per_preference(
         self, monkeypatch, caplog

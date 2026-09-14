@@ -167,6 +167,11 @@ RENDER_GPU_ADAPTER_DEFAULT = "high-performance"
 #: GPU is enabled: the GPU's fixed cost per render (~6 ms) exceeds the
 #: CPU's time for them
 RENDER_GPU_MIN_LOCS = 20_000
+#: how many times a rotated 3D localization counts towards
+#: ``RENDER_GPU_MIN_LOCS``: the projected z precision widens every
+#: footprint, so the CPU kernels cost 15-20x more per localization
+#: than in 2D, and the GPU wins from a few thousand localizations on
+RENDER_ROTATED_COST_FACTOR = 20
 
 
 def n_workers(

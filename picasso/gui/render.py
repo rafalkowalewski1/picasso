@@ -15,7 +15,6 @@ import os
 import sys
 import copy
 import time
-import threading
 import os.path
 from math import ceil
 from collections import Counter
@@ -56,6 +55,7 @@ from ..lib import (
     FloatArray1D,
     FloatArray2D,
 )
+from .render_worker import RenderWorker, subsample_request
 from .rotation import RotationWindow
 from .app import run_gui
 
@@ -7593,59 +7593,6 @@ def _expand_viewport(
     return ((y_min - dy, x_min - dx), (y_max + dy, x_max + dx))
 
 
-class RenderWorker(QtCore.QObject):
-    """Render scenes off the GUI thread, latest request wins.
-
-    ``submit`` (called from the GUI thread) replaces any not-yet-started
-    request, so a burst of pan/zoom events collapses into rendering the
-    newest state; a render already in flight completes and its result is
-    discarded by the receiver when superseded (checked by request id).
-    The heavy work runs with the GIL released (the render kernels are
-    ``nogil``), so the GUI stays responsive throughout.
-
-    Attributes
-    ----------
-    finished : QtCore.pyqtSignal
-        Emitted with ``(request_id, qimage, n_locs, contrast_limits,
-        raw_image)`` when a render completes.
-    """
-
-    finished = QtCore.pyqtSignal(int, object, object, int, object, object)
-    _poke = QtCore.pyqtSignal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._lock = threading.Lock()
-        self._pending = None
-        # auto connection: queued once this object lives on its thread
-        self._poke.connect(self._process)
-
-    def submit(
-        self, request_id: int, scene_kwargs: dict, viewport: tuple
-    ) -> None:
-        """Queue a render request, replacing any pending one (thread
-        safe; called from the GUI thread). ``viewport`` is echoed back
-        with the result so superseded frames can still be positioned."""
-        with self._lock:
-            self._pending = (request_id, scene_kwargs, viewport)
-        self._poke.emit()
-
-    @QtCore.pyqtSlot()
-    def _process(self) -> None:
-        with self._lock:
-            pending = self._pending
-            self._pending = None
-        if pending is None:  # already handled by an earlier poke
-            return
-        request_id, scene_kwargs, viewport = pending
-        qimage, n_locs, contrast_limits, raw_image = render.render_scene(
-            **scene_kwargs
-        )
-        self.finished.emit(
-            request_id, viewport, qimage, n_locs, contrast_limits, raw_image
-        )
-
-
 class View(QtWidgets.QLabel):
     """Display localization datasets. Render localizations and draw
     objects on top, such as scale bar, legend, etc.
@@ -9779,40 +9726,7 @@ class View(QtWidgets.QLabel):
         targets the visible population; the others through a strided
         view of the DataFrame, which a backend with resident uploads
         renders straight from its buffers."""
-        locs = request["locs"]
-        single = isinstance(locs, pd.DataFrame)
-        channels = [locs] if single else locs
-        indices = request.get("indices")
-        if indices is None:
-            indices = [None] * len(channels)
-        population = sum(
-            len(channel) if idx is None else len(idx)
-            for channel, idx in zip(channels, indices)
-        )
-        target = self._interaction_subsample_target(population)
-        if target <= 0 or population <= target:
-            return False
-        step = ceil(population / target)
-        sampled = []
-        sampled_indices = []
-        n_sampled = 0
-        for channel, idx in zip(channels, indices):
-            if idx is None:
-                channel = channel.iloc[::step]
-                n_sampled += len(channel)
-            else:
-                idx = idx[::step]
-                n_sampled += len(idx)
-            sampled.append(channel)
-            sampled_indices.append(idx)
-        fraction = n_sampled / population
-        request["locs"] = sampled[0] if single else sampled
-        if request.get("indices") is not None:
-            request["indices"] = sampled_indices
-        if request["contrast"] is not None:
-            vmin, vmax = request["contrast"]
-            request["contrast"] = (vmin * fraction, vmax * fraction)
-        return True
+        return subsample_request(request, self._interaction_subsample_target)
 
     def _submit_async_render(
         self, autoscale: bool = False, interactive: bool = False
@@ -14113,6 +14027,7 @@ class Window(QtWidgets.QMainWindow):
         # destroying a running QThread aborts the process
         self.view.stop_load()
         self.view.stop_render_worker()
+        self.window_rot.view_rot.stop_render_worker()
         settings = io.load_user_settings()
         current_colormap = self.display_settings_dlg.colormap.currentText()
         if current_colormap == "Custom":
@@ -15178,9 +15093,10 @@ class Window(QtWidgets.QMainWindow):
     def remove_locs(self) -> None:
         """Remove all localizations and reset the window to its initial
         state by rebuilding the view, dialogs and menu bar."""
-        # the rebuilt UI replaces the view; its worker thread must stop
-        # first, or its eventual destruction aborts the process
+        # the rebuilt UI replaces the views; their worker threads must
+        # stop first, or their eventual destruction aborts the process
         self.view.stop_render_worker()
+        self.window_rot.view_rot.stop_render_worker()
         render.backend.release_uploads()  # GPU memory of the datasets
         for dialog in self.dialogs:
             dialog.close()
