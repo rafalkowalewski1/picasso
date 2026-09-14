@@ -1,8 +1,9 @@
 # Changelog
 
-Last change: 05-SEP-2026 CEST
+Last change: 14-SEP-2026 CEST
 
 ## 0.12.0
+- The user settings file (`~/.picasso/settings.yaml`) is no longer lost when it cannot be read: the unreadable file is kept as `settings.yaml.broken`, a warning is logged and Render reports it at startup, and every save keeps the previous file as `settings.yaml.bak` and writes atomically. Render also writes the `Render` settings it does not find (`cpu_utilization`, `interaction_subsample`, `max_blur_width`, `gpu`) with their defaults on start, as the other Picasso settings are, so they are visible and editable.
 - Fast rendering, `picasso.render` was turned into a submodule (no backward-compatibility issues).
 - **GPU rendering in Render (experimental)**: localizations are rendered on the graphics card (Metal, Direct3D 12 or Vulkan via `wgpu`, any vendor) — uploaded once, then every view is computed on the GPU, several times faster than the CPU threads. On by default where a GPU initializes (`Render > gpu > enabled: auto` in the settings file), with a silent CPU fallback; `adapter` picks the card on dual-GPU machines and `vram_budget_mb` caps the GPU memory. `View > Show info` shows the active renderer. Included in the one-click installers; pip users: `pip install picassosr[wgpu]`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#gpu-rendering).
 - Render: pan by dragging with Ctrl (Cmd on macOS) + the left mouse button, in every tool — so the view can be moved while picking or measuring. Dragging with the right mouse button still pans in the Zoom tool, and both also work in the Mask image dialog.

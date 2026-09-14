@@ -17,6 +17,7 @@ import logging
 import re
 import json
 import os
+import shutil
 import threading
 import warnings
 from typing import Callable, TYPE_CHECKING
@@ -1410,10 +1411,91 @@ def load_drift(path: str) -> pd.DataFrame | None:
     return drift_df
 
 
+_settings_log = logging.getLogger(__name__)
+#: suffix of the copy kept of a settings file that could not be parsed
+SETTINGS_BROKEN_SUFFIX = ".broken"
+#: suffix of the copy kept of the previous settings file before a save
+SETTINGS_BACKUP_SUFFIX = ".bak"
+# (message, path of the kept copy or None, file signature) of the last
+# settings file that could not be read; sticky for the process so a GUI
+# can report it once (``dismiss_settings_load_error``)
+_settings_load_error: tuple[str, str | None, tuple | None] | None = None
+
+
+def _file_signature(path: str) -> tuple | None:
+    """Cheap identity of a file's contents (mtime, size), None if
+    unreadable."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _record_broken_settings(path: str, error: BaseException) -> None:
+    """Keep a copy of an unparsable settings file and warn once about
+    it. Every Picasso tool loads the settings, changes its own keys and
+    writes the whole file back, so a file that cannot be read would
+    otherwise be silently replaced by the next save, losing every other
+    section."""
+    global _settings_load_error
+    signature = _file_signature(path)
+    if (
+        _settings_load_error is not None
+        and signature is not None
+        and _settings_load_error[2] == signature
+    ):
+        return  # this very file was already reported
+    kept: str | None = path + SETTINGS_BROKEN_SUFFIX
+    try:
+        shutil.copy2(path, kept)
+    except OSError:
+        kept = None
+    _settings_log.warning(
+        "The user settings file %s could not be read (%s); default "
+        "settings are used%s.",
+        path,
+        error,
+        f" and a copy of the file was kept as {kept}" if kept else "",
+    )
+    _settings_load_error = (str(error), kept, signature)
+
+
+def settings_load_error() -> tuple[str, str | None] | None:
+    """``(message, path of the kept copy or None)`` if a settings file
+    could not be read in this process (see ``load_user_settings``),
+    until ``dismiss_settings_load_error`` is called; None otherwise."""
+    if _settings_load_error is None:
+        return None
+    return _settings_load_error[:2]
+
+
+def dismiss_settings_load_error() -> None:
+    """Forget a recorded settings load error (after reporting it)."""
+    global _settings_load_error
+    _settings_load_error = None
+
+
+def settings_file_is_broken() -> bool:
+    """Whether the settings file on disk is (still) the one that could
+    not be read: True until it is rewritten or fixed."""
+    return (
+        _settings_load_error is not None
+        and _settings_load_error[2] is not None
+        and _settings_load_error[2]
+        == _file_signature(_user_settings_filename())
+    )
+
+
 def load_user_settings() -> lib.AutoDict:
     """Load user settings from a YAML file containing information such
     as the default directory for loading/saving files, Render color map,
     Localize parameters, etc.
+
+    A file that cannot be parsed yields default (empty) settings, as
+    before, but is never lost: a copy is kept next to it as
+    ``settings.yaml.broken``, a warning is logged and the error is
+    reported through ``settings_load_error`` so a GUI can tell the user.
 
     Returns
     -------
@@ -1427,14 +1509,37 @@ def load_user_settings() -> lib.AutoDict:
     except FileNotFoundError:
         return lib.AutoDict()
     try:
-        settings = yaml.load(settings_file, Loader=yaml.FullLoader)
-        settings_file.close()
-    except Exception as e:
-        print(e)
-        print("Error reading user settings, Reset.")
+        with settings_file:
+            settings = yaml.load(settings_file, Loader=yaml.FullLoader)
+    except Exception as error:
+        _record_broken_settings(settings_filename, error)
+        return lib.AutoDict()
+    if settings is not None and not isinstance(settings, dict):
+        _record_broken_settings(
+            settings_filename,
+            TypeError("the settings file must be a YAML mapping (key: value)"),
+        )
+        return lib.AutoDict()
     if not settings:
         return lib.AutoDict()
     return lib.AutoDict(settings)
+
+
+def _backup_user_settings(settings_filename: str) -> None:
+    """Keep the previous settings file as ``settings.yaml.bak`` before
+    it is overwritten, so the last good version is always at hand. A
+    file recorded as unreadable is not backed up (its copy is
+    ``settings.yaml.broken``), so the ``.bak`` keeps the last good one."""
+    if not os.path.exists(settings_filename) or settings_file_is_broken():
+        return
+    try:
+        shutil.copy2(
+            settings_filename, settings_filename + SETTINGS_BACKUP_SUFFIX
+        )
+    except OSError as error:
+        _settings_log.warning(
+            "Could not back up the user settings file before saving: %s", error
+        )
 
 
 def save_info(
@@ -1478,12 +1583,20 @@ def save_user_settings(settings: dict) -> None:
     settings : dict
         The settings to save; nested mappings are converted to plain dicts
         first so PyYAML does not tag them.
+
+    The previous file is kept as ``settings.yaml.bak`` (see
+    ``_backup_user_settings``) and the new one is written to a temporary
+    file first and renamed into place, so an interrupted save cannot
+    leave a half-written file behind.
     """
     settings = _to_dict_walk(settings)
     settings_filename = _user_settings_filename()
     os.makedirs(os.path.dirname(settings_filename), exist_ok=True)
-    with open(settings_filename, "w") as settings_file:
+    _backup_user_settings(settings_filename)
+    temporary = settings_filename + ".tmp"
+    with open(temporary, "w") as settings_file:
         yaml.dump(dict(settings), settings_file, default_flow_style=False)
+    os.replace(temporary, settings_filename)
 
 
 def _save_metadata_in_yaml() -> bool:

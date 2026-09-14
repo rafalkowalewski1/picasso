@@ -195,6 +195,58 @@ def vram_budget_bytes() -> int | None:
     return gpu_settings()["vram_budget_bytes"]
 
 
+def render_settings_defaults() -> dict:
+    """The ``Render`` settings keys rendering reads, with their
+    defaults (``max_workers`` is optional and therefore absent)."""
+    return {
+        "cpu_utilization": lib.RENDER_CPU_UTILIZATION_DEFAULT,
+        "interaction_subsample": lib.RENDER_INTERACTION_SUBSAMPLE_DEFAULT,
+        "max_blur_width": lib.RENDER_MAX_BLUR_WIDTH_DEFAULT,
+        "gpu": {
+            "enabled": lib.RENDER_GPU_ENABLED_DEFAULT,
+            "adapter": lib.RENDER_GPU_ADAPTER_DEFAULT,
+            "vram_budget_mb": lib.RENDER_VRAM_BUDGET_MB_DEFAULT,
+        },
+    }
+
+
+def _fill_missing(target: dict, defaults: dict) -> bool:
+    """Add the keys of ``defaults`` that ``target`` lacks (recursing
+    into nested mappings); existing values win. Returns whether
+    anything was added."""
+    added = False
+    for key, value in defaults.items():
+        if key not in target:
+            target[key] = dict(value) if isinstance(value, dict) else value
+            added = True
+        elif isinstance(value, dict) and isinstance(target[key], dict):
+            added = _fill_missing(target[key], value) or added
+    return added
+
+
+def persist_render_defaults() -> bool:
+    """Write the ``Render`` settings the user settings file does not
+    name yet, with their defaults, as the other Picasso settings do —
+    so every key is visible and editable in the file. Existing values
+    are kept. Returns True when the file was written.
+
+    Nothing is written while the settings file on disk is one that
+    could not be read (``io.settings_file_is_broken``): a fresh file
+    would replace the user's file before they had a chance to fix it.
+    """
+    io = lib.io
+    settings = io.load_user_settings()
+    if io.settings_file_is_broken():
+        return False
+    section = settings["Render"]
+    if not isinstance(section, dict):
+        section = settings["Render"] = {}
+    if not _fill_missing(section, render_settings_defaults()):
+        return False
+    io.save_user_settings(settings)
+    return True
+
+
 def _cpu_backend() -> SplatBackend:
     """The process-wide CPU reference backend (also the fallback)."""
     global _cpu_singleton

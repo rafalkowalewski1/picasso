@@ -665,6 +665,8 @@ Rendering uses a limited number of CPU worker threads so that Picasso stays poli
 
 The settings file is read every time a render starts, so changes apply immediately, without restarting Picasso. At least one worker is always used and, on Windows, the number of workers is capped at 61 (a limitation of Python's process handling).
 
+Picasso: Render writes the ``Render`` keys it does not find in the file with their defaults when it starts (``max_workers`` excepted, as it is optional), so every setting is visible and editable. How the settings file is kept safe from editing mistakes is described under :ref:`user-settings-file`.
+
 GPU rendering
 -------------
 Localizations can be rendered on the graphics card instead of the CPU, which makes large multiplexed datasets interactive: the whole dataset is uploaded to the GPU once and every view afterwards is computed there, typically several times faster than the CPU worker threads, with the sharp image arriving where the CPU path shows a preview. It works on any recent graphics card — Metal on macOS, Direct3D 12 on Windows, Vulkan on Linux — through the ``wgpu`` package: it is included in the one-click installers, and pip users install it with ``pip install picassosr[wgpu]`` (or ``[gpu]`` for all GPU features, including CUDA). The rendering is controlled by the ``gpu`` section of the ``Render`` settings shown above:

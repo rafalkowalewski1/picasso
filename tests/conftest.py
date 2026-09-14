@@ -712,6 +712,20 @@ def dark_movie_factory():
 
 
 @pytest.fixture(autouse=True)
+def isolated_user_settings(tmp_path, monkeypatch):
+    """Every test reads and writes its own, initially absent, settings
+    file: the GUIs persist defaults on start and save on close, and the
+    developer's ``~/.picasso/settings.yaml`` must never be touched by
+    the suite. Tests that need a specific file patch the same name."""
+    from picasso import io
+
+    monkeypatch.setattr(
+        io, "_user_settings_filename", lambda: str(tmp_path / "settings.yaml")
+    )
+    monkeypatch.setattr(io, "_settings_load_error", None)
+
+
+@pytest.fixture(autouse=True)
 def cpu_render_backend(request, monkeypatch):
     """Rendering tests compare against CPU references, and the GPU
     backend is selected by default wherever a GPU initializes, so every

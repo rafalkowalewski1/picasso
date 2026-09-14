@@ -45,6 +45,7 @@ from .. import (
     imageprocess,
     io,
     lib,
+    lib_qt,
     masking,
     postprocess,
     render,
@@ -14061,6 +14062,11 @@ class Window(QtWidgets.QMainWindow):
         g5m_action.triggered.connect(self.view.g5m)
 
         self.load_user_settings()
+        # the Render keys the settings file does not name yet are
+        # written with their defaults (as the other Picasso settings
+        # are), and an unreadable settings file is reported once
+        render.backend.persist_render_defaults()
+        lib_qt.notify_settings_load_error(self)
 
         # Define 3D entries
         self.actions_3d = [
@@ -14653,17 +14659,19 @@ class Window(QtWidgets.QMainWindow):
     def load_user_settings(self) -> None:  # noqa: C901
         """Load user settings (colormap and current directory)."""
         settings = io.load_user_settings()
-        colormap = settings["Render"]["Colormap"]
-        if len(colormap) == 0:
-            colormap = "magma"
+        # the section may be absent, or present without these keys (the
+        # file names only what the user or a persisted default set)
+        render_settings = settings.get("Render")
+        if not isinstance(render_settings, dict):
+            render_settings = {}
+        colormap = render_settings.get("Colormap") or "magma"
         for index in range(self.display_settings_dlg.colormap.count()):
             if self.display_settings_dlg.colormap.itemText(index) == colormap:
                 self.display_settings_dlg.colormap.setCurrentIndex(index)
                 break
-        try:
-            colormap_prop = settings["Render"]["Colormap Property"]
-        except KeyError:
-            colormap_prop = "gist_rainbow"
+        colormap_prop = (
+            render_settings.get("Colormap Property") or "gist_rainbow"
+        )
         for index in range(self.display_settings_dlg.colormap_prop.count()):
             if (
                 self.display_settings_dlg.colormap_prop.itemText(index)
@@ -14671,15 +14679,7 @@ class Window(QtWidgets.QMainWindow):
             ):
                 self.display_settings_dlg.colormap_prop.setCurrentIndex(index)
                 break
-        pwd = []
-        try:
-            pwd = settings["Render"]["PWD"]
-        except Exception as e:
-            print(e)
-            pass
-        if len(pwd) == 0:
-            pwd = []
-        self.pwd = pwd
+        self.pwd = render_settings.get("PWD") or []
 
         # User-defined colormaps for per-channel rendering
         try:

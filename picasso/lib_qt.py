@@ -151,6 +151,32 @@ class UserSettingsDialog(Dialog):
         )
 
 
+def notify_settings_load_error(parent=None) -> bool:
+    """Tell the user, once, when the settings file could not be read
+    (see ``io.settings_load_error``): default settings are in use, the
+    unreadable file was kept as a copy and the file will be rewritten by
+    the next save. Returns whether a message was shown."""
+    error = io.settings_load_error()
+    if error is None:
+        return False
+    message, kept = error
+    text = (
+        "The user settings file could not be read, so default settings "
+        f"are in use:\n\n{message}\n\n"
+    )
+    if kept:
+        text += f"A copy of the unreadable file was kept as\n{kept}\n\n"
+    text += (
+        "Picasso rewrites the settings file whenever settings change and "
+        "keeps the previous version as settings.yaml.bak. To recover your "
+        "settings, fix the YAML in the kept copy and paste it into "
+        "File > Picasso settings."
+    )
+    QtWidgets.QMessageBox.warning(parent, "Settings could not be read", text)
+    io.dismiss_settings_load_error()
+    return True
+
+
 class MetadataDialog(Dialog):
     """Dialog for inspecting YAML metadata (list of lists of dicts).
 

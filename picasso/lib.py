@@ -148,6 +148,10 @@ RENDER_CPU_UTILIZATION_DEFAULT = 0.5
 #: rendered by the per-localization blur methods; settable per user in
 #: ``settings["Render"]["max_blur_width"]`` (see docs/render.rst)
 RENDER_MAX_BLUR_WIDTH_DEFAULT = 100.0
+#: default of ``settings["Render"]["interaction_subsample"]``: live
+#: previews of max(500,000, a tenth of the visible localizations) while
+#: panning and zooming (see ``picasso.gui.render``)
+RENDER_INTERACTION_SUBSAMPLE_DEFAULT = "auto"
 #: GPU memory (MB) the render backend may keep resident for uploaded
 #: localizations; ``settings["Render"]["gpu"]["vram_budget_mb"]``, 0 =
 #: unlimited (see docs/render.rst)

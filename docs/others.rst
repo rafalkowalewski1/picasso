@@ -45,6 +45,21 @@ If you installed Picasso using the one click installer from `the Picasso release
 - Add your sound files to ``Contents/Frameworks/picasso/gui/notification_sounds``.
 
 
+.. _user-settings-file:
+
+User settings file
+------------------
+Picasso keeps its user settings in ``~/.picasso/settings.yaml`` (``C:\Users\<you>\.picasso\settings.yaml`` on Windows): the last directory used, the Render colormap, the Localize parameters, the CPU and GPU budgets of rendering, the sound notification, and so on. Each module owns a section of the file (``Render``, ``Localize``, ...). The file can be edited with any text editor or via ``File > Picasso settings`` in any module, and changes apply the next time the setting is read - for most settings immediately, without restarting Picasso.
+
+A setting that is missing from the file is written into it with its default the first time it is needed, so every setting a module uses is visible and editable in the file; ``Picasso: Render``, for example, writes all of its ``Render`` keys when it starts. Optional keys that are off unless present (such as ``Render: max_workers``) are the exception.
+
+Every module loads the file, changes its own keys and writes the whole file back, so the file is guarded against mistakes:
+
+- before it is rewritten, the previous version is kept as ``settings.yaml.bak``, so the last good version is always at hand;
+- a file that cannot be parsed (a stray tab or a misplaced colon is enough) is never overwritten silently: a copy is kept as ``settings.yaml.broken``, a warning goes to the :ref:`error log <error-log>` and default settings are used - ``Picasso: Render`` also tells you so when it starts. To get your settings back, fix the YAML in the kept copy and paste it into ``File > Picasso settings``, which validates the YAML before saving.
+
+.. _error-log:
+
 Error log
 ---------
 Every uncaught error is appended to ``~/.picasso/logs/picasso.log`` (i.e. ``C:\Users\<you>\.picasso\logs\picasso.log`` on Windows), together with the tracebacks of failing background threads. The file rotates to ``picasso.log.1`` once it exceeds 5 MB.
