@@ -30,6 +30,15 @@ def test_render_writes_missing_defaults_on_start(qt_offscreen, settings_path):
     window.close()
 
 
+def test_info_dialog_renderer_row_has_help_and_wraps(qt_offscreen):
+    window = gui_render.Window(plugins_loaded=True)
+    dialog = window.info_dialog
+    assert dialog.renderer_label.wordWrap()
+    assert dialog.renderer_help.help_url.endswith("#gpu-rendering")
+    assert "GPU" in dialog.renderer_help.toolTip()
+    window.view.stop_render_worker()
+
+
 def test_render_reports_an_unreadable_settings_file(
     qt_offscreen, settings_path, monkeypatch
 ):

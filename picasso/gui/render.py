@@ -4791,6 +4791,10 @@ class InfoDialog(lib.Dialog):
         Shows the minimum y and x coordinates in FOV (camera pixels).
     """
 
+    GPU_DOCS_URL = (
+        "https://picassosr.readthedocs.io/en/latest/render.html#gpu-rendering"
+    )
+
     def __init__(self, window: QtWidgets.QMainWindow) -> None:
         super().__init__(window)
         self.window = window
@@ -4851,8 +4855,19 @@ class InfoDialog(lib.Dialog):
             "cpu_utilization)."
         )
         display_grid.addWidget(renderer_label, 4, 0)
+        renderer_row = QtWidgets.QHBoxLayout()
         self.renderer_label = QtWidgets.QLabel()
-        display_grid.addWidget(self.renderer_label, 4, 1)
+        self.renderer_label.setWordWrap(True)  # long GPU names
+        renderer_row.addWidget(self.renderer_label, 1)
+        self.renderer_help = lib.HelpButton(self.GPU_DOCS_URL)
+        self.renderer_help.setToolTip(
+            "Open the documentation on GPU rendering: requirements, "
+            "settings and what to do when the CPU is used instead"
+        )
+        renderer_row.addWidget(
+            self.renderer_help, 0, QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        display_grid.addLayout(renderer_row, 4, 1)
 
         fov_buttons_layout = QtWidgets.QHBoxLayout()
         display_grid.addLayout(fov_buttons_layout, 5, 0, 1, 2)

@@ -316,10 +316,11 @@ class TestRotationWindowShapes:
     class _Stub:
         """The attributes ``fit_in_view_rotated`` reads."""
 
-        def __init__(self, pick, pick_shape, pick_size):
+        def __init__(self, pick, pick_shape, pick_size, fov_viewport=None):
             self.pick = pick
             self.pick_shape = pick_shape
             self.pick_size = pick_size
+            self._fov_viewport = fov_viewport  # field-of-view mode
 
     def _viewport(self, pick, shape, size):
         return rotation.ViewRotation.fit_in_view_rotated(
