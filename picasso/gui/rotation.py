@@ -26,6 +26,21 @@ from .render_worker import RenderWorker, subsample_request
 
 DEFAULT_OVERSAMPLING = 1.0
 INITIAL_REL_MAXIMUM = 0.5
+
+
+def source_key(view, source: str) -> tuple:
+    """Identify what the 3D view would show for the main ``view``: its
+    single pick (shape and size included) or its field of view. Equal
+    keys mean the loaded content would not change."""
+    if source == "fov":
+        (y_min, x_min), (y_max, x_max) = view.viewport
+        return (
+            "fov",
+            (float(y_min), float(x_min), float(y_max), float(x_max)),
+        )
+    return ("pick", repr(view._picks[0]), view._pick_shape, view._pick_size)
+
+
 N_GROUP_COLORS = render.N_GROUP_COLORS  # 8
 SHIFT = 0.1
 ZOOM = 9 / 7
@@ -848,11 +863,17 @@ class ViewRotation(QtWidgets.QLabel):
         self.infos = []
         self.paths = []
         self.viewport = None
-        # the pick this window shows, copied from the main window when
-        # it is opened (see ``_sync_from_main_window``); None until then
+        # what this window shows, copied from the main window when it is
+        # opened (see ``_sync_from_main_window``): the single pick, or
+        # the main window's field of view (``_source == "fov"``, pick
+        # attributes None). ``_source_key`` identifies the loaded
+        # content so opening the view again with nothing changed only
+        # raises the window.
         self.pick = None
         self.pick_shape = None
         self.pick_size = None
+        self._source = "pick"
+        self._source_key = None
         self.group_color = []
         self.x_render_state = False
         self.x_locs = []
@@ -1028,13 +1049,22 @@ class ViewRotation(QtWidgets.QLabel):
         self._measure_following = True
         self._measure_cursor = None
 
-        # save the pick information
-        self.pick = w.view._picks[0]
-        self.pick_shape = w.view._pick_shape
-        self.pick_size = w.view._pick_size
+        if self._source == "fov":
+            # the main window's field of view, rotated about its center
+            self.pick = None
+            self.pick_shape = None
+            self.pick_size = None
+            (y_min, x_min), (y_max, x_max) = w.view.viewport
+            self.viewport = [(y_min, x_min), (y_max, x_max)]
+        else:
+            # save the pick information
+            self.pick = w.view._picks[0]
+            self.pick_shape = w.view._pick_shape
+            self.pick_size = w.view._pick_size
+            self.viewport = self.fit_in_view_rotated(get_viewport=True)
+        self._source_key = source_key(w.view, self._source)
 
-        # update view, dataset_dialog for multichannel data and paths
-        self.viewport = self.fit_in_view_rotated(get_viewport=True)
+        # update dataset_dialog for multichannel data and paths
         self.window.dataset_dialog = w.dataset_dialog
         self.paths = w.view.locs_paths
 
@@ -1066,11 +1096,42 @@ class ViewRotation(QtWidgets.QLabel):
                     temp = temp.loc[temp.index.isin(main_idx)].reset_index(
                         drop=True
                     )
-            temp["z"] /= self.pixelsize
-            if "lpz" in temp.columns:
-                temp["lpz"] /= self.pixelsize
-            self.locs.append(temp)
-            self.infos.append(w.view.infos[i])
+            self._append_channel(temp, w.view.infos[i])
+
+    def _collect_fov_locs(self, w, fast_render):
+        """The localizations of each channel inside this window's
+        viewport (the main window's field of view when opened, shifted
+        with the arrow keys since), copied like a pick's."""
+        n_channels = len(self.paths)
+        self.locs = []
+        self.infos = []
+        (y_min, x_min), (y_max, x_max) = self.viewport
+        for i in range(n_channels):
+            locs = w.view.locs[i]
+            # the viewport pyramid's selection where it exists (a slight
+            # superset around the edges is harmless here), else a scan
+            idx = w.view._viewport_indices(i, self.viewport)
+            if idx is None:
+                x = locs["x"].to_numpy()
+                y = locs["y"].to_numpy()
+                idx = np.flatnonzero(
+                    (x >= x_min) & (x < x_max) & (y >= y_min) & (y < y_max)
+                )
+            if fast_render:
+                main_idx = w.view.fast_render_indices[i]
+                if main_idx is not None:
+                    idx = np.intersect1d(idx, main_idx)
+            temp = locs.iloc[idx].reset_index(drop=True)
+            self._append_channel(temp, w.view.infos[i])
+
+    def _append_channel(self, temp, info):
+        """Store one channel's copied localizations with z and lpz in
+        camera pixels, as the rotation math expects them."""
+        temp["z"] /= self.pixelsize
+        if "lpz" in temp.columns:
+            temp["lpz"] /= self.pixelsize
+        self.locs.append(temp)
+        self.infos.append(info)
 
     def _apply_render_property_split(self):
         if not (self.x_render_state and len(self.locs) == 1):
@@ -1100,24 +1161,34 @@ class ViewRotation(QtWidgets.QLabel):
             self.x_render_state = False
             self.x_locs = []
 
-    def load_locs(self, update_window=False):
-        """Load localizations from a pick in the main window.
+    def load_locs(self, update_window=False, source=None):
+        """Load localizations from the main window: those of its single
+        pick, or those in its field of view.
 
-        Called when updating rotation window from there or when
-        shifting the pick from rotation window.
+        Called when updating the rotation window from there or when
+        shifting the pick / the viewport from the rotation window.
 
         Parameters
         ----------
         update_window : bool, optional
             If True, load attributes, such as blur method, from the
             main window.
+        source : {"pick", "fov"}, optional
+            What to show: the main window's single pick or its current
+            field of view. If None, the source shown last is kept
+            (a pick before the window was first opened).
         """
         w = self.window.window  # main window
         fast_render = update_window
+        if source is not None:
+            self._source = source
         if update_window:
             self._sync_from_main_window(w)
 
-        self._collect_picked_locs(w, fast_render)
+        if self._source == "fov":
+            self._collect_fov_locs(w, fast_render)
+        else:
+            self._collect_picked_locs(w, fast_render)
 
         # shift z positions of locs so that the middle of the dataset is
         # at z = 0
@@ -1716,7 +1787,8 @@ class ViewRotation(QtWidgets.QLabel):
         """
         (y_min, x_min), (y_max, x_max) = self.viewport
         new_viewport = [(y_min + dy, x_min + dx), (y_max + dy, x_max + dx)]
-        self.load_locs()  # pick locs in the new viewport
+        self.viewport = new_viewport
+        self.load_locs()  # the (moved) pick's locs, or the new viewport's
         self.update_scene(viewport=new_viewport)
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
@@ -2421,6 +2493,8 @@ class RotationWindow(QtWidgets.QMainWindow):
         dx, dy : float
             Pick shift in x or y axis (camera pixels).
         """
+        if self.view_rot.pick_shape is None:
+            return  # the field of view is shown: no pick to move
         if self.view_rot.pick_shape in ["Circle", "Square"]:
             x = self.window.view._picks[0][0]
             y = self.window.view._picks[0][1]
@@ -2472,7 +2546,11 @@ class RotationWindow(QtWidgets.QMainWindow):
             angy = int(self.view_rot.angy * 180 / np.pi)
             angz = int(self.view_rot.angz * 180 / np.pi)
             pixelsize = self.window.window.view.pixelsize
-            if self.view_rot.pick_shape in ["Circle", "Square"]:
+            if self.view_rot.pick_shape is None:
+                # the field of view: its bounds, like a box pick
+                (y0, x0), (y1, x1) = self.view_rot.viewport
+                pick = [[float(x0), float(y0)], [float(x1), float(y1)]]
+            elif self.view_rot.pick_shape in ["Circle", "Square"]:
                 x, y = self.view_rot.pick
                 pick = [float(x), float(y)]
             elif self.view_rot.pick_shape in ["Rectangle", "Box"]:
@@ -2494,7 +2572,7 @@ class RotationWindow(QtWidgets.QMainWindow):
                 {
                     "Generated by": f"Picasso v{__version__} Render 3D",
                     "Pick": pick,
-                    "Pick shape": self.view_rot.pick_shape,
+                    "Pick shape": self.view_rot.pick_shape or "Field of view",
                     # polygons and boxes carry their own extent
                     "Pick size (nm)": (
                         size * pixelsize if size is not None else None

@@ -102,7 +102,7 @@ Picking
 3D rotation window
 ------------------
 
-The 3D rotation window allows the user to render 3D localization data. To use it, select a single pick region (``Tools > Pick``) and click ``View > Update rotation window``. Some of the display settings (colors, blur method, etc.) are automatically uploaded to the rotation window. 
+The 3D rotation window allows the user to render 3D localization data. Open it with ``View > 3D view`` (Ctrl+Shift+R): with a single pick region selected (``Tools > Pick``) it shows that pick, as before; without a pick (or with several) it shows the current field of view of the main window, rotated about its center - so any region can be looked at in 3D by zooming to it and pressing the shortcut. Pressed again with nothing changed, it only brings the window to the front, keeping the rotation; a new pick or a new field of view reloads it. Some of the display settings (colors, blur method, etc.) are automatically uploaded to the rotation window. In the field-of-view mode the arrow keys move the shown region (there is no pick to move), and *Save rotated localizations* records the field of view instead of a pick.
 
 The user may perform multiple actions in the rotation window, including: saving rotated localizations, building animations (.mp4 format), rotating by a specified angle, etc.
 
@@ -437,9 +437,9 @@ Slice (3D)
 ^^^^^^^^^^
 Opens the slicer dialog which allows for slicing through 3D datasets.
 
-Update rotation window (3D) [Ctrl+Shift+R]
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Opens/updates rotation window, see above. Requires a single picked region of interest to be selected.
+3D view [Ctrl+Shift+R]
+^^^^^^^^^^^^^^^^^^^^^^
+Opens/updates the rotation window, see above: with a single picked region of interest it shows that pick, otherwise the current field of view. Requires localizations with z coordinates.
 
 Show info
 ^^^^^^^^^

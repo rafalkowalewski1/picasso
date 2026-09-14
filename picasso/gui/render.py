@@ -56,7 +56,7 @@ from ..lib import (
     FloatArray2D,
 )
 from .render_worker import RenderWorker, subsample_request
-from .rotation import RotationWindow
+from .rotation import RotationWindow, source_key
 from .app import run_gui
 
 # Optional modules with external/hardware dependencies live in ext
@@ -13785,9 +13785,13 @@ class Window(QtWidgets.QMainWindow):
         metadata_action.triggered.connect(self.show_metadata)
         slicer_action = view_menu.addAction("Slice...")
         slicer_action.triggered.connect(self.slicer_dialog.initialize)
-        rot_win_action = view_menu.addAction("Update rotation window")
+        rot_win_action = view_menu.addAction("3D view")
         rot_win_action.setShortcut("Ctrl+Shift+R")
-        rot_win_action.triggered.connect(self.rot_win)
+        rot_win_action.setToolTip(
+            "Open the 3D view of the single selected pick, or of the "
+            "current field of view when no pick is selected"
+        )
+        rot_win_action.triggered.connect(self.open_3d_view)
 
         # menu bar - Tools
         tools_menu = self.menu_bar.addMenu("Tools")
@@ -15114,18 +15118,45 @@ class Window(QtWidgets.QMainWindow):
         self.metadata_dialog.show()
         self.metadata_dialog.raise_()
 
-    def rot_win(self) -> None:
-        """Open/update ``RotationWindow``."""
-        if len(self.view._picks) == 0:
-            raise ValueError("Pick a region to rotate.")
-        elif len(self.view._picks) > 1:
-            raise ValueError("Pick only one region.")
-        elif self.view._pick_shape == "Polygon":
-            if self.view._picks[0][0] != self.view._picks[0][-1]:
-                raise ValueError("Polygon pick not finished.")
-        self.window_rot.view_rot.load_locs(update_window=True)
+    def open_3d_view(self) -> None:
+        """Open the 3D view (``RotationWindow``): of the single selected
+        pick, or of the current field of view when no pick is selected
+        (several picks count as none). With the window already open on
+        the same content, only raise it, keeping its rotation."""
+        if not self.view.locs:
+            return
+        if not all("z" in locs.columns for locs in self.view.locs):
+            QtWidgets.QMessageBox.information(
+                self,
+                "3D view",
+                "The 3D view needs z coordinates: the loaded localizations "
+                "have no z column.",
+            )
+            return
+        if len(self.view._picks) == 1:
+            if self.view._pick_shape == "Polygon":
+                if self.view._picks[0][0] != self.view._picks[0][-1]:
+                    raise ValueError("Polygon pick not finished.")
+            source = "pick"
+        else:
+            source = "fov"
+        view_rot = self.window_rot.view_rot
+        if (
+            self.window_rot.isVisible()
+            and view_rot.locs
+            and view_rot._source_key == source_key(self.view, source)
+        ):
+            self.window_rot.raise_()
+            self.window_rot.activateWindow()
+            return
+        view_rot.load_locs(update_window=True, source=source)
         self.window_rot.show()
-        self.window_rot.view_rot.update_scene(autoscale=True)
+        view_rot.update_scene(autoscale=True)
+
+    def rot_win(self) -> None:
+        """Open/update ``RotationWindow`` (kept for plugins; see
+        ``open_3d_view``)."""
+        self.open_3d_view()
 
     def update_info(self) -> None:
         """Update Window's size and median localization precision in
