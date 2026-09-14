@@ -1037,6 +1037,7 @@ class ViewRotation(QtWidgets.QLabel):
         self.pick_size = None
         self._source = "pick"
         self._source_key = None
+        self._fov_viewport = None  # the loaded field of view (fov mode)
         self.group_color = []
         self.x_render_state = False
         self.x_locs = []
@@ -1269,6 +1270,7 @@ class ViewRotation(QtWidgets.QLabel):
         self.locs = []
         self.infos = []
         (y_min, x_min), (y_max, x_max) = self.viewport
+        self._fov_viewport = [(y_min, x_min), (y_max, x_max)]  # for fit
         for i in range(n_channels):
             locs = w.view.locs[i]
             # the viewport pyramid's selection where it exists (a slight
@@ -1858,16 +1860,21 @@ class ViewRotation(QtWidgets.QLabel):
             copied from the main window yet, i.e. before this window has
             been opened for the first time.
         """
-        if self.pick_shape is None:  # never opened; nothing to fit to
+        if self.pick_shape is not None:
+            x_min, x_max, y_min, y_max = lib.pick_bounds(
+                self.pick, self.pick_shape, self.pick_size
+            )
+            viewport = [(y_min, x_min), (y_max, x_max)]
+        elif self._fov_viewport is not None:
+            # the field of view that was loaded (see _collect_fov_locs)
+            viewport = [tuple(v) for v in self._fov_viewport]
+        else:  # never opened; nothing to fit to
             return None
-        x_min, x_max, y_min, y_max = lib.pick_bounds(
-            self.pick, self.pick_shape, self.pick_size
-        )
-        viewport = [(y_min, x_min), (y_max, x_max)]
         if get_viewport:
             return viewport
         else:
             self.viewport = viewport
+            self._reanchor_pivot()
             self.update_scene()
 
     def xy_projection(self) -> None:

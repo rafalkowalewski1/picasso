@@ -173,6 +173,32 @@ def test_arrow_pan_in_the_field_of_view_keeps_following(window):
     assert view._picks == []  # no pick was invented
 
 
+def test_fit_in_view_works_without_a_pick(window):
+    view = window.view
+    loaded = [(10.0, 20.0), (30.0, 40.0)]
+    view.viewport = loaded
+    window.open_3d_view()
+    view_rot = window.window_rot.view_rot
+    fitted = view_rot.viewport
+    for _ in range(3):
+        view_rot.zoom_in()
+    assert view_rot.viewport != fitted
+    view_rot.fit_in_view_rotated()
+    # back to the loaded field of view (widened to the window's aspect)
+    (y0, x0), (y1, x1) = view_rot.viewport
+    assert y0 <= 10.0 and x0 <= 20.0 and y1 >= 30.0 and x1 >= 40.0
+    assert y1 - y0 == pytest.approx(fitted[1][0] - fitted[0][0], rel=1e-6)
+    # the pick-based fit is unchanged
+    view._pick_shape = "Circle"
+    window.tools_settings_dialog.pick_diameter.setValue(10.0 * PIXELSIZE)
+    view._picks = [(32.0, 32.0)]
+    window.open_3d_view()
+    view_rot.zoom_in()
+    view_rot.fit_in_view_rotated()
+    (y0, x0), (y1, x1) = view_rot.viewport
+    assert y0 <= 27.0 and y1 >= 37.0  # the circle's 10 px diameter
+
+
 def test_two_dimensional_data_is_refused(qt_offscreen, tmp_path, monkeypatch):
     shown = []
     monkeypatch.setattr(
