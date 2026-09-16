@@ -7489,7 +7489,13 @@ class LocsLoadWorker(QtCore.QObject):
             if self._canceled:
                 break
             try:
-                render_index = spatial_index.build_render_index(locs, info)
+                # the index stored in the file by io.save_locs, if it
+                # still describes the localizations; else built here
+                render_index = spatial_index.load_render_index(
+                    path, locs, info
+                )
+                if render_index is None:
+                    render_index = spatial_index.build_render_index(locs, info)
             except Exception:
                 render_index = None
             if self._canceled:

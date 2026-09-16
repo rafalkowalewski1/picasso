@@ -1571,7 +1571,44 @@ def ensure_sanity(locs: pd.DataFrame, info: list[dict]) -> pd.DataFrame:
     ]:
         if attr in locs.columns:
             locs = locs[locs[attr] >= 0]
-    return locs
+    return standardize_dtypes(locs)
+
+
+def standardize_dtypes(locs: pd.DataFrame) -> pd.DataFrame:
+    """Return ``locs`` with float64 columns cast to float32 and an
+    integer ``frame`` column cast to uint32 (the dtypes Localize
+    writes), leaving every other column as it is.
+
+    float32 resolves 2e-4 camera pixels at 4096 pixels and far below a
+    nanometer in z, two orders below any localization precision, while
+    halving memory and file size for columns that pandas arithmetic or
+    imports from other software promoted to float64, and sparing the
+    GPU renderer a converted copy of such columns on every render.
+    Called by ``ensure_sanity``, i.e., on loading, saving and in most
+    processing functions.
+
+    Parameters
+    ----------
+    locs : pd.DataFrame
+        Localizations.
+
+    Returns
+    -------
+    locs : pd.DataFrame
+        The same DataFrame if nothing had to change, else a copy.
+    """
+    casts = {
+        name: np.float32
+        for name, dtype in locs.dtypes.items()
+        if dtype == np.float64
+    }
+    if "frame" in locs.columns:
+        frame_dtype = locs["frame"].dtype
+        if np.issubdtype(frame_dtype, np.integer) and frame_dtype != np.uint32:
+            casts["frame"] = np.uint32
+    if not casts:
+        return locs
+    return locs.astype(casts, copy=False)
 
 
 def is_loc_at(x: float, y: float, locs: pd.DataFrame, r: float) -> BoolArray1D:

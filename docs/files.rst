@@ -69,6 +69,12 @@ Furthermore, the following columns are included:
 - ``len_mean`` and ``dark_mean``: mean bright and dark times, respectively, obtained by averaging over all binding events, rather than fitting to the CDF. Units: frames;
 - ``len_std`` and ``dark_std``: standard deviation of bright and dark times,respectively;
 
+Spatial index
+-------------
+Since v0.12, ``picasso.io.save_locs`` also stores the spatial index that ``Picasso: Render`` uses for fast zooming, rotating and picking (a multi-resolution grid over the localizations, see ``picasso.spatial_index``) in the HDF5 group ``/render_index``, for files of 100,000 localizations or more (``render_index=True`` or ``False`` overrides this). When such a file is opened in Render, the stored index is read instead of built, which saves about a second per million localizations. Before it is used, the index is checked against the localizations (every entry must cover exactly one row and every grid cell must hold only the rows that fall in it), so a file whose ``/locs`` table was rewritten by other software or by a script without ``save_locs`` is simply re-indexed; the check cannot be fooled by a stale index. Older Picasso versions and other software ignore the group.
+
+Localizations are stored with float32 floating-point columns and a uint32 ``frame`` column, whatever dtypes a pipeline produced in memory (``picasso.lib.standardize_dtypes``, applied when loading, saving and by most processing functions). float32 resolvesfar below any localization precision, and halves memory and file size compared to float64.
+
 Metadata
 --------
 

@@ -11,6 +11,7 @@ the same image as on the full locs DataFrame for every blur method.
 
 from __future__ import annotations
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -89,8 +90,13 @@ class TestQueryCircle:
         assert len(via_blocks) == len(via_pyramid) == len(picks)
         for a, b in zip(via_blocks, via_pyramid):
             assert len(a) > 0
+            # the index-block path sanitizes (and so standardizes the
+            # dtypes of) its input; the rows are what is compared
             pd.testing.assert_frame_equal(
-                a.sort_index(), b.sort_index(), check_like=True
+                a.sort_index(),
+                b.sort_index(),
+                check_like=True,
+                check_dtype=False,
             )
 
     def test_empty_pyramid_and_far_away_pick(self):
@@ -110,6 +116,128 @@ class TestQueryCircle:
                 len(spatial_index.query_circle(empty, x[:0], y[:0], 1, 1, 3))
                 == 0
             )
+
+
+# ---------------------------------------------------------------------------
+# Persistence in the localizations file
+# ---------------------------------------------------------------------------
+
+
+class TestPersistence:
+    W, H = 96.0, 64.0
+
+    def _file(self, tmp_path, n=3_000, **save_kwargs):
+        from picasso import io
+
+        locs = _make_locs(n, self.W, self.H, seed=7)
+        info = _info(self.W, self.H)
+        path = str(tmp_path / "locs.hdf5")
+        io.save_locs(path, locs, info, **save_kwargs)
+        return path, locs, info
+
+    def test_round_trip_is_the_built_pyramid(self, tmp_path):
+        path, locs, info = self._file(tmp_path, render_index=True)
+        with h5py.File(path, "r") as f:
+            assert spatial_index.RENDER_INDEX_GROUP in f
+            assert f["locs"].dtype["x"] == np.float32
+        stored = spatial_index.read_render_index(path)
+        built = spatial_index.build_render_index(locs, info)
+        assert np.array_equal(stored.perm, built.perm)
+        assert stored.block_sizes == built.block_sizes
+        for a, b in zip(stored.block_starts, built.block_starts):
+            assert np.array_equal(a, b)
+        for a, b in zip(stored.block_ends, built.block_ends):
+            assert np.array_equal(a, b)
+        assert (stored.width, stored.height) == (self.W, self.H)
+        assert spatial_index.validate_render_index(stored, locs, info)
+        loaded = spatial_index.load_render_index(path, locs, info)
+        assert loaded is not None
+        # and it queries like the built one
+        vp = ((10.0, 10.0), (30.0, 40.0))
+        assert np.array_equal(
+            np.sort(spatial_index.query_viewport(loaded, vp)),
+            np.sort(spatial_index.query_viewport(built, vp)),
+        )
+
+    def test_auto_skips_small_files_and_keeps_large_ones(
+        self, tmp_path, monkeypatch
+    ):
+        path, _, _ = self._file(tmp_path)  # "auto", 3k < threshold
+        assert spatial_index.read_render_index(path) is None
+        monkeypatch.setattr(spatial_index, "PERSIST_MIN_LOCS", 1_000)
+        path, locs, info = self._file(tmp_path)
+        assert spatial_index.load_render_index(path, locs, info) is not None
+        path, _, _ = self._file(tmp_path, render_index=False)
+        assert spatial_index.read_render_index(path) is None
+
+    def test_a_given_pyramid_is_stored_as_is(self, tmp_path):
+        from picasso import io
+
+        locs = _make_locs(500, self.W, self.H)
+        info = _info(self.W, self.H)
+        pyramid = spatial_index.build_render_index(locs, info)
+        path = str(tmp_path / "given.hdf5")
+        io.save_locs(path, locs, info, render_index=pyramid)
+        assert np.array_equal(
+            spatial_index.read_render_index(path).perm, pyramid.perm
+        )
+        with pytest.raises(ValueError):
+            io.save_locs(path, locs, info, render_index="always")
+
+    def test_files_without_the_group_load_as_before(self, tmp_path):
+        path, locs, info = self._file(tmp_path, render_index=False)
+        assert spatial_index.load_render_index(path, locs, info) is None
+
+    @pytest.mark.parametrize(
+        "edit",
+        ["move_one", "drop_one", "append_one", "reorder", "other_fov"],
+    )
+    def test_edits_outside_picasso_invalidate_the_index(self, tmp_path, edit):
+        path, locs, info = self._file(tmp_path, render_index=True)
+        stored = spatial_index.read_render_index(path)
+        edited = locs.copy()
+        if edit == "move_one":
+            edited.loc[edited.index[123], "x"] = self.W - 0.5  # other block
+        elif edit == "drop_one":
+            edited = edited.drop(edited.index[10]).reset_index(drop=True)
+        elif edit == "append_one":
+            edited = pd.concat([edited, edited.iloc[:1]], ignore_index=True)
+        elif edit == "reorder":
+            edited = edited.iloc[::-1].reset_index(drop=True)
+        elif edit == "other_fov":
+            info = _info(self.W * 2, self.H)
+        assert not spatial_index.validate_render_index(stored, edited, info)
+        # the loader falls back to building
+        # (the file on disk is untouched here; simulate by writing the
+        # edited rows without an index via a plain h5py write)
+        with h5py.File(path, "r+") as f:
+            del f["locs"]
+            f.create_dataset("locs", data=edited.to_records(index=False))
+        assert spatial_index.load_render_index(path, edited, info) is None
+
+    def test_edits_that_keep_the_index_correct_pass(self, tmp_path):
+        path, locs, info = self._file(tmp_path, render_index=True)
+        stored = spatial_index.read_render_index(path)
+        edited = locs.copy()
+        edited["photons"] *= 2.0  # another column
+        assert spatial_index.validate_render_index(stored, edited, info)
+        # a coordinate moved within its finest block
+        base = stored.block_sizes[0]
+        i = edited.index[5]
+        edited.loc[i, "x"] = np.floor(edited.loc[i, "x"] / base) * base + 0.01
+        assert spatial_index.validate_render_index(stored, edited, info)
+
+    def test_unknown_version_is_ignored(self, tmp_path):
+        path, locs, info = self._file(tmp_path, render_index=True)
+        with h5py.File(path, "r+") as f:
+            f[spatial_index.RENDER_INDEX_GROUP].attrs["version"] = 99
+        assert spatial_index.read_render_index(path) is None
+
+    def test_empty_file(self, tmp_path):
+        path, locs, info = self._file(tmp_path, n=0, render_index=True)
+        stored = spatial_index.read_render_index(path)
+        assert stored is not None and stored.perm.shape == (0,)
+        assert spatial_index.validate_render_index(stored, locs, info)
 
 
 # ---------------------------------------------------------------------------

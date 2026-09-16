@@ -1391,3 +1391,33 @@ class TestNWorkersFromSettings:
             monkeypatch, {"cpu_utilization": 0.25, "max_workers": bad}
         )
         assert self._render_workers() == lib.n_workers(0.25)
+
+
+class TestStandardizeDtypes:
+    def test_float64_and_frame_are_cast(self):
+        locs = pd.DataFrame(
+            {
+                "frame": np.array([3, 1, 2], dtype=np.int64),
+                "x": np.array([1.5, 2.5, 3.5]),  # float64
+                "photons": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                "group": np.array([0, 0, 1], dtype=np.int32),
+                "flag": np.array([True, False, True]),
+            }
+        )
+        out = lib.standardize_dtypes(locs)
+        assert out["frame"].dtype == np.uint32
+        assert out["x"].dtype == np.float32
+        assert out["photons"].dtype == np.float32
+        assert out["group"].dtype == np.int32
+        assert out["flag"].dtype == bool
+        assert list(out["frame"]) == [3, 1, 2]
+        assert lib.standardize_dtypes(out) is out  # already standard
+
+    def test_ensure_sanity_standardizes(self):
+        locs = pd.DataFrame(
+            {"frame": [0, 1], "x": [1.0, 2.0], "y": [1.0, 2.0]}
+        )
+        info = [{"Width": 8, "Height": 8, "Frames": 2}]
+        out = lib.ensure_sanity(locs, info)
+        assert out["x"].dtype == np.float32
+        assert out["frame"].dtype == np.uint32

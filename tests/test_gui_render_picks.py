@@ -260,6 +260,48 @@ class TestBoxPickTool:
         assert image is not None
 
 
+class TestLoaderUsesTheStoredIndex:
+    """The loader thread reads the pyramid stored in the file by
+    ``io.save_locs`` instead of building one, when it is valid."""
+
+    def _load(self, path):
+        worker = gui_render.LocsLoadWorker([(path, None)])
+        results = []
+        worker.loaded.connect(lambda *args: results.append(args))
+        worker.run()
+        assert len(results) == 1
+        return results[0]
+
+    def test_stored_index_is_used(self, qt_offscreen, tmp_path, monkeypatch):
+        from picasso import io, spatial_index
+
+        path = str(tmp_path / "indexed.hdf5")
+        io.save_locs(path, _locs(), _info(), render_index=True)
+        monkeypatch.setattr(
+            spatial_index,
+            "build_render_index",
+            lambda *a, **k: pytest.fail("the index was rebuilt"),
+        )
+        _, locs, info, render_index = self._load(path)
+        assert render_index is not None
+        assert spatial_index.validate_render_index(render_index, locs, info)
+
+    def test_invalid_stored_index_is_rebuilt(self, qt_offscreen, tmp_path):
+        import h5py
+
+        from picasso import io, spatial_index
+
+        path = str(tmp_path / "edited.hdf5")
+        io.save_locs(path, _locs(), _info(), render_index=True)
+        with h5py.File(path, "r+") as f:  # a script rewrote the rows
+            rows = f["locs"][()][::-1]
+            del f["locs"]
+            f.create_dataset("locs", data=rows)
+        _, locs, info, render_index = self._load(path)
+        assert render_index is not None
+        assert spatial_index.validate_render_index(render_index, locs, info)
+
+
 class TestCircularPicksUseThePyramid:
     """Circular picks query the render pyramid built at load, so no
     pick-size specific index blocks are built (that indexing sorted
@@ -295,8 +337,12 @@ class TestCircularPicksUseThePyramid:
         via_blocks = view.picked_locs(0)
         assert view.index_blocks[0] is not None  # the fallback indexed
         for a, b in zip(via_pyramid, via_blocks):
+            # the index-block path standardizes dtypes (ensure_sanity)
             pd.testing.assert_frame_equal(
-                a.sort_index(), b.sort_index(), check_like=True
+                a.sort_index(),
+                b.sort_index(),
+                check_like=True,
+                check_dtype=False,
             )
 
     def test_pick_size_change_needs_no_reindexing(self, circle_view):

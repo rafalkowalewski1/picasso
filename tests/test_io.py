@@ -344,6 +344,63 @@ class TestSaveLoadLocs:
         assert loaded_info == list(info)
 
 
+class TestStandardDtypes:
+    """Localizations are saved and loaded with float32 floats and a
+    uint32 frame, whatever a pipeline promoted them to."""
+
+    def _float64_locs(self, n=200):
+        rng = np.random.default_rng(1)
+        return pd.DataFrame(
+            {
+                "frame": rng.integers(0, 50, size=n).astype(np.int64),
+                "x": rng.uniform(0, 32, size=n),  # float64
+                "y": rng.uniform(0, 32, size=n),
+                "photons": rng.uniform(100, 1000, size=n).astype(np.float32),
+                "lpx": rng.uniform(0.01, 0.1, size=n),
+                "lpy": rng.uniform(0.01, 0.1, size=n),
+                "group": rng.integers(0, 5, size=n).astype(np.int32),
+                "z": rng.uniform(-300, 300, size=n),
+            }
+        )
+
+    def _info(self):
+        return [{"Width": 32, "Height": 32, "Frames": 50, "Pixelsize": 130}]
+
+    def test_saved_file_and_loaded_locs_are_float32(self, tmp_path):
+        locs = self._float64_locs()
+        path = str(tmp_path / "f64.hdf5")
+        io.save_locs(path, locs, self._info())
+        with h5py.File(path, "r") as f:
+            dtype = f["locs"].dtype
+        assert dtype["x"] == np.float32 and dtype["z"] == np.float32
+        assert dtype["frame"] == np.uint32
+        assert dtype["group"] == np.int32  # other integers untouched
+        loaded, _ = io.load_locs(path)
+        assert loaded["x"].dtype == np.float32
+        assert loaded["lpy"].dtype == np.float32
+        assert loaded["frame"].dtype == np.uint32
+        assert loaded["group"].dtype == np.int32
+        np.testing.assert_allclose(loaded["x"], locs["x"], rtol=1e-6)
+
+    def test_float64_files_load_as_float32(self, tmp_path):
+        # a file written by other software or an older pandas path
+        locs = self._float64_locs()
+        path = str(tmp_path / "raw.hdf5")
+        with h5py.File(path, "w") as f:
+            f.create_dataset("locs", data=locs.to_records(index=False))
+        io.save_info(str(tmp_path / "raw.yaml"), self._info())
+        loaded, _ = io.load_locs(path)
+        assert all(
+            loaded[c].dtype == np.float32 for c in ["x", "y", "lpx", "z"]
+        )
+        assert loaded["frame"].dtype == np.uint32
+
+    def test_standardize_dtypes_is_a_no_op_on_standard_locs(self):
+        locs = self._float64_locs()
+        standard = lib.standardize_dtypes(locs)
+        assert lib.standardize_dtypes(standard) is standard
+
+
 class TestSavePicksInMetadataSetting:
     @pytest.fixture(autouse=True)
     def _settings_file(self, tmp_path, monkeypatch):

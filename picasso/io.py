@@ -4328,8 +4328,16 @@ def save_datasets(path: str, info: dict, **kwargs) -> None:
         save_info(info_path, info)
 
 
-def save_locs(path: str, locs: pd.DataFrame, info: list[dict]) -> None:
+def save_locs(
+    path: str,
+    locs: pd.DataFrame,
+    info: list[dict],
+    render_index: bool | str | object = "auto",
+) -> None:
     """Save localization data to an HDF5 file.
+
+    The localizations are written with float32 floating-point columns
+    and a uint32 ``frame`` (see ``lib.ensure_sanity``).
 
     Parameters
     ----------
@@ -4340,18 +4348,51 @@ def save_locs(path: str, locs: pd.DataFrame, info: list[dict]) -> None:
     info : list of dict
         Metadata information to be saved alongside the localization
         data.
+    render_index : {"auto", True, False} or spatial_index.RenderIndexPyramid
+        Whether to store the spatial index (the render pyramid, see
+        ``picasso.spatial_index``) in the file as the group
+        ``/render_index``, so Render can skip building it when the file
+        is opened. ``"auto"`` (default) stores it for files of at least
+        ``spatial_index.PERSIST_MIN_LOCS`` localizations, ``True``
+        always, ``False`` never; a pyramid of these very rows (in this
+        order) is stored as given. Files carrying the group are read by
+        older Picasso versions as before.
     """
     locs = lib.ensure_sanity(locs, info)
+    pyramid = _render_index_to_save(locs, info, render_index)
     # locs.to_hdf(path, key="locs", mode="w", format="fixed")
     # cannot use to_hdf for backward compatibility with older Picasso
     rec_locs = locs.to_records(index=False)
     with h5py.File(path, "w") as locs_file:
         locs_file.create_dataset("locs", data=rec_locs)
         embedded = _write_metadata_dataset(locs_file, info)
+        if pyramid is not None:
+            from . import spatial_index
+
+            spatial_index.save_render_index(locs_file, pyramid)
     if _save_metadata_in_yaml() or not embedded:
         base, ext = os.path.splitext(path)
         info_path = base + ".yaml"
         save_info(info_path, info)
+
+
+def _render_index_to_save(locs: pd.DataFrame, info: list[dict], render_index):
+    """The pyramid ``save_locs`` stores for ``locs`` (already sanitized,
+    in file order), or None. See ``save_locs`` for the choices."""
+    from . import spatial_index
+
+    if render_index is False or render_index is None:
+        return None
+    if isinstance(render_index, spatial_index.RenderIndexPyramid):
+        return render_index
+    if render_index == "auto" and len(locs) < spatial_index.PERSIST_MIN_LOCS:
+        return None
+    if render_index is not True and render_index != "auto":
+        raise ValueError(
+            "render_index must be 'auto', True, False or a "
+            f"RenderIndexPyramid, not {render_index!r}"
+        )
+    return spatial_index.build_render_index(locs, info)  # None w/o FOV size
 
 
 def _raise_if_truncated(path: str, error: OSError) -> None:

@@ -23,13 +23,26 @@ changes; it remains the fallback where no pyramid could be built.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
+import h5py
 import numba
 import numpy as np
 import pandas as pd
 
 from . import lib
+
+
+_log = logging.getLogger(__name__)
+
+#: HDF5 group holding a persisted pyramid, see ``save_render_index``.
+RENDER_INDEX_GROUP = "render_index"
+#: Files with fewer localizations get no persisted pyramid: theirs
+#: builds in milliseconds and the 4 bytes per row would be a large part
+#: of a small file.
+PERSIST_MIN_LOCS = 100_000
+_RENDER_INDEX_VERSION = 1
 
 
 # Target upper bound on blocks per viewport edge at the chosen level.
@@ -438,3 +451,232 @@ def query_circle(
     rect = ((cy - radius, cx - radius), (cy + radius, cx + radius))
     indices = query_rect(pyramid, rect)
     return _filter_circle(indices, x, y, float(cx), float(cy), radius**2)
+
+
+# ---------------------------------------------------------------------------
+# Persistence: the pyramid stored in the localizations' HDF5 file
+# ---------------------------------------------------------------------------
+
+
+def save_render_index(
+    hdf_file: h5py.File, pyramid: RenderIndexPyramid
+) -> None:
+    """Write ``pyramid`` into an open HDF5 file as the group
+    ``/render_index``: the permutation and every level's block tables
+    as datasets, the block sizes, field size and row count as
+    attributes. Older Picasso versions read only ``/locs`` and
+    ``/metadata`` and are unaffected by the group.
+
+    Parameters
+    ----------
+    hdf_file : h5py.File
+        The localizations file, open for writing.
+    pyramid : RenderIndexPyramid
+        The index of the ``/locs`` rows of that file, in their order.
+    """
+    if RENDER_INDEX_GROUP in hdf_file:
+        del hdf_file[RENDER_INDEX_GROUP]
+    group = hdf_file.create_group(RENDER_INDEX_GROUP)
+    group.attrs["version"] = _RENDER_INDEX_VERSION
+    group.attrs["n"] = int(pyramid.perm.shape[0])
+    group.attrs["width"] = float(pyramid.width)
+    group.attrs["height"] = float(pyramid.height)
+    group.attrs["block_sizes"] = np.asarray(
+        pyramid.block_sizes, dtype=np.float64
+    )
+    group.create_dataset("perm", data=pyramid.perm)
+    for lvl, (bs, be) in enumerate(
+        zip(pyramid.block_starts, pyramid.block_ends)
+    ):
+        group.create_dataset(f"block_starts_{lvl}", data=bs)
+        group.create_dataset(f"block_ends_{lvl}", data=be)
+
+
+def read_render_index(path: str) -> RenderIndexPyramid | None:
+    """Read the pyramid stored by ``save_render_index`` in the
+    localizations file ``path``; None if the file has none (or it
+    cannot be read). The result is *unchecked*: use
+    ``load_render_index`` to get one that is known to describe the
+    localizations.
+
+    Parameters
+    ----------
+    path : str
+        The localizations HDF5 file.
+
+    Returns
+    -------
+    pyramid : RenderIndexPyramid or None
+    """
+    try:
+        with h5py.File(path, "r") as hdf_file:
+            if RENDER_INDEX_GROUP not in hdf_file:
+                return None
+            group = hdf_file[RENDER_INDEX_GROUP]
+            if int(group.attrs.get("version", 0)) != _RENDER_INDEX_VERSION:
+                return None
+            block_sizes = tuple(float(s) for s in group.attrs["block_sizes"])
+            perm = group["perm"][()].astype(np.uint32, copy=False)
+            block_starts = []
+            block_ends = []
+            for lvl in range(len(block_sizes)):
+                block_starts.append(
+                    group[f"block_starts_{lvl}"][()].astype(
+                        np.uint32, copy=False
+                    )
+                )
+                block_ends.append(
+                    group[f"block_ends_{lvl}"][()].astype(
+                        np.uint32, copy=False
+                    )
+                )
+            return RenderIndexPyramid(
+                perm=perm,
+                block_sizes=block_sizes,
+                block_starts=block_starts,
+                block_ends=block_ends,
+                width=float(group.attrs["width"]),
+                height=float(group.attrs["height"]),
+            )
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
+@numba.njit(cache=True)
+def _is_permutation(perm: lib.IntArray1D, n: int) -> bool:
+    """Whether ``perm`` lists every index below ``n`` exactly once."""
+    if perm.shape[0] != n:
+        return False
+    seen = np.zeros(n, dtype=np.uint8)
+    for k in range(n):
+        p = perm[k]
+        if p >= n or seen[p]:
+            return False
+        seen[p] = 1
+    return True
+
+
+@numba.njit(cache=True)
+def _blocks_hold_their_locs(
+    perm: lib.IntArray1D,
+    block_starts: lib.IntArray2D,
+    block_ends: lib.IntArray2D,
+    x: lib.FloatArray1D,
+    y: lib.FloatArray1D,
+    size: float,
+) -> bool:
+    """Whether every block's range lists only localizations whose
+    (clipped) block coordinates are that block, and the ranges cover
+    all ``perm`` entries. This is the correctness criterion of the
+    index: as long as it holds, every query is right."""
+    n = perm.shape[0]
+    K, L = block_starts.shape
+    total = 0
+    for i in range(K):
+        for j in range(L):
+            s = block_starts[i, j]
+            e = block_ends[i, j]
+            if e < s or e > n:
+                return False
+            total += e - s
+            for k in range(s, e):
+                p = perm[k]
+                bx = int(np.floor(x[p] / size))
+                by = int(np.floor(y[p] / size))
+                bx = min(max(bx, 0), L - 1)
+                by = min(max(by, 0), K - 1)
+                if bx != j or by != i:
+                    return False
+    return total == n
+
+
+def validate_render_index(
+    pyramid: RenderIndexPyramid, locs: pd.DataFrame, info: list[dict]
+) -> bool:
+    """Whether ``pyramid`` correctly indexes ``locs``.
+
+    Checked against the index's own correctness criterion rather than a
+    checksum: the permutation covers every row exactly once and every
+    block, at every level, holds only rows whose coordinates fall in it
+    (one pass per level). Any edit of the file that changed, dropped,
+    added or reordered coordinates fails; an edit that leaves the
+    index correct (say, other columns) passes, which is what matters.
+
+    Parameters
+    ----------
+    pyramid : RenderIndexPyramid
+        A pyramid, e.g. read from the file by ``read_render_index``.
+    locs : pd.DataFrame
+        The localizations it claims to index, in file order.
+    info : list of dicts
+        Their metadata (the field size must match the pyramid's).
+
+    Returns
+    -------
+    valid : bool
+    """
+    width = lib.get_from_metadata(info, "Width")
+    height = lib.get_from_metadata(info, "Height")
+    if width is None or height is None:
+        return False
+    if float(width) != pyramid.width or float(height) != pyramid.height:
+        return False
+    n = len(locs)
+    if not _is_permutation(pyramid.perm, n):
+        return False
+    if len(pyramid.block_sizes) != len(pyramid.block_starts) or len(
+        pyramid.block_starts
+    ) != len(pyramid.block_ends):
+        return False
+    if n == 0:
+        return True
+    x = locs["x"].to_numpy()
+    y = locs["y"].to_numpy()
+    for size, bs, be in zip(
+        pyramid.block_sizes, pyramid.block_starts, pyramid.block_ends
+    ):
+        K = max(1, int(np.ceil(pyramid.height / size)))
+        L = max(1, int(np.ceil(pyramid.width / size)))
+        if bs.shape != (K, L) or be.shape != (K, L):
+            return False
+        if not _blocks_hold_their_locs(
+            pyramid.perm, bs, be, x, y, float(size)
+        ):
+            return False
+    return True
+
+
+def load_render_index(
+    path: str, locs: pd.DataFrame, info: list[dict]
+) -> RenderIndexPyramid | None:
+    """The pyramid stored in ``path`` if it (still) describes ``locs``,
+    else None -- the caller then builds one with
+    ``build_render_index``. A stored index that fails the check (the
+    file was edited without ``picasso.io.save_locs``) is reported in
+    the log at INFO level.
+
+    Parameters
+    ----------
+    path : str
+        The localizations HDF5 file.
+    locs : pd.DataFrame
+        The localizations loaded from it.
+    info : list of dicts
+        Their metadata.
+
+    Returns
+    -------
+    pyramid : RenderIndexPyramid or None
+    """
+    pyramid = read_render_index(path)
+    if pyramid is None:
+        return None
+    if not validate_render_index(pyramid, locs, info):
+        _log.info(
+            "The render index stored in %s does not match its localizations "
+            "(the file was modified without picasso.io.save_locs); it is "
+            "rebuilt.",
+            path,
+        )
+        return None
+    return pyramid
