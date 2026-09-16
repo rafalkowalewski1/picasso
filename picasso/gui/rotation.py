@@ -2285,8 +2285,13 @@ class ViewRotation(QtWidgets.QLabel):
         Navigation works in every mode: Shift + left button drags a
         zoom rectangle; the right button, the middle button or Alt
         (Option) + left button pan. In Rotate mode a plain left drag
-        rotates."""
+        rotates. In Measure mode the right button keeps its measuring
+        role (freeze a set, delete the last set, see
+        ``mouseReleaseEvent``), as in the main window; pan with the
+        middle button or Alt + left there."""
         left = event.button() == QtCore.Qt.MouseButton.LeftButton
+        right = event.button() == QtCore.Qt.MouseButton.RightButton
+        middle = event.button() == QtCore.Qt.MouseButton.MiddleButton
         modifiers = event.modifiers()
         if self._triple_click.is_third(event) and len(self.locs):
             self._triple_clicked(event)
@@ -2302,10 +2307,11 @@ class ViewRotation(QtWidgets.QLabel):
             self.rubberband.show()
             event.accept()
             return
-        if event.button() in (
-            QtCore.Qt.MouseButton.RightButton,
-            QtCore.Qt.MouseButton.MiddleButton,
-        ) or (left and modifiers & QtCore.Qt.KeyboardModifier.AltModifier):
+        if (
+            middle
+            or (right and self._mode != "Measure")
+            or (left and modifiers & QtCore.Qt.KeyboardModifier.AltModifier)
+        ):
             self._pan = True
             self.pan_start_x = event.pos().x()
             self.pan_start_y = event.pos().y()

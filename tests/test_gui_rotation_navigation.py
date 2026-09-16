@@ -283,3 +283,27 @@ def test_no_status_bar_is_created(view):
     # a QMainWindow creates its status bar lazily on first access; the
     # 3D window must not have asked for one
     assert view.window.findChild(QtWidgets.QStatusBar) is None
+
+
+def test_right_click_keeps_measuring_in_measure_mode(view):
+    # the right button pans everywhere else; with the Measure tool it
+    # freezes the current set and then deletes the last set, as in 2D
+    view._mode = "Measure"
+    for x in (100, 160):
+        view.mousePressEvent(_Mouse(x, 120))
+        view.mouseReleaseEvent(_Mouse(x, 120))
+    assert len(view._points) == 2
+    before = [tuple(v) for v in view.viewport]
+    view.mousePressEvent(_Mouse(160, 120, button=Btn.RightButton))
+    assert not view._pan
+    view.mouseReleaseEvent(_Mouse(160, 120, button=Btn.RightButton))
+    assert not view._measure_following  # frozen
+    assert len(view._point_sets) == 1
+    view.mousePressEvent(_Mouse(160, 120, button=Btn.RightButton))
+    view.mouseReleaseEvent(_Mouse(160, 120, button=Btn.RightButton))
+    assert view._point_sets == []  # deleted
+    assert [tuple(v) for v in view.viewport] == before
+    # the middle button still pans in Measure mode
+    _drag(view, 160, 120, 200, 150, button=Btn.MiddleButton)
+    assert [tuple(v) for v in view.viewport] != before
+    assert not view._pan
