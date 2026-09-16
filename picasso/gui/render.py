@@ -7647,6 +7647,7 @@ class View(QtWidgets.QLabel):
             QtWidgets.QRubberBand.Shape.Rectangle, self
         )
         self.rubberband.setStyleSheet("selection-background-color: white")
+        self._triple_click = lib_qt.TripleClick()
         self.window = window
         self._pixmap = None
         self.locs = []
@@ -10416,14 +10417,14 @@ class View(QtWidgets.QLabel):
             self.pan_start_y = event.pos().y()
             return
 
-        if self._mode == "Zoom":
-            # if zooming in
-            if self.rubberband.isVisible():
-                self.rubberband.setGeometry(
-                    QtCore.QRect(self.origin, event.pos())
-                )
+        # dragging the zoom-in rectangle (Zoom tool, or Shift + left in
+        # every tool); it only stretches towards the bottom right
+        if self.rubberband.isVisible():
+            self.rubberband.setGeometry(QtCore.QRect(self.origin, event.pos()))
+            return
+
         # if drawing a rectangular or box pick
-        elif self._mode == "Pick":
+        if self._mode == "Pick":
             if self._pick_shape == "Rectangle":
                 if self._rectangle_pick_ongoing:
                     self.rectangle_pick_current_x = event.pos().x()
@@ -10474,26 +10475,40 @@ class View(QtWidgets.QLabel):
         if not len(self.locs):
             return
 
-        # Ctrl (Cmd on macOS) + left button pans in every tool, so the
-        # view can be moved without leaving Pick or Measure
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and (
-            event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier
+        button = event.button()
+        modifiers = event.modifiers()
+        left = button == QtCore.Qt.MouseButton.LeftButton
+        # a triple click with the Zoom tool fits the image to the window
+        # (like Ctrl + W); Pick and Measure keep their clicks
+        if self._triple_click.is_third(event) and self._mode == "Zoom":
+            self.rubberband.hide()  # the double click's press started one
+            self.fit_in_view()
+            event.accept()
+            return
+        # the middle button, Ctrl (Cmd on macOS) + left and Alt (Option)
+        # + left pan in every tool, so the view can be moved without
+        # leaving Pick or Measure (the same bindings as the 3D window)
+        if button == QtCore.Qt.MouseButton.MiddleButton or (
+            left
+            and modifiers
+            & (
+                QtCore.Qt.KeyboardModifier.ControlModifier
+                | QtCore.Qt.KeyboardModifier.AltModifier
+            )
         ):
             self._start_pan(event)
+            return
+        # Shift + left drags a zoom-in rectangle in every tool
+        if left and modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            self._start_zoom_rectangle(event)
             return
 
         if self._mode == "Zoom":
             # start drawing a zoom-in rectangle
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                if len(self.locs) > 0:  # locs are loaded already
-                    if not self.rubberband.isVisible():
-                        self.origin = QtCore.QPoint(event.pos())
-                        self.rubberband.setGeometry(
-                            QtCore.QRect(self.origin, QtCore.QSize())
-                        )
-                        self.rubberband.show()
+            if left:
+                self._start_zoom_rectangle(event)
             # start panning
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            elif button == QtCore.Qt.MouseButton.RightButton:
                 self._start_pan(event)
             else:
                 event.ignore()
@@ -10516,6 +10531,17 @@ class View(QtWidgets.QLabel):
                     self._brush_stroke_ongoing = True
                     self._brush_stroke = [self.map_to_movie(event.pos())]
                     self._brush_last_pos = event.pos()
+
+    def _start_zoom_rectangle(self, event: QtCore.QEvent) -> None:
+        """Begin dragging the zoom-in rectangle (rubber band) from the
+        cursor; the release zooms to it (see ``_mouse_release_zoom``)."""
+        if not self.rubberband.isVisible():
+            self.origin = QtCore.QPoint(event.pos())
+            self.rubberband.setGeometry(
+                QtCore.QRect(self.origin, QtCore.QSize())
+            )
+            self.rubberband.show()
+        event.accept()
 
     def _mouse_release_zoom(self, event: QtCore.QEvent) -> None:
         """Zooms in (left click) if the zoom-in rectangle is visible
@@ -10642,12 +10668,27 @@ class View(QtWidgets.QLabel):
             event.accept()
             return
 
+        # releasing a dragged zoom-in rectangle zooms in whatever the
+        # tool (Shift + left starts one in every tool); the release is
+        # consumed so it adds no pick or measure point
+        if self.rubberband.isVisible():
+            self._mouse_release_zoom(event)
+            event.accept()
+            return
+
         if self._mode == "Zoom":
             self._mouse_release_zoom(event)
         elif self._mode == "Pick":
             self._mouse_release_pick(event)
         elif self._mode == "Measure":
             self._mouse_release_measure(event)
+
+    def mouseDoubleClickEvent(self, event: QtCore.QEvent) -> None:
+        """Treat the double click as a press, which is what QWidget does
+        by default, then remember it: a third click completes a triple
+        click (see ``mousePressEvent``)."""
+        self.mousePressEvent(event)
+        self._triple_click.double_clicked(event)
 
     def movie_size(self) -> tuple[int, int]:
         """Return tuple with movie height and width."""
@@ -13673,7 +13714,7 @@ class Window(QtWidgets.QMainWindow):
         zoom_out_action.triggered.connect(self.view.zoom_out)
         view_menu.addAction(zoom_out_action)
         fit_in_view_action = view_menu.addAction("Fit image to window")
-        fit_in_view_action.setShortcut("Ctrl+W")
+        fit_in_view_action.setShortcuts(["Ctrl+W", "Home"])
         fit_in_view_action.triggered.connect(self.view.fit_in_view)
         view_menu.addAction(fit_in_view_action)
 

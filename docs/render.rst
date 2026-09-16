@@ -8,9 +8,21 @@ render
 
 Opening Files
 -------------
-1. Rendering of the super-resolution image: In ``Picasso: Render``, open a movie file by dragging a localization file (ending with '.hdf5') into the window or by selecting ``File > Open``. The super-resolution image will be rendered automatically. A region of choice can be zoomed into by a rectangular selection using the left mouse button, and the view zooms about the cursor with Ctrl (Cmd on macOS) + the mouse wheel or with a trackpad pinch. To pan, drag with the right mouse button, or hold Ctrl (Cmd on macOS) and drag with the left mouse button — the latter works in every tool, so the view can be moved while picking or measuring. The 'View' menu contains more options for zooming and panning.
+1. Rendering of the super-resolution image: In ``Picasso: Render``, open a movie file by dragging a localization file (ending with '.hdf5') into the window or by selecting ``File > Open``. The super-resolution image will be rendered automatically. Zoom into a region by dragging a rectangle with the left mouse button and pan by dragging with the right mouse button; see :ref:`render-navigation` for all mouse and keyboard controls.
 2. (Optional) Adjust rendering options by selecting ``View > Display Settings``. The field 'Display pixel size (nm)' defines the size of the rendered pixels of the super-resolution image. The contrast settings ``Min. Density`` and ``Max. Density`` define at which number of localizations per super-resolution pixel the minimum and maximum color of the colormap should be applied. They can be typed in or dragged on the two-handle slider below them, whose track is logarithmic and spans the densities present in the rendered image.
 3. (Optional) For multiplexed image acquisition, open HDF5 localization files from other channels subsequently. Alternatively, drag and drop all HDF5 files to be displayed simultaneously.
+
+.. _render-navigation:
+
+Navigating the image
+~~~~~~~~~~~~~~~~~~~~
+The ``Tools`` menu selects the active tool (Zoom, Pick or Measure; ``Ctrl+Z``, ``Ctrl+P``, ``Ctrl+M``). The following controls move the view; those marked *every tool* also work while picking or measuring, so the tool need not be changed to look around.
+
+- **Zoom**: with the Zoom tool, drag a rectangle with the left mouse button to zoom to it. The rectangle stretches towards the bottom right; releasing above or left of the start cancels. ``Shift`` + the left button drags the same rectangle in *every tool*. ``Ctrl`` (``Cmd`` on macOS) + the mouse wheel (or trackpad scroll) and a trackpad pinch zoom about the cursor; ``Ctrl`` +/- zoom about the center (``View`` menu).
+- **Pan**: drag with the right mouse button (Zoom tool), or, in *every tool*, with the middle mouse button, with ``Ctrl`` (``Cmd``) + the left button or with ``Alt`` (``Option`` on macOS) + the left button. The arrow keys (or ``W``/``A``/``S``/``D``) move the view by a fraction of the window.
+- **Fit**: ``View > Fit image to window`` (``Ctrl+W`` or ``Home``) shows the whole image; a triple click with the Zoom tool does the same.
+
+The 3D rotation window uses the same controls, plus rotation; see *Navigating the 3D window* below.
 
 Drift Correction
 ----------------
@@ -112,12 +124,12 @@ Rendering in the rotation window runs in the background, as in the main window: 
 
 When rotating by a specified angle, the dialog offers a ``Rotate around`` choice between **Localizations** (the default) and **World**. ``Localizations`` rotates around the data's own axes - the axes shown by the axes icon, which rotate together with the data - so each entered angle changes the corresponding displayed angle by exactly that amount. ``World`` rotates around the fixed screen/camera axes instead.
 
-Navigating the 3D window:
+Navigating the 3D window (the zoom and pan controls match the main window's, see :ref:`render-navigation`):
 
 - **Rotate**: drag with the left mouse button (trackball). Hold ``S`` while dragging to rotate in steps of 15 degrees.
-- **Zoom**: scroll the mouse wheel (or the trackpad; pinch works too) to zoom about the cursor; drag a rectangle with ``Shift`` + the left button to zoom to it (as with the Zoom tool of the main window, the rectangle stretches towards the bottom right and releasing above or left of the start cancels); ``Ctrl`` +/- zoom about the center.
+- **Zoom**: ``Ctrl`` (``Cmd`` on macOS) + the mouse wheel (or trackpad scroll; a pinch works too) zooms about the cursor; drag a rectangle with ``Shift`` + the left button to zoom to it (as in the main window, the rectangle stretches towards the bottom right and releasing above or left of the start cancels); ``Ctrl`` +/- zoom about the center.
 - **Pan**: drag with the right or the middle mouse button, or with ``Alt`` (``Option`` on macOS) + the left button; the arrow keys move the view too.
-- **Reset**: double click fits the loaded region into the window (``Home`` does the same); ``Shift`` + double click also resets the rotation. ``1``, ``2`` and ``3`` select the XY, XZ and YZ projections.
+- **Reset**: triple click fits the loaded region into the window (``Home`` does the same); ``Shift`` + triple click also resets the rotation. ``1``, ``2`` and ``3`` select the XY, XZ and YZ projections.
 
 Rotations turn the data about the point at the center of the view, at the depth of the localizations shown there, so zooming in and panning to a structure lets you rotate around it. Rotation around the z-axis is available by pressing Ctrl/Command. Rotation axis can be frozen by pressing x/y/z to freeze around the corresponding axis. By default the frozen rotation is around the data's own axes (Localizations frame); holding Ctrl/Command together with x/y/z instead rotates around the fixed screen/World axes. The z-axis can now be frozen by pressing z alone (vertical dragging spins around it); Ctrl/Command is only needed for the z-axis if you want to rotate it in the World frame, or to spin around the screen z-axis when no axis is frozen.
 

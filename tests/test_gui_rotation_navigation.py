@@ -1,6 +1,6 @@
 """Navigation gestures of the 3D rotation window: wheel zoom about the
 cursor, rectangle zoom, panning with Alt + left / middle button,
-double-click and keyboard resets, snapped rotation, status bar.
+triple-click and keyboard resets, snapped rotation, no status bar.
 
 :author: Rafal Kowalewski, 2026
 :copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
@@ -52,15 +52,19 @@ class _Mouse:
 
 
 class _Wheel:
-    def __init__(self, x, y, delta):
+    def __init__(self, x, y, delta, modifiers=Mod.ControlModifier):
         self._pos = QtCore.QPointF(x, y)
         self._delta = QtCore.QPoint(0, delta)
+        self._modifiers = modifiers
 
     def position(self):
         return self._pos
 
     def angleDelta(self):
         return self._delta
+
+    def modifiers(self):
+        return self._modifiers
 
     def accept(self):
         pass
@@ -128,6 +132,15 @@ def test_wheel_zooms_about_the_cursor(view):
     view.wheelEvent(_Wheel(x, y, -240))  # two notches out
     vh3, vw3 = render.viewport_size(view.viewport)
     assert vw3 / vw == pytest.approx(1.1, rel=1e-6)
+
+
+def test_wheel_without_ctrl_does_nothing(view):
+    # as in the main window, scrolling only zooms with Ctrl (Cmd) held
+    before = [tuple(v) for v in view.viewport]
+    view.wheelEvent(_Wheel(300, 80, 120, modifiers=Mod.NoModifier))
+    assert [tuple(v) for v in view.viewport] == before
+    view.wheelEvent(_Wheel(300, 80, 120, modifiers=Mod.ShiftModifier))
+    assert [tuple(v) for v in view.viewport] == before
 
 
 def test_wheel_zoom_keeps_the_pivot_on_the_data_when_tilted(view):
@@ -200,12 +213,30 @@ def test_alt_left_and_middle_button_pan_like_the_right_button(view):
     assert not view._pan
 
 
-def test_double_click_fits_and_shift_resets_rotation(view):
+def _triple_click(view, x, y, modifiers=Mod.NoModifier):
+    # Qt delivers press, release, double click, release, press, release
+    for _ in range(2):
+        view.mousePressEvent(_Mouse(x, y, modifiers=modifiers))
+        view.mouseReleaseEvent(_Mouse(x, y, modifiers=modifiers))
+    view.mouseDoubleClickEvent(_Mouse(x, y, modifiers=modifiers))
+    view.mouseReleaseEvent(_Mouse(x, y, modifiers=modifiers))
+    view.mousePressEvent(_Mouse(x, y, modifiers=modifiers))
+    view.mouseReleaseEvent(_Mouse(x, y, modifiers=modifiers))
+
+
+def test_triple_click_fits_and_shift_resets_rotation(view):
     fitted = [tuple(v) for v in view.viewport]
     view.apply_rotation(np.array([0.3, 0.2, 0.0]))
     for _ in range(3):
         view.zoom_in()
+    zoomed = [tuple(v) for v in view.viewport]
+    # a double click is not enough
+    view.mousePressEvent(_Mouse(10, 10))
+    view.mouseReleaseEvent(_Mouse(10, 10))
     view.mouseDoubleClickEvent(_Mouse(10, 10))
+    view.mouseReleaseEvent(_Mouse(10, 10))
+    assert [tuple(v) for v in view.viewport] == zoomed
+    _triple_click(view, 10, 10)
     # the loaded region fills the window again (while tilted, the
     # pivot re-anchoring may slide the viewport along the view ray,
     # which leaves the image unchanged, so compare the extent)
@@ -213,9 +244,10 @@ def test_double_click_fits_and_shift_resets_rotation(view):
         render.viewport_size(fitted)
     )
     assert view.rotation.as_quat()[3] != pytest.approx(1.0)  # rotation kept
-    view.mouseDoubleClickEvent(_Mouse(10, 10, modifiers=Mod.ShiftModifier))
+    _triple_click(view, 10, 10, modifiers=Mod.ShiftModifier)
     assert view.rotation.as_quat()[3] == pytest.approx(1.0)  # reset
     assert [tuple(v) for v in view.viewport] == pytest.approx(fitted)
+    assert not view.rubberband.isVisible()  # Shift + press started none
 
 
 def test_home_and_number_keys(view):

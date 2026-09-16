@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 from PyQt6 import QtCore, QtGui, QtWidgets
 from scipy.spatial.transform import Rotation
 
-from .. import io, render, lib, __version__
+from .. import io, render, lib, lib_qt, __version__
 from .render_worker import (
     RenderWorker,
     global_precisions_for,
@@ -1065,6 +1065,7 @@ class ViewRotation(QtWidgets.QLabel):
             QtWidgets.QRubberBand.Shape.Rectangle, self
         )
         self.rubberband.setStyleSheet("selection-background-color: white")
+        self._triple_click = lib_qt.TripleClick()
         self._snap = False
         self._snap_accum = np.zeros(3)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
@@ -2194,10 +2195,12 @@ class ViewRotation(QtWidgets.QLabel):
         self.update_scene()
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
-        """Zoom about the cursor with the mouse wheel or a trackpad
-        scroll (smooth: about ten percent per wheel notch)."""
+        """Ctrl (Cmd on macOS) + mouse wheel or trackpad scroll zooms
+        about the cursor (smooth: about ten percent per wheel notch),
+        as in the main window."""
         delta = event.angleDelta().y()
-        if delta == 0 or not len(self.locs):
+        ctrl = event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier
+        if delta == 0 or not ctrl or not len(self.locs):
             event.ignore()
             return
         self._zoom_at(1.1 ** (-delta / 120.0), event.position())
@@ -2215,13 +2218,15 @@ class ViewRotation(QtWidgets.QLabel):
         return super().event(event)
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
-        """Double click fits the loaded region back into the window;
+        """Treat the double click as a press, which is what QWidget does
+        by default, then remember it: a third click completes a triple
+        click (see ``mousePressEvent``)."""
+        self.mousePressEvent(event)
+        self._triple_click.double_clicked(event)
+
+    def _triple_clicked(self, event: QtGui.QMouseEvent) -> None:
+        """Triple click fits the loaded region back into the window;
         with Shift it also resets the rotation."""
-        if event.button() != QtCore.Qt.MouseButton.LeftButton or not len(
-            self.locs
-        ):
-            event.ignore()
-            return
         if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
             self.set_rotation(Rotation.identity())
             self._pan_z = 0.0
@@ -2283,6 +2288,9 @@ class ViewRotation(QtWidgets.QLabel):
         rotates."""
         left = event.button() == QtCore.Qt.MouseButton.LeftButton
         modifiers = event.modifiers()
+        if self._triple_click.is_third(event) and len(self.locs):
+            self._triple_clicked(event)
+            return
         if left and modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
             self._zoom_rect = (
                 (event.pos().x(), event.pos().y()),

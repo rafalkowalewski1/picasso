@@ -1298,6 +1298,43 @@ class HelpButton(QtWidgets.QToolButton):
 _error_signaler = None
 
 
+class TripleClick:
+    """Recognize a triple click of the left mouse button.
+
+    Qt reports a double click but no triple click; a widget calls
+    ``double_clicked`` from its ``mouseDoubleClickEvent`` and
+    ``is_third`` from its ``mousePressEvent``, which is true for the
+    press that follows the double click within the platform's
+    double-click interval and drag distance.
+    """
+
+    def __init__(self) -> None:
+        self._double: tuple[float, QtCore.QPoint] | None = None
+
+    def double_clicked(self, event: QtGui.QMouseEvent) -> None:
+        """Remember a double click so the next press may complete a
+        triple click."""
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._double = (time.monotonic(), QtCore.QPoint(event.pos()))
+
+    def is_third(self, event: QtGui.QMouseEvent) -> bool:
+        """Return whether ``event`` (a mouse press) is the third click
+        of a triple click; the remembered double click is consumed."""
+        if self._double is None:
+            return False
+        started, pos = self._double
+        self._double = None
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return False
+        app = QtWidgets.QApplication.instance()
+        interval = (app.doubleClickInterval() if app else 400) / 1000.0
+        distance = app.startDragDistance() if app else 10
+        return (
+            time.monotonic() - started <= interval
+            and (event.pos() - pos).manhattanLength() <= distance
+        )
+
+
 def cancel_dialogs():
     """Closes all open dialogs (``ProgressDialog`` and ``StatusDialog``)
     in the GUI.
