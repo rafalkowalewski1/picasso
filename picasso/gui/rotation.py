@@ -1056,6 +1056,17 @@ class ViewRotation(QtWidgets.QLabel):
         self.block_x = False
         self.block_y = False
         self.block_z = False
+        # navigation gestures: the zoom rectangle being dragged (start
+        # and current position in widget pixels), and snapped rotation
+        # while S is held (rotation accumulates until a step is due)
+        self._zoom_rect = None
+        # the rectangle's outline, the same widget the 2D window uses
+        self.rubberband = QtWidgets.QRubberBand(
+            QtWidgets.QRubberBand.Shape.Rectangle, self
+        )
+        self.rubberband.setStyleSheet("selection-background-color: white")
+        self._snap = False
+        self._snap_accum = np.zeros(3)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         # track the cursor without a pressed button for live measuring
         self.setMouseTracking(True)
@@ -1991,32 +2002,42 @@ class ViewRotation(QtWidgets.QLabel):
         self.update_scene(viewport=self.viewport)
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        """Block axes if 'X', 'Y' or 'Z' is pressed on the keyboard."""
-        if event.key() == 88:  # x
-            self.block_x = True
-            self.block_y = False
-            self.block_z = False
-            event.accept()
-        elif event.key() == 89:  # y
-            self.block_x = False
-            self.block_y = True
-            self.block_z = False
-            event.accept()
-        elif event.key() == 90:  # z
-            self.block_x = False
-            self.block_y = False
-            self.block_z = True
-            event.accept()
+        """Held keys: X, Y, Z lock the rotation axis, S snaps rotation
+        to 15 degree steps. Pressed keys: Home fits the loaded region,
+        1, 2 and 3 select the XY, XZ and YZ projections."""
+        key = event.key()
+        Key = QtCore.Qt.Key
+        if key == Key.Key_X:
+            self.block_x, self.block_y, self.block_z = True, False, False
+        elif key == Key.Key_Y:
+            self.block_x, self.block_y, self.block_z = False, True, False
+        elif key == Key.Key_Z:
+            self.block_x, self.block_y, self.block_z = False, False, True
+        elif key == Key.Key_S:
+            self._snap = True
+            self._snap_accum = np.zeros(3)
+        elif key == Key.Key_Home and len(self.locs):
+            self.fit_in_view_rotated()
+        elif key == Key.Key_1 and len(self.locs):
+            self.xy_projection()
+        elif key == Key.Key_2 and len(self.locs):
+            self.xz_projection()
+        elif key == Key.Key_3 and len(self.locs):
+            self.yz_projection()
         else:
             event.ignore()
+            return
+        event.accept()
 
     def keyReleaseEvent(self, event: QtGui.QKeyEvent) -> None:
-        """Stop blocking axes if 'X', 'Y' or 'Z' is released on the
-        keyboard."""
-        if event.key() in [88, 89, 90]:  # x, y or z
-            self.block_x = False
-            self.block_y = False
-            self.block_z = False
+        """Release the axis lock or the rotation snapping."""
+        key = event.key()
+        Key = QtCore.Qt.Key
+        if key in (Key.Key_X, Key.Key_Y, Key.Key_Z):
+            self.block_x = self.block_y = self.block_z = False
+            event.accept()
+        elif key == Key.Key_S:
+            self._snap = False
             event.accept()
         else:
             event.ignore()
@@ -2024,6 +2045,22 @@ class ViewRotation(QtWidgets.QLabel):
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
         """Define actions taken when moving mouse, for example, rotating
         locs, panning or live updating the measuring cross."""
+        if self._zoom_rect is not None:
+            (x0, y0), _ = self._zoom_rect
+            self._zoom_rect = (
+                self._zoom_rect[0],
+                (event.pos().x(), event.pos().y()),
+            )
+            # like the 2D window: the rectangle only stretches towards
+            # the bottom right; dragging the other way collapses it
+            self.rubberband.setGeometry(
+                QtCore.QRect(QtCore.QPoint(x0, y0), event.pos())
+            )
+            return
+        if self._pan:
+            self._pan_drag(event)
+            return
+
         # live update of the measuring cross and distance
         if self._mode == "Measure" and self._measure_following:
             self._measure_cursor = self.map_to_movie(event.pos())
@@ -2034,11 +2071,9 @@ class ViewRotation(QtWidgets.QLabel):
         if self._mode != "Rotate":
             return
 
-        if self._pan:
-            self._pan_drag(event)
         # only rotate while the left button is held; mouse tracking is on
         # so hover events (no button) must not rotate the data
-        elif event.buttons() & QtCore.Qt.MouseButton.LeftButton:
+        if event.buttons() & QtCore.Qt.MouseButton.LeftButton:
             self._rotate_drag(event)
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
@@ -2093,7 +2128,7 @@ class ViewRotation(QtWidgets.QLabel):
                     1.0 if self.block_z else 0.0,
                 ]
             )
-            self.apply_rotation(v * keep, frame=frame)
+            self._apply_drag_rotation(v * keep, frame)
         else:
             # Free trackball. With Ctrl, horizontal drag turns and
             # vertical drag spins in the screen plane (screen Z spin),
@@ -2103,7 +2138,7 @@ class ViewRotation(QtWidgets.QLabel):
                 az = ax
                 ax = 0.0
             delta_R = render.rotation_matrix(ax, ay, az)
-            self.apply_rotation(delta_R.as_rotvec())
+            self._apply_drag_rotation(delta_R.as_rotvec(), "world")
         self.update_scene(interactive=True)
 
     def _pan_drag(self, event: QtGui.QMouseEvent) -> None:
@@ -2118,48 +2153,181 @@ class ViewRotation(QtWidgets.QLabel):
         self.pan_start_y = event.pos().y()
         if dx_pix == 0 and dy_pix == 0:
             return
-
         vh, vw = render.viewport_size(self.viewport)
-        screen_delta = np.array(
-            [dx_pix / self.width() * vw, dy_pix / self.height() * vh, 0.0]
+        # the content follows the mouse: the view target moves the
+        # other way
+        self._shift_view(
+            -dx_pix / self.width() * vw, -dy_pix / self.height() * vh
         )
-        world_delta = self._R.inv().apply(screen_delta)
-        # The viewport stores X/Y of the view target; ``_pan_z`` stores Z.
-        # Same sign convention as the viewport (subtract on pan). Update
-        # ``_pan_z`` before ``pan_relative`` because ``pan_relative`` calls
-        # ``update_scene`` internally and we want both deltas in one frame.
-        self._pan_z -= float(world_delta[2])
-        # ``viewport_center -= world_delta[:2]``
-        (y_min, x_min), (y_max, x_max) = self.viewport
-        dx, dy = float(world_delta[0]), float(world_delta[1])
-        self.viewport = [(y_min - dy, x_min - dx), (y_max - dy, x_max - dx)]
-        # the pan's z component has moved the pivot off the data; put it
-        # back at the depth of what is shown (the image does not change)
         self._reanchor_pivot()
         self.update_scene(interactive=True)
 
+    def _shift_view(self, screen_dx: float, screen_dy: float) -> None:
+        """Move the view target by a shift given in the screen frame
+        (camera pixels along the screen axes): converted to world
+        coordinates through ``R^-1``, its X/Y components move the
+        viewport and its Z component the depth ``_pan_z``, so the shift
+        is right at any rotation, including ±90°."""
+        world_delta = self._R.inv().apply([screen_dx, screen_dy, 0.0])
+        (y_min, x_min), (y_max, x_max) = self.viewport
+        dx, dy = float(world_delta[0]), float(world_delta[1])
+        self.viewport = [(y_min + dy, x_min + dx), (y_max + dy, x_max + dx)]
+        self._pan_z += float(world_delta[2])
+
+    def _zoom_at(self, factor: float, pos: QtCore.QPointF | None) -> None:
+        """Zoom the view by ``factor`` (below one zooms in) about the
+        widget position ``pos``, which stays under the cursor; about
+        the center when ``pos`` is None."""
+        if self.viewport is None or not len(self.locs):
+            return
+        vh, vw = render.viewport_size(self.viewport)
+        if pos is not None:
+            # the cursor's offset from the center (screen frame) keeps
+            # its place: the target moves towards it by (1 - factor)
+            rel_x = pos.x() / self.width() - 0.5
+            rel_y = pos.y() / self.height() - 0.5
+            self._shift_view(
+                rel_x * vw * (1 - factor), rel_y * vh * (1 - factor)
+            )
+        self.viewport = render.zoom_viewport(self.viewport, factor)
+        self._reanchor_pivot()
+        self.update_scene()
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        """Zoom about the cursor with the mouse wheel or a trackpad
+        scroll (smooth: about ten percent per wheel notch)."""
+        delta = event.angleDelta().y()
+        if delta == 0 or not len(self.locs):
+            event.ignore()
+            return
+        self._zoom_at(1.1 ** (-delta / 120.0), event.position())
+        event.accept()
+
+    def event(self, event: QtCore.QEvent) -> bool:
+        """Pinch-to-zoom on trackpads (macOS native gesture)."""
+        if event.type() == QtCore.QEvent.Type.NativeGesture and (
+            event.gestureType()
+            == QtCore.Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            if len(self.locs):
+                self._zoom_at(1.0 / (1.0 + event.value()), event.position())
+            return True
+        return super().event(event)
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        """Double click fits the loaded region back into the window;
+        with Shift it also resets the rotation."""
+        if event.button() != QtCore.Qt.MouseButton.LeftButton or not len(
+            self.locs
+        ):
+            event.ignore()
+            return
+        if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            self.set_rotation(Rotation.identity())
+            self._pan_z = 0.0
+        self.fit_in_view_rotated()
+        event.accept()
+
+    def _finish_zoom_rectangle(self) -> None:
+        """Zoom to the rectangle dragged with Shift + left button (a
+        drag too small to be one is ignored)."""
+        (x0, y0), (x1, y1) = self._zoom_rect
+        self._zoom_rect = None
+        self.rubberband.hide()
+        # releasing above or left of the start cancels (as in 2D)
+        w_pix, h_pix = x1 - x0, y1 - y0
+        if w_pix < 5 or h_pix < 5 or not len(self.locs):
+            return
+        vh, vw = render.viewport_size(self.viewport)
+        # the rectangle's center becomes the view target, its extent
+        # (widened to the window's aspect by draw_scene) the field
+        cx = (x0 + x1) / 2 / self.width() - 0.5
+        cy = (y0 + y1) / 2 / self.height() - 0.5
+        self._shift_view(cx * vw, cy * vh)
+        (y_min, x_min), (y_max, x_max) = self.viewport
+        new_w, new_h = w_pix / self.width() * vw, h_pix / self.height() * vh
+        center_y, center_x = render.viewport_center(self.viewport)
+        self.viewport = [
+            (center_y - new_h / 2, center_x - new_w / 2),
+            (center_y + new_h / 2, center_x + new_w / 2),
+        ]
+        self.viewport = self.adjust_viewport_to_view(self.viewport)
+        self._reanchor_pivot()
+        self.update_scene()
+
+    def _apply_drag_rotation(self, rotvec: np.ndarray, frame: str) -> None:
+        """Apply a drag's rotation increment, or, while S is held,
+        accumulate it and apply whole ``SNAP_STEP`` steps only."""
+        if not self._snap:
+            self.apply_rotation(rotvec, frame=frame)
+            return
+        self._snap_accum = self._snap_accum + rotvec
+        magnitude = float(np.linalg.norm(self._snap_accum))
+        if magnitude < self.SNAP_STEP:
+            return
+        steps = int(magnitude // self.SNAP_STEP)
+        quantum = self._snap_accum / magnitude * self.SNAP_STEP * steps
+        self._snap_accum = self._snap_accum - quantum
+        self.apply_rotation(quantum, frame=frame)
+
+    #: rotation step while S is held (radians): 15 degrees
+    SNAP_STEP = np.pi / 12
+
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         """Define actions taken when pressing mouse buttons, for
-        example, starting rotating locs or panning."""
-        if self._mode == "Rotate":
-            # start rotation
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                self._last_mouse_x = event.pos().x()
-                self._last_mouse_y = event.pos().y()
-                event.accept()
+        example, starting rotating locs or panning.
 
-            # start panning
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                self._pan = True
-                self.pan_start_x = event.pos().x()
-                self.pan_start_y = event.pos().y()
-                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
-                event.accept()
+        Navigation works in every mode: Shift + left button drags a
+        zoom rectangle; the right button, the middle button or Alt
+        (Option) + left button pan. In Rotate mode a plain left drag
+        rotates."""
+        left = event.button() == QtCore.Qt.MouseButton.LeftButton
+        modifiers = event.modifiers()
+        if left and modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            self._zoom_rect = (
+                (event.pos().x(), event.pos().y()),
+                (event.pos().x(), event.pos().y()),
+            )
+            self.rubberband.setGeometry(
+                QtCore.QRect(event.pos(), QtCore.QSize())
+            )
+            self.rubberband.show()
+            event.accept()
+            return
+        if event.button() in (
+            QtCore.Qt.MouseButton.RightButton,
+            QtCore.Qt.MouseButton.MiddleButton,
+        ) or (left and modifiers & QtCore.Qt.KeyboardModifier.AltModifier):
+            self._pan = True
+            self.pan_start_x = event.pos().x()
+            self.pan_start_y = event.pos().y()
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if self._mode == "Rotate" and left:
+            # start rotation
+            self._last_mouse_x = event.pos().x()
+            self._last_mouse_y = event.pos().y()
+            self._snap_accum = np.zeros(3)
+            event.accept()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         """Define actions taken when releasing mouse buttons, for
         example, stopping rotating locs or panning, add or delete a measure
         point."""
+        if self._zoom_rect is not None:
+            self._zoom_rect = (
+                self._zoom_rect[0],
+                (event.pos().x(), event.pos().y()),
+            )
+            self._finish_zoom_rectangle()
+            event.accept()
+            return
+        if self._pan:
+            self._pan = False
+            self.update_cursor()
+            event.accept()
+            return
         if self._mode == "Measure":
             # add a measure point on left click; the first right click
             # freezes the current set so a new one can be started; a
@@ -2186,10 +2354,6 @@ class ViewRotation(QtWidgets.QLabel):
         elif self._mode == "Rotate":
             # stop rotation
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                event.accept()
-            # stop panning
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                self._pan = False
                 event.accept()
 
     def map_to_movie(self, position: QtCore.QPoint) -> tuple[float, float]:

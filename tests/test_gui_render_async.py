@@ -19,6 +19,7 @@ import time
 import numpy as np
 import pandas as pd
 import pytest
+from PyQt6 import QtCore
 
 from picasso import render
 from picasso.gui import render as gui_render
@@ -79,6 +80,43 @@ def window(qt_offscreen, tmp_path):
     window.view.async_rendering = True  # instance attr shadows the stub
     yield window
     window.view.stop_render_worker()
+
+
+class _Pinch:
+    """A macOS pinch gesture as the view's event() sees it."""
+
+    def __init__(self, x, y, value):
+        self._pos = QtCore.QPointF(x, y)
+        self._value = value
+
+    def type(self):
+        return QtCore.QEvent.Type.NativeGesture
+
+    def gestureType(self):
+        return QtCore.Qt.NativeGestureType.ZoomNativeGesture
+
+    def value(self):
+        return self._value
+
+    def position(self):
+        return self._pos
+
+
+def test_pinch_zooms_the_main_view_about_the_fingers(window):
+    view = window.view
+    view.async_rendering = False
+    view.update_scene()
+    x, y = 96, 32
+    before = view.map_to_movie(QtCore.QPointF(x, y))
+    vh, vw = render.viewport_size(view.viewport)
+    assert view.event(_Pinch(x, y, 0.25))  # fingers apart: zoom in
+    after = view.map_to_movie(QtCore.QPointF(x, y))
+    assert after == pytest.approx(before, abs=1e-6)
+    vh2, vw2 = render.viewport_size(view.viewport)
+    assert vw2 / vw == pytest.approx(1 / 1.25, rel=1e-6)
+    assert view.event(_Pinch(x, y, -0.2))  # fingers together: zoom out
+    vh3, vw3 = render.viewport_size(view.viewport)
+    assert vw3 / vw2 == pytest.approx(1 / 0.8, rel=1e-6)
 
 
 class TestAsyncRender:

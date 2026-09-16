@@ -13395,6 +13395,20 @@ class View(QtWidgets.QLabel):
         """Zoom out by a constant factor."""
         self.zoom(ZOOM)
 
+    def event(self, event: QtCore.QEvent) -> bool:
+        """Pinch-to-zoom on trackpads (macOS native gesture), about the
+        fingers' position, like Ctrl + wheel."""
+        if event.type() == QtCore.QEvent.Type.NativeGesture and (
+            event.gestureType()
+            == QtCore.Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            if len(self.locs):
+                scale = 1.0 / (1.0 + event.value())
+                position = self.map_to_movie(event.position())
+                self.zoom(scale, cursor_position=position)
+            return True
+        return super().event(event)
+
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
         """Define what happens when mouse wheel is used.
 
