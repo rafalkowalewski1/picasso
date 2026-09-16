@@ -30,7 +30,23 @@ from scipy.optimize import curve_fit, OptimizeWarning
 from scipy.spatial import distance, KDTree
 from tqdm import tqdm, trange
 
-from . import io, lib, clusterer, render, imageprocess, masking, __version__
+from . import (
+    io,
+    lib,
+    clusterer,
+    render,
+    imageprocess,
+    masking,
+    spatial_index,
+    __version__,
+)
+
+
+def _is_pyramid(index_blocks) -> bool:
+    """Whether a pick index is a ``spatial_index.RenderIndexPyramid``
+    (built once per channel, any pick size) rather than the tuple of
+    ``get_index_blocks`` (built for one block size)."""
+    return isinstance(index_blocks, spatial_index.RenderIndexPyramid)
 
 
 def get_index_blocks(
@@ -168,25 +184,36 @@ def _picked_circular_locs(
     """Helper function for picking localizations using circular picks.
     See ``picked_locs`` for more details."""
     picked_locs = []
-    if index_blocks is None:
-        index_blocks = get_index_blocks(locs, info, pick_size)
-    locs_xy = index_blocks[0][["x", "y"]].to_numpy().T
+    if _is_pyramid(index_blocks):
+        # the load-time pyramid: no pick-size specific indexing needed
+        pyramid = index_blocks
+        xs = locs["x"].to_numpy()
+        ys = locs["y"].to_numpy()
+    else:
+        pyramid = None
+        if index_blocks is None:
+            index_blocks = get_index_blocks(locs, info, pick_size)
+        locs_xy = index_blocks[0][["x", "y"]].to_numpy().T
     for i, pick in enumerate(picks):
         x, y = pick
-        x_, y_ = int(x / pick_size), int(y / pick_size)
-        block_locs_idx = _get_block_locs_at_numba(
-            x_,
-            y_,
-            index_blocks[4],
-            index_blocks[5],
-            index_blocks[6],
-            index_blocks[7],
-        )
-        block_locs = index_blocks[0].iloc[block_locs_idx]
-        group_locs_idx = lib.is_loc_at_numba(
-            x, y, locs_xy[:, block_locs_idx], pick_size
-        )
-        group_locs = block_locs.iloc[group_locs_idx].copy()
+        if pyramid is not None:
+            idx = spatial_index.query_circle(pyramid, xs, ys, x, y, pick_size)
+            group_locs = locs.iloc[idx].copy()
+        else:
+            x_, y_ = int(x / pick_size), int(y / pick_size)
+            block_locs_idx = _get_block_locs_at_numba(
+                x_,
+                y_,
+                index_blocks[4],
+                index_blocks[5],
+                index_blocks[6],
+                index_blocks[7],
+            )
+            block_locs = index_blocks[0].iloc[block_locs_idx]
+            group_locs_idx = lib.is_loc_at_numba(
+                x, y, locs_xy[:, block_locs_idx], pick_size
+            )
+            group_locs = block_locs.iloc[group_locs_idx].copy()
 
         if add_group:
             group_locs = lib.append_group(group_locs, i)
@@ -420,10 +447,12 @@ def picked_locs(
     add_group : boolean, optional
         True if group id should be added to locs. Each pick will be
         assigned a different id. Default is True.
-    index_blocks : tuple, optional
+    index_blocks : tuple or spatial_index.RenderIndexPyramid, optional
         Used only for circular picks. Precomputed index blocks for
-        localizations, see  ``get_index_blocks``.If None, they will be
-        calculated internally. Default is None.
+        localizations, see ``get_index_blocks`` (built with block size
+        ``pick_size``), or the pick-size independent pyramid of
+        ``spatial_index.build_render_index``. If None, index blocks
+        will be calculated internally. Default is None.
     callback : Callable[[int], None] | Literal["console"] | None, optional
         Function to display progress. If "console", tqdm is used to
         display the progress. If None, no progress is displayed. Default
@@ -600,7 +629,13 @@ def pick_similar(
         block_size = max(box_w, box_h) / 2
     else:  # circles and squares reach at most pick_size / 2 in x and y
         block_size = pick_size / 2
-    if index_blocks is not None and not np.isclose(
+    if _is_pyramid(index_blocks):
+        # the grid search below walks blocks of the pick size, which
+        # the pyramid does not have; circular picks still use it to
+        # characterize the current picks (see _pick_similar_circular)
+        if pick_shape != "Circle":
+            index_blocks = None
+    elif index_blocks is not None and not np.isclose(
         index_blocks[1], block_size
     ):
         index_blocks = None
@@ -651,23 +686,32 @@ def _pick_similar_circular(
     r = d / 2
     d2 = d**2
     # extract n_locs and rmsd from current picks
-    if index_blocks is None:
+    pyramid = index_blocks if _is_pyramid(index_blocks) else None
+    if pyramid is not None or index_blocks is None:
+        # the grid search needs blocks of the pick size
         index_blocks = get_index_blocks(locs, info, r)
     locs_xy = index_blocks[0][["x", "y"]].to_numpy().T
+    if pyramid is not None:
+        xs = locs["x"].to_numpy()
+        ys = locs["y"].to_numpy()
     n_locs = []
     rmsd = []
     for i, pick in enumerate(picks):
         x, y = pick
-        block_locs_xy = get_block_locs_at_numba(
-            int(x / r),
-            int(y / r),
-            locs_xy,
-            index_blocks[4],
-            index_blocks[5],
-            index_blocks[6],
-            index_blocks[7],
-        )
-        pick_locs_xy = lib.locs_at_numba(x, y, block_locs_xy, r)
+        if pyramid is not None:
+            idx = spatial_index.query_circle(pyramid, xs, ys, x, y, r)
+            pick_locs_xy = np.stack((xs[idx], ys[idx]))
+        else:
+            block_locs_xy = get_block_locs_at_numba(
+                int(x / r),
+                int(y / r),
+                locs_xy,
+                index_blocks[4],
+                index_blocks[5],
+                index_blocks[6],
+                index_blocks[7],
+            )
+            pick_locs_xy = lib.locs_at_numba(x, y, block_locs_xy, r)
         n_locs.append(pick_locs_xy.shape[1])
         rmsd.append(lib.rmsd_at_com(pick_locs_xy))
 
@@ -4371,7 +4415,9 @@ def undrift_from_fiducials(
         pick_shape = "Circle"
         pick_radius = box / 2
         # passed-in index_blocks was built for a different radius; drop
-        index_blocks = None
+        # (the pyramid serves any radius)
+        if not _is_pyramid(index_blocks):
+            index_blocks = None
     else:
         # user-provided list of pick coordinates
         needs_size = pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE

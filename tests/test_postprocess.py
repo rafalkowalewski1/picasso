@@ -54,6 +54,64 @@ def locs_copy(locs):
 # ---------------------------------------------------------------------------
 
 
+class TestPyramidAsPickIndex:
+    """The load-time render pyramid can stand in for the index blocks
+    of circular picks, with identical results."""
+
+    def test_picked_locs(self, locs, info, origami_picks):
+        from picasso import spatial_index
+
+        pyramid = spatial_index.build_render_index(locs, info)
+        via_blocks = postprocess.picked_locs(
+            locs, info, origami_picks, "Circle", pick_size=PICK_SIZE / 2
+        )
+        via_pyramid = postprocess.picked_locs(
+            locs,
+            info,
+            origami_picks,
+            "Circle",
+            pick_size=PICK_SIZE / 2,
+            index_blocks=pyramid,
+        )
+        assert sum(len(_) for _ in via_pyramid) > 0
+        for a, b in zip(via_blocks, via_pyramid):
+            # equal-frame rows may come out in a different order
+            pd.testing.assert_frame_equal(
+                a.sort_index(), b.sort_index(), check_like=True
+            )
+
+    def test_pick_similar(self, locs, info, origami_picks):
+        from picasso import spatial_index
+
+        pyramid = spatial_index.build_render_index(locs, info)
+        kwargs = dict(
+            locs=locs,
+            info=info,
+            picks=origami_picks,
+            pick_shape="Circle",
+            pick_size=PICK_SIZE,
+            std_range=2.0,
+        )
+        via_blocks = postprocess.pick_similar(**kwargs)
+        via_pyramid = postprocess.pick_similar(index_blocks=pyramid, **kwargs)
+        assert via_pyramid == via_blocks
+
+    def test_other_shapes_ignore_the_pyramid(self, locs, info, origami_picks):
+        from picasso import spatial_index
+
+        pyramid = spatial_index.build_render_index(locs, info)
+        square = postprocess.pick_similar(
+            locs=locs,
+            info=info,
+            picks=origami_picks,
+            pick_shape="Square",
+            pick_size=PICK_SIZE,
+            std_range=2.0,
+            index_blocks=pyramid,
+        )
+        assert isinstance(square, list)
+
+
 class TestIndexBlocks:
     def test_index_blocks_structure(self, locs, info):
         index_blocks = postprocess.get_index_blocks(locs, info, PICK_SIZE / 2)

@@ -54,6 +54,65 @@ def _brute_force_in_view(locs: pd.DataFrame, viewport) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Circular picks
+# ---------------------------------------------------------------------------
+
+
+class TestQueryCircle:
+    @pytest.mark.parametrize("radius", [0.4, 3.0, 25.0])
+    def test_matches_brute_force(self, radius):
+        locs = _make_locs(20_000, 128.0, 96.0, seed=3)
+        pyramid = spatial_index.build_render_index(locs, _info(128.0, 96.0))
+        x = locs["x"].to_numpy()
+        y = locs["y"].to_numpy()
+        rng = np.random.default_rng(4)
+        for cx, cy in zip(rng.uniform(-5, 133, 30), rng.uniform(-5, 101, 30)):
+            got = spatial_index.query_circle(pyramid, x, y, cx, cy, radius)
+            expected = np.nonzero((x - cx) ** 2 + (y - cy) ** 2 < radius**2)[0]
+            assert np.array_equal(np.sort(got), expected)
+
+    def test_matches_index_block_picking(self):
+        from picasso import postprocess
+
+        width, height = 64.0, 64.0
+        locs = _make_locs(5_000, width, height, seed=5)
+        info = _info(width, height)
+        pyramid = spatial_index.build_render_index(locs, info)
+        picks = [(10.0, 12.0), (40.5, 33.2), (63.9, 0.1)]
+        radius = 2.5
+        via_blocks = postprocess.picked_locs(
+            locs, info, picks, "Circle", pick_size=radius
+        )
+        via_pyramid = postprocess.picked_locs(
+            locs, info, picks, "Circle", pick_size=radius, index_blocks=pyramid
+        )
+        assert len(via_blocks) == len(via_pyramid) == len(picks)
+        for a, b in zip(via_blocks, via_pyramid):
+            assert len(a) > 0
+            pd.testing.assert_frame_equal(
+                a.sort_index(), b.sort_index(), check_like=True
+            )
+
+    def test_empty_pyramid_and_far_away_pick(self):
+        locs = _make_locs(1_000, 32.0, 32.0)
+        pyramid = spatial_index.build_render_index(locs, _info(32.0, 32.0))
+        x = locs["x"].to_numpy()
+        y = locs["y"].to_numpy()
+        assert (
+            len(spatial_index.query_circle(pyramid, x, y, 100.0, 100.0, 3.0))
+            == 0
+        )
+        empty = spatial_index.build_render_index(
+            locs.iloc[:0], _info(32.0, 32.0)
+        )
+        if empty is not None:
+            assert (
+                len(spatial_index.query_circle(empty, x[:0], y[:0], 1, 1, 3))
+                == 0
+            )
+
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 

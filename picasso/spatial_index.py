@@ -10,9 +10,12 @@ hierarchical, each coarser block at level L corresponds to a contiguous
 range in the same sorted permutation -- so all levels reuse one ``perm``
 array (~4 N bytes) rather than one per level.
 
-See :mod:`picasso.postprocess` for the original single-resolution
-``get_index_blocks`` used by pick/cluster code; this module is
-intentionally separate so the pick code path is unaffected.
+Circular picks query the same pyramid (``query_circle``): the block
+sizes do not depend on the pick size, so the index built at load time
+serves every pick diameter, whereas the single-resolution
+``get_index_blocks`` of :mod:`picasso.postprocess` has to be rebuilt
+(sorting and copying the whole DataFrame) whenever the pick size
+changes; it remains the fallback where no pyramid could be built.
 
 :author: Rafal Kowalewski, 2026
 :copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
@@ -328,7 +331,32 @@ def query_viewport(
     if pyramid.perm.shape[0] == 0:
         return np.empty(0, dtype=np.uint32)
 
-    lvl = _select_level(pyramid, viewport)
+    return query_rect(pyramid, viewport)
+
+
+def query_rect(pyramid: RenderIndexPyramid, rect: tuple) -> lib.IntArray1D:
+    """Indices into the original locs DataFrame for locs in ``rect``.
+
+    Unlike ``query_viewport`` there is no full-FOV bypass: the result is
+    always an index array, a superset of the locs strictly inside the
+    rectangle (whole blocks at its edges are included).
+
+    Parameters
+    ----------
+    pyramid : RenderIndexPyramid
+        The index built by :func:`build_render_index`.
+    rect : tuple
+        ``((y_min, x_min), (y_max, x_max))`` in camera pixels.
+
+    Returns
+    -------
+    indices : lib.IntArray1D
+        Positions into the original locs DataFrame.
+    """
+    (y_min, x_min), (y_max, x_max) = rect
+    if pyramid.perm.shape[0] == 0:
+        return np.empty(0, dtype=np.uint32)
+    lvl = _select_level(pyramid, rect)
     size = pyramid.block_sizes[lvl]
     bs = pyramid.block_starts[lvl]
     be = pyramid.block_ends[lvl]
@@ -349,3 +377,64 @@ def query_viewport(
         return np.empty(0, dtype=np.uint32)
 
     return _gather_blocks(pyramid.perm, bs, be, cy_min, cy_max, cx_min, cx_max)
+
+
+@numba.njit(cache=True)
+def _filter_circle(
+    indices: lib.IntArray1D,
+    x: lib.FloatArray1D,
+    y: lib.FloatArray1D,
+    cx: float,
+    cy: float,
+    r2: float,
+) -> lib.IntArray1D:
+    """Keep the indices whose coordinates lie strictly within the
+    circle (squared radius ``r2``), as ``lib.is_loc_at_numba`` does."""
+    keep = np.empty(indices.shape[0], dtype=np.uint32)
+    n = 0
+    for k in range(indices.shape[0]):
+        i = indices[k]
+        dx = x[i] - cx
+        dy = y[i] - cy
+        if dx * dx + dy * dy < r2:
+            keep[n] = i
+            n += 1
+    return keep[:n]
+
+
+def query_circle(
+    pyramid: RenderIndexPyramid,
+    x: lib.FloatArray1D,
+    y: lib.FloatArray1D,
+    cx: float,
+    cy: float,
+    radius: float,
+) -> lib.IntArray1D:
+    """Indices into the original locs DataFrame for locs within a
+    circular pick, the way ``picasso.postprocess.picked_locs`` selects
+    them (``dx**2 + dy**2 < radius**2``).
+
+    The blocks overlapping the circle's bounding box are gathered from
+    the pyramid and the distance test is applied to those locs only.
+
+    Parameters
+    ----------
+    pyramid : RenderIndexPyramid
+        The index built by :func:`build_render_index` for ``x``, ``y``.
+    x, y : lib.FloatArray1D
+        Coordinates of all the localizations the pyramid indexes (the
+        DataFrame's columns), in camera pixels.
+    cx, cy : float
+        Center of the pick in camera pixels.
+    radius : float
+        Radius of the pick in camera pixels.
+
+    Returns
+    -------
+    indices : lib.IntArray1D
+        Positions into the original locs DataFrame, in the pyramid's
+        (Morton) order.
+    """
+    rect = ((cy - radius, cx - radius), (cy + radius, cx + radius))
+    indices = query_rect(pyramid, rect)
+    return _filter_circle(indices, x, y, float(cx), float(cy), radius**2)

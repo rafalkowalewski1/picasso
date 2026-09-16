@@ -8319,7 +8319,7 @@ class View(QtWidgets.QLabel):
         if len(self._picks) > 0:  # shift from picked
             if self._pick_shape == "Circle":
                 index_blocks = [
-                    self.get_index_blocks(c) for c in range(len(self.locs))
+                    self._pick_index(c) for c in range(len(self.locs))
                 ]
             else:
                 index_blocks = None
@@ -8349,7 +8349,7 @@ class View(QtWidgets.QLabel):
             "Combining localizations in picks", 0, len(self._picks), self
         )
         if self._pick_shape == "Circle":
-            index_blocks = self.get_index_blocks(channel)
+            index_blocks = self._pick_index(channel)
         else:
             index_blocks = None
         self.locs[channel] = postprocess.combine_locs_in_picks(
@@ -11510,8 +11510,19 @@ class View(QtWidgets.QLabel):
         progress.show()
         r = self._pick_size / 2
         loccount = np.zeros(len(self._picks), dtype=int)
-        # index locs in a grid
-        index_blocks = self.get_index_blocks(channel)
+        index = self._pick_index(channel)
+        if isinstance(index, spatial_index.RenderIndexPyramid):
+            xs = self.locs[channel]["x"].to_numpy()
+            ys = self.locs[channel]["y"].to_numpy()
+            for i, (x, y) in enumerate(self._picks):
+                loccount[i] = len(
+                    spatial_index.query_circle(index, xs, ys, x, y, r)
+                )
+                progress.set_value(i)
+            progress.close()
+            return loccount
+        # no pyramid for the channel: pick-size specific index blocks
+        index_blocks = index
         locs_xy = index_blocks[0][["x", "y"]].to_numpy().T
         for i, pick in enumerate(self._picks):
             x, y = pick
@@ -11538,6 +11549,9 @@ class View(QtWidgets.QLabel):
         Only circular and square picks are indexed: both reach at most
         half their size in x and y, so the 3x3 block neighborhood around
         a pick's center is guaranteed to contain all its localizations.
+
+        This is the fallback of ``_pick_index``: channels with a render
+        pyramid are picked through it and never indexed here.
         """
         if self._pick_shape not in ("Circle", "Square"):
             return None
@@ -11555,6 +11569,22 @@ class View(QtWidgets.QLabel):
         if self.index_blocks[channel] is None:
             self.index_locs(channel)
         return self.index_blocks[channel]
+
+    def _pick_index(
+        self, channel: int
+    ) -> spatial_index.RenderIndexPyramid | tuple | None:
+        """The spatial index for circular picks in ``channel``.
+
+        The render pyramid built when the channel was loaded serves any
+        pick size, so no indexing is needed before picking; only where
+        no pyramid could be built (missing FOV metadata) are the
+        pick-size specific index blocks computed (``get_index_blocks``,
+        which sorts and copies the whole channel).
+        """
+        pyramid = self._ensure_render_index(channel)
+        if pyramid is not None:
+            return pyramid
+        return self.get_index_blocks(channel)
 
     def invalidate_locs_index(self, channel: int | None = None) -> None:
         """Drop the cached spatial indices of one or all channels.
@@ -11757,7 +11787,7 @@ class View(QtWidgets.QLabel):
             index_blocks = (
                 None
                 if self._pick_shape in ("Rectangle", "Box")
-                else self.get_index_blocks(channel)
+                else self._pick_index(channel)
             )
             status = lib.StatusDialog("Picking similar...", self.window)
             new_picks = postprocess.pick_similar(
@@ -11878,7 +11908,7 @@ class View(QtWidgets.QLabel):
             index_blocks = None
             if self._pick_shape == "Circle":
                 pick_size = self._pick_size / 2
-                index_blocks = self.get_index_blocks(channel)
+                index_blocks = self._pick_index(channel)
             else:
                 pick_size = self._pick_size
 
@@ -11959,7 +11989,7 @@ class View(QtWidgets.QLabel):
             picks=self._picks,
             pick_shape=self._pick_shape,
             pick_size=self._pick_size,
-            index_blocks=self.get_index_blocks(channel),
+            index_blocks=self._pick_index(channel),
         )
         self.locs[channel] = locs
         self.update_scene(resample_locs=True)
@@ -12969,7 +12999,7 @@ class View(QtWidgets.QLabel):
             else self._pick_size
         )
         if self._pick_shape == "Circle":
-            index_blocks = self.get_index_blocks(channel)
+            index_blocks = self._pick_index(channel)
         else:
             index_blocks = None
         undrifted_locs, new_info, drift = postprocess.undrift_from_fiducials(

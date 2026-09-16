@@ -260,6 +260,56 @@ class TestBoxPickTool:
         assert image is not None
 
 
+class TestCircularPicksUseThePyramid:
+    """Circular picks query the render pyramid built at load, so no
+    pick-size specific index blocks are built (that indexing sorted
+    and copied every channel, again after each pick-size change)."""
+
+    @pytest.fixture
+    def circle_view(self, window):
+        view = window.view
+        view._pick_shape = "Circle"
+        window.tools_settings_dialog.pick_diameter.setValue(6.0 * PIXELSIZE)
+        view._picks = [(20.0, 20.0), (40.0, 44.0), (58.0, 6.0)]
+        return view
+
+    def test_no_index_blocks_are_built(self, circle_view, monkeypatch):
+        view = circle_view
+        assert view.render_index[0] is not None
+        monkeypatch.setattr(
+            view,
+            "index_locs",
+            lambda channel: pytest.fail("index blocks were built"),
+        )
+        picked = view.picked_locs(0)
+        assert len(picked) == 3
+        counts = view._count_locs_in_picks(0)
+        assert list(counts) == [len(p) for p in picked]
+        assert view.index_blocks[0] is None
+
+    def test_matches_the_index_block_path(self, circle_view):
+        view = circle_view
+        via_pyramid = view.picked_locs(0)
+        view.render_index[0] = None
+        view._ensure_render_index = lambda channel: None  # no pyramid
+        via_blocks = view.picked_locs(0)
+        assert view.index_blocks[0] is not None  # the fallback indexed
+        for a, b in zip(via_pyramid, via_blocks):
+            pd.testing.assert_frame_equal(
+                a.sort_index(), b.sort_index(), check_like=True
+            )
+
+    def test_pick_size_change_needs_no_reindexing(self, circle_view):
+        view = circle_view
+        before = view.picked_locs(0)
+        view.window.tools_settings_dialog.pick_diameter.setValue(
+            12.0 * PIXELSIZE
+        )
+        after = view.picked_locs(0)
+        assert view.index_blocks[0] is None
+        assert all(len(a) >= len(b) for a, b in zip(after, before))
+
+
 class TestPickRemovalAcrossShapes:
     """``remove_picks`` dispatches through ``lib.point_in_pick``."""
 
