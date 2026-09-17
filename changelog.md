@@ -4,6 +4,7 @@ Last change: 17-SEP-2026 CEST
 
 ## 0.11.2
 - Fixed error when adding new channels when 3D render is open.
+- Updated readme.txt for both installers regarding camera config and plugins.
 
 ## 0.11.1
 
