@@ -136,6 +136,8 @@ def build_animation(
     ) = None,
     min_blur_width: float = 0.0,
     quadtree_capacity: int | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
     single_channel_colormap: str | lib.FloatArray2D = "magma",
@@ -207,6 +209,9 @@ def build_animation(
     quadtree_capacity : int, optional
         Leaf capacity of the 'quadtree' blur method, see ``render``.
         Default is None (``lib.RENDER_QUADTREE_CAPACITY_DEFAULT``).
+    triangulation_passes, triangulation_jitter : optional
+        Passes and jitter width of the 'triangulation' blur method, see
+        ``render``. Default is None (the method's defaults).
     contrast : tuple of float, optional
         Contrast limits for scaling. If None, contrast is automatically
         determined. If given, only the last checkpoint is used to
@@ -302,10 +307,11 @@ def build_animation(
         "smooth",
         "convolve",
         "quadtree",
+        "triangulation",
         None,
     ), (
         "blur_method must be one of 'gaussian', 'gaussian_iso', 'smooth', "
-        "'convolve', 'quadtree' or None."
+        "'convolve', 'quadtree', 'triangulation' or None."
     )
     assert (
         isinstance(min_blur_width, (int, float)) and min_blur_width >= 0
@@ -363,6 +369,8 @@ def build_animation(
         blur_method=blur_method,
         min_blur_width=min_blur_width,
         quadtree_capacity=quadtree_capacity,
+        triangulation_passes=triangulation_passes,
+        triangulation_jitter=triangulation_jitter,
         contrast=contrast,
         invert_colors=invert_colors,
         single_channel_colormap=single_channel_colormap,
@@ -389,6 +397,8 @@ def _build_animation(
     ),
     min_blur_width: float,
     quadtree_capacity: int | None,
+    triangulation_passes: int | None,
+    triangulation_jitter: float | None,
     contrast: tuple[float, float] | None,
     invert_colors: bool,
     single_channel_colormap: str | lib.FloatArray2D,
@@ -448,6 +458,8 @@ def _build_animation(
             blur_method=blur_method,
             min_blur_width=min_blur_width,
             quadtree_capacity=quadtree_capacity,
+            triangulation_passes=triangulation_passes,
+            triangulation_jitter=triangulation_jitter,
             contrast=contrast_,
             invert_colors=invert_colors,
             single_channel_colormap=single_channel_colormap,

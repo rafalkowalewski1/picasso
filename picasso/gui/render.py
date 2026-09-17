@@ -2723,6 +2723,7 @@ class ExportKwargsDialog(lib.Dialog):
                 "Individual loc. prec.",
                 "Individual loc. prec., iso",
                 "Adaptive hist. (quad-tree)",
+                "Jittered triangulation",
             ]
         )
         current_button = disp_settings.blur_methods[
@@ -2736,6 +2737,7 @@ class ExportKwargsDialog(lib.Dialog):
                 "gaussian",
                 "gaussian_iso",
                 "quadtree",
+                "triangulation",
             ].index(current_button)
         )
         layout.addRow("Blur method", self.blur_method)
@@ -6797,6 +6799,16 @@ class DisplaySettingsDialog(lib.Dialog):
             "(Baddeley, Cannell & Soeller, 2010). No blur is added."
         )
         self.blur_buttongroup.addButton(quadtree_button)
+        triangulation_button = QtWidgets.QRadioButton("Jittered Triangulation")
+        triangulation_button.setToolTip(
+            "Delaunay triangles drawn with an intensity inverse to their\n"
+            "area, averaged over triangulations of the localizations\n"
+            "jittered by their mean distance to their neighbors, so the\n"
+            "blur follows the local sampling (Baddeley, Cannell & Soeller,\n"
+            "2010). Costly: rendered up to a number of localizations in\n"
+            "view, the histogram is shown above this number instead."
+        )
+        self.blur_buttongroup.addButton(triangulation_button)
 
         blur_grid.addWidget(points_button, 0, 0, 1, 2)
         blur_grid.addWidget(smooth_button, 1, 0, 1, 2)
@@ -6804,6 +6816,7 @@ class DisplaySettingsDialog(lib.Dialog):
         blur_grid.addWidget(gaussian_button, 3, 0, 1, 2)
         blur_grid.addWidget(gaussian_iso_button, 4, 0, 1, 2)
         blur_grid.addWidget(quadtree_button, 5, 0, 1, 2)
+        blur_grid.addWidget(triangulation_button, 6, 0, 1, 2)
         convolve_button.setChecked(True)
         self.blur_buttongroup.buttonReleased.connect(self.render_scene)
         # the minimum blur, shown only for the Gaussian methods that
@@ -6824,7 +6837,7 @@ class DisplaySettingsDialog(lib.Dialog):
         self.min_blur_width.setKeyboardTracking(False)
         self.min_blur_width.valueChanged.connect(self.render_scene)
         min_blur_grid.addWidget(self.min_blur_width, 0, 1, 1, 1)
-        blur_grid.addWidget(self.min_blur_widgets, 6, 0, 1, 2)
+        blur_grid.addWidget(self.min_blur_widgets, 7, 0, 1, 2)
         # the quad-tree's settings
         self.quadtree_widgets = QtWidgets.QWidget()
         quadtree_grid = QtWidgets.QGridLayout(self.quadtree_widgets)
@@ -6850,7 +6863,75 @@ class DisplaySettingsDialog(lib.Dialog):
         self.quadtree_snr = QtWidgets.QLabel()
         self.quadtree_snr.setToolTip(capacity_label.toolTip())
         quadtree_grid.addWidget(self.quadtree_snr, 1, 0, 1, 2)
-        blur_grid.addWidget(self.quadtree_widgets, 7, 0, 1, 2)
+        blur_grid.addWidget(self.quadtree_widgets, 8, 0, 1, 2)
+        # the triangulation's settings, shown only while it is selected
+        self.triangulation_widgets = QtWidgets.QWidget()
+        triangulation_grid = QtWidgets.QGridLayout(self.triangulation_widgets)
+        triangulation_grid.setContentsMargins(0, 0, 0, 0)
+        passes_label = QtWidgets.QLabel("Passes:")
+        passes_label.setToolTip(
+            "Jittered triangulations averaged (the original paper uses 25\n"
+            "to 50); 1 shows a single jittered triangulation, more take"
+            " longer."
+        )
+        triangulation_grid.addWidget(passes_label, 0, 0, 1, 1)
+        self.triangulation_passes = QtWidgets.QSpinBox()
+        self.triangulation_passes.setRange(1, 500)
+        self.triangulation_passes.setValue(
+            lib.RENDER_TRIANGULATION_PASSES_DEFAULT
+        )
+        self.triangulation_passes.setKeyboardTracking(False)
+        self.triangulation_passes.setToolTip(passes_label.toolTip())
+        triangulation_grid.addWidget(self.triangulation_passes, 0, 1, 1, 1)
+        jitter_label = QtWidgets.QLabel("Jitter:")
+        jitter_label.setToolTip(
+            "Width of the random displacement of every localization in\n"
+            "units of its mean distance to its neighbors: 1 (the paper's\n"
+            "choice) blurs to the local sampling limit, 0.5 keeps more\n"
+            "detail for known periodic structures."
+        )
+        triangulation_grid.addWidget(jitter_label, 1, 0, 1, 1)
+        self.triangulation_jitter = QtWidgets.QDoubleSpinBox()
+        self.triangulation_jitter.setRange(0.0, 10.0)
+        self.triangulation_jitter.setSingleStep(0.1)
+        self.triangulation_jitter.setDecimals(2)
+        self.triangulation_jitter.setValue(
+            lib.RENDER_TRIANGULATION_JITTER_DEFAULT
+        )
+        self.triangulation_jitter.setKeyboardTracking(False)
+        self.triangulation_jitter.setToolTip(jitter_label.toolTip())
+        triangulation_grid.addWidget(self.triangulation_jitter, 1, 1, 1, 1)
+        max_locs_label = QtWidgets.QLabel("Max. localizations in view:")
+        max_locs_label.setToolTip(
+            "Triangulating is computationally expensive.\n"
+            "With more localizations in view than this the\n"
+            "histogram is rendered instead."
+        )
+        triangulation_grid.addWidget(max_locs_label, 2, 0, 1, 1)
+        self.triangulation_max_locs = QtWidgets.QSpinBox()
+        self.triangulation_max_locs.setRange(1000, 100_000_000)
+        self.triangulation_max_locs.setSingleStep(10000)
+        self.triangulation_max_locs.setValue(
+            lib.RENDER_TRIANGULATION_MAX_LOCS_DEFAULT
+        )
+        self.triangulation_max_locs.setKeyboardTracking(False)
+        self.triangulation_max_locs.setToolTip(max_locs_label.toolTip())
+        triangulation_grid.addWidget(self.triangulation_max_locs, 2, 1, 1, 1)
+        self.triangulation_note = QtWidgets.QLabel()
+        self.triangulation_note.setWordWrap(True)
+        self.triangulation_note.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        triangulation_grid.addWidget(self.triangulation_note, 3, 0, 1, 2)
+        blur_grid.addWidget(self.triangulation_widgets, 9, 0, 1, 2)
+        for widget in (
+            self.triangulation_passes,
+            self.triangulation_jitter,
+            self.triangulation_max_locs,
+        ):
+            widget.valueChanged.connect(self.render_scene)
+        self.triangulation_widgets.setVisible(False)
         self.quadtree_capacity.valueChanged.connect(self._update_quadtree_snr)
         self.quadtree_capacity.valueChanged.connect(self.render_scene)
         self._update_quadtree_snr()
@@ -6865,6 +6946,7 @@ class DisplaySettingsDialog(lib.Dialog):
             gaussian_button: "gaussian",
             gaussian_iso_button: "gaussian_iso",
             quadtree_button: "quadtree",
+            triangulation_button: "triangulation",
         }
 
         # Camera_parameters
@@ -7076,6 +7158,18 @@ class DisplaySettingsDialog(lib.Dialog):
         snr = np.sqrt(self.quadtree_capacity.value() / 2.0)
         self.quadtree_snr.setText(f"Mean SNR per bin \u2248 {snr:.1f}")
 
+    def set_triangulation_note(self, n_in_view: int | None) -> None:
+        """Say why the histogram was rendered instead of the
+        triangulation (too many localizations in view), or clear the
+        note (None)."""
+        if n_in_view is None:
+            self.triangulation_note.setText("")
+        else:
+            self.triangulation_note.setText(
+                f"{n_in_view:,} localizations in view exceed the limit; "
+                "the histogram is shown. Zoom in or raise the limit."
+            )
+
     def _toggle_blur_widgets(self, *args) -> None:
         """Show only the settings the selected blur method uses: the
         minimum blur for the Gaussian methods, the leaf capacity for
@@ -7090,6 +7184,7 @@ class DisplaySettingsDialog(lib.Dialog):
             method in ("gaussian", "gaussian_iso", "convolve")
         )
         self.quadtree_widgets.setVisible(method == "quadtree")
+        self.triangulation_widgets.setVisible(method == "triangulation")
         # the layouts settle in the event loop; measure afterwards
         QtCore.QTimer.singleShot(0, self._follow_content_height)
 
@@ -9635,6 +9730,7 @@ class View(QtWidgets.QLabel):
         if self._persistent_uploads() and not quadtree:
             indices = self._render_indices(rendered_viewport)
         render_index = self._render_pyramids(locs) if quadtree else None
+        self._apply_triangulation_limit(kwargs, locs, indices)
         cmap = self.window.display_settings_dlg.colormap.currentText()
         if cmap == "Custom":
             cmap = np.uint8(np.round(255 * self.custom_cmap))
@@ -10232,6 +10328,7 @@ class View(QtWidgets.QLabel):
                 "Individual loc. prec.": "gaussian",
                 "Individual loc. prec., iso": "gaussian_iso",
                 "Adaptive hist. (quad-tree)": "quadtree",
+                "Jittered triangulation": "triangulation",
             }[
                 blur_method
             ]  # convert from display name to render name
@@ -10278,8 +10375,34 @@ class View(QtWidgets.QLabel):
             "min_blur_width": min_blur_width,
             "max_blur_width": max_blur_width,
             "quadtree_capacity": disp_dlg.quadtree_capacity.value(),
+            "triangulation_passes": disp_dlg.triangulation_passes.value(),
+            "triangulation_jitter": disp_dlg.triangulation_jitter.value(),
         }
         return kwargs
+
+    def _apply_triangulation_limit(self, kwargs: dict, locs, indices) -> None:
+        """Render the histogram instead of the jittered triangulation
+        when more localizations than the display settings' limit are
+        in view (Qhull costs about 0.3 s per pass per 200k rows), and
+        say so in the display settings; ``kwargs`` is updated in
+        place. ``locs`` and ``indices`` are the prepared channels and
+        their row selections (None entries render every row)."""
+        dialog = self.window.display_settings_dlg
+        if kwargs.get("blur_method") != "triangulation":
+            dialog.set_triangulation_note(None)
+            return
+        channels = [locs] if isinstance(locs, pd.DataFrame) else locs
+        if indices is None:
+            indices = [None] * len(channels)
+        n = sum(
+            len(channel) if idx is None else len(idx)
+            for channel, idx in zip(channels, indices)
+        )
+        if n > dialog.triangulation_max_locs.value():
+            kwargs["blur_method"] = None
+            dialog.set_triangulation_note(n)
+        else:
+            dialog.set_triangulation_note(None)
 
     def _max_blur_width(self) -> float | None:
         """Maximum localization precision rendered by the individual
@@ -12226,6 +12349,7 @@ class View(QtWidgets.QLabel):
             viewport=None if quadtree else kwargs["viewport"]
         )
         render_index = self._render_pyramids(locs) if quadtree else None
+        self._apply_triangulation_limit(kwargs, locs, None)
 
         # prepare other keywords for rendering
         cmap = self.window.display_settings_dlg.colormap.currentText()

@@ -841,6 +841,8 @@ class WgpuBackend(SplatBackend):
         min_blur_width: float,
         ang: tuple | Rotation | None,
         quadtree_capacity: int | None = None,
+        triangulation_passes: int | None = None,
+        triangulation_jitter: float | None = None,
     ) -> list[tuple[int, lib.FloatArray2D]]:
         """Render each channel offscreen on the GPU (see
         ``backend.SplatBackend.render_channels``). The ``quadtree``

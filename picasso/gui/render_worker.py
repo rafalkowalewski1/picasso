@@ -163,6 +163,14 @@ def subsample_request(request: dict, target_for: Callable[[int], int]) -> bool:
         False when subsampling is disabled or not needed (the request
         is left untouched).
     """
+    if request.get("blur_method") == "triangulation":
+        # a subset would change the method (the paper's random
+        # subpopulation variant); the preview is the plain, single
+        # unjittered pass instead, which costs a tenth of the average
+        if request.get("triangulation_passes", 1) == 0:
+            return False
+        request["triangulation_passes"] = 0
+        return True
     if request.get("blur_method") == "quadtree" and request.get("ang") is None:
         # unrotated, the adaptive histogram renders from the channel's
         # index over all its rows; a strided subset has none, and its

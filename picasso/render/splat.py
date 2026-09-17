@@ -22,6 +22,7 @@ from scipy import signal, ndimage
 from scipy.spatial.transform import Rotation
 
 from .. import lib, spatial_index
+from . import triangulation
 from .backend import SplatBackend
 from .kernels import (
     _render_setup,
@@ -54,6 +55,8 @@ def render(
     global_precision: tuple[float, float] | None = None,
     quadtree_capacity: int | None = None,
     render_index: spatial_index.RenderIndexPyramid | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """Render localizations given FOV and blur method.
 
@@ -112,12 +115,21 @@ def render(
         'quadtree' method renders from; a GUI passes the one built when
         the channel was loaded. If None (default), it is built here,
         which costs a sort of the rows.
+    triangulation_passes : int, optional
+        Jittered triangulations averaged by the 'triangulation' method
+        (see ``picasso.render.triangulation``); 0 paints the plain
+        triangulation. If None (default),
+        ``triangulation.PASSES_DEFAULT``.
+    triangulation_jitter : float, optional
+        Its jitter width in units of each localization's mean distance
+        to its neighbors. If None (default),
+        ``triangulation.JITTER_DEFAULT``.
 
     Raises
     ------
     Exception
         If blur_method not one of 'gaussian', 'gaussian_iso', 'smooth',
-        'convolve', 'quadtree' or None.
+        'convolve', 'quadtree', 'triangulation' or None.
 
     Returns
     -------
@@ -143,6 +155,8 @@ def render(
         min_blur_width=min_blur_width,
         ang=ang,
         quadtree_capacity=quadtree_capacity,
+        triangulation_passes=triangulation_passes,
+        triangulation_jitter=triangulation_jitter,
     )
 
 
@@ -345,6 +359,8 @@ def _render_arrays(
     min_blur_width: float = 0.0,
     ang: tuple | Rotation | None = None,
     quadtree_capacity: int | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """``render`` on pre-extracted column arrays (see ``render`` for
     the parameters). The chunked parallel scheduler calls this per row
@@ -431,8 +447,68 @@ def _render_arrays(
             quadtree_capacity,
             ang=ang,
         )
+    elif blur_method == "triangulation":
+        # jittered, averaged triangulation
+        return _render_triangulation(
+            columns,
+            oversampling,
+            y_min,
+            x_min,
+            y_max,
+            x_max,
+            triangulation_passes,
+            triangulation_jitter,
+            ang=ang,
+        )
     else:
         raise Exception("blur_method not understood.")
+
+
+def _render_triangulation(
+    columns: _RenderColumns,
+    oversampling: float,
+    y_min: float,
+    x_min: float,
+    y_max: float,
+    x_max: float,
+    passes: int | None,
+    jitter: float | None,
+    ang: tuple | Rotation | None = None,
+) -> tuple[int, lib.FloatArray2D]:
+    """The adaptively jittered, averaged triangulation of Baddeley,
+    Cannell & Soeller (2010), see ``picasso.render.triangulation``.
+    Rotated (``ang``), the rows in view are projected onto the screen
+    first, as for the quad-tree. The passes are spread over the render
+    thread pool's budget."""
+    if passes is None:
+        passes = triangulation.PASSES_DEFAULT
+    if jitter is None:
+        jitter = triangulation.JITTER_DEFAULT
+    workers = _render_worker_budget()
+    if ang is not None:
+        n_py = int(np.ceil(oversampling * (y_max - y_min)))
+        n_px = int(np.ceil(oversampling * (x_max - x_min)))
+        xs, ys, _, _ = _locs_rotation_arrays(
+            columns, oversampling, x_min, x_max, y_min, y_max, ang
+        )
+        return triangulation.render_triangulation(
+            xs,
+            ys,
+            1.0,
+            ((0.0, 0.0), (float(n_py), float(n_px))),
+            passes=int(passes),
+            jitter=float(jitter),
+            workers=workers,
+        )
+    return triangulation.render_triangulation(
+        columns.x,
+        columns.y,
+        oversampling,
+        ((y_min, x_min), (y_max, x_max)),
+        passes=int(passes),
+        jitter=float(jitter),
+        workers=workers,
+    )
 
 
 def _render_quadtree(
@@ -1309,6 +1385,8 @@ class CpuBackend(SplatBackend):
         min_blur_width: float,
         ang: tuple | Rotation | None,
         quadtree_capacity: int | None = None,
+        triangulation_passes: int | None = None,
+        triangulation_jitter: float | None = None,
     ) -> list[tuple[int, lib.FloatArray2D]]:
         """See ``backend.SplatBackend.render_channels``."""
 
@@ -1325,6 +1403,8 @@ class CpuBackend(SplatBackend):
                 min_blur_width=min_blur_width,
                 ang=ang,
                 quadtree_capacity=quadtree_capacity,
+                triangulation_passes=triangulation_passes,
+                triangulation_jitter=triangulation_jitter,
             )
 
         n_channels = len(columns)

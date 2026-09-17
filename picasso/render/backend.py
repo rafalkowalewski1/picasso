@@ -86,6 +86,8 @@ class SplatBackend(abc.ABC):
         min_blur_width: float,
         ang: tuple | Rotation | None,
         quadtree_capacity: int | None = None,
+        triangulation_passes: int | None = None,
+        triangulation_jitter: float | None = None,
     ) -> list[tuple[int, lib.FloatArray2D]]:
         """Render each channel's raw grayscale image.
 

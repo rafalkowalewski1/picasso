@@ -1092,3 +1092,74 @@ def _quadtree_fill(
                     i = int(oversampling * (yy - y_min))
                     if i < n_py and j < n_px:
                         image[i, j] += 1.0
+
+
+@numba.njit(cache=True, nogil=True)
+def _fill_triangles(
+    image: lib.FloatArray2D,
+    x: lib.FloatArray1D,
+    y: lib.FloatArray1D,
+    simplices: lib.IntArray2D,
+    mass: float,
+) -> None:
+    """Paint triangles into ``image`` (display pixel coordinates), each
+    carrying ``mass`` localizations spread evenly over its area, so the
+    intensity is ``mass / area`` per pixel: the triangulation render of
+    Baddeley, Cannell & Soeller (2010).
+
+    A triangle wider than a pixel is scan-converted row by row (the
+    pixels whose centers lie inside it); a triangle no wider than a
+    pixel puts its whole mass into the pixel holding its centroid, so
+    at an overview the image tends to the histogram and no mass is
+    lost.
+    """
+    n_py, n_px = image.shape
+    for t in range(simplices.shape[0]):
+        a = simplices[t, 0]
+        b = simplices[t, 1]
+        c = simplices[t, 2]
+        xa, ya = x[a], y[a]
+        xb, yb = x[b], y[b]
+        xc, yc = x[c], y[c]
+        area = 0.5 * abs((xb - xa) * (yc - ya) - (xc - xa) * (yb - ya))
+        if area <= 0.0:
+            continue
+        x_lo = min(xa, xb, xc)
+        x_hi = max(xa, xb, xc)
+        y_lo = min(ya, yb, yc)
+        y_hi = max(ya, yb, yc)
+        if x_hi - x_lo <= 1.0 and y_hi - y_lo <= 1.0:
+            # within a pixel: its mass into the centroid's pixel
+            j = int((xa + xb + xc) / 3.0)
+            i = int((ya + yb + yc) / 3.0)
+            if 0 <= i < n_py and 0 <= j < n_px:
+                image[i, j] += mass
+            continue
+        density = mass / area
+        i0 = max(int(np.floor(y_lo - 0.5)), 0)
+        i1 = min(int(np.ceil(y_hi - 0.5)), n_py - 1)
+        for i in range(i0, i1 + 1):
+            yc_row = i + 0.5  # the row's pixel centers
+            # the span of the triangle on this row: intersections of
+            # the horizontal line with its three edges
+            x_left = 1e300
+            x_right = -1e300
+            for k in range(3):
+                if k == 0:
+                    x0, y0, x1, y1 = xa, ya, xb, yb
+                elif k == 1:
+                    x0, y0, x1, y1 = xb, yb, xc, yc
+                else:
+                    x0, y0, x1, y1 = xc, yc, xa, ya
+                if (y0 <= yc_row < y1) or (y1 <= yc_row < y0):
+                    xi = x0 + (yc_row - y0) * (x1 - x0) / (y1 - y0)
+                    if xi < x_left:
+                        x_left = xi
+                    if xi > x_right:
+                        x_right = xi
+            if x_right < x_left:
+                continue
+            j0 = max(int(np.ceil(x_left - 0.5)), 0)
+            j1 = min(int(np.floor(x_right - 0.5)), n_px - 1)
+            for j in range(j0, j1 + 1):
+                image[i, j] += density

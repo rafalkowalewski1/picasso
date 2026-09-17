@@ -529,7 +529,7 @@ def add_roi_id(
     Call this on the localizations as they come out of the fit: drift
     correction, lateral corrections and z fitting all move ``x`` and
     ``y``, which can push a localization near the seam between two ROIs
-    into the neighbouring rectangle.
+    into the neighboring rectangle.
 
     Parameters
     ----------

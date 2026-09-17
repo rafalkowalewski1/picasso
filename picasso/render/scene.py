@@ -183,6 +183,8 @@ def render_scene(
     indices: list | None = None,
     global_precision: list | tuple[float, float] | None = None,
     quadtree_capacity: int | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
     render_index: list | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
@@ -282,6 +284,9 @@ def render_scene(
         Per channel, its spatial index for the 'quadtree' method (see
         ``render``); None entries (or None) build one on the fly.
         Default is None.
+    triangulation_passes, triangulation_jitter : optional
+        Passes averaged and jitter width of the 'triangulation' method,
+        see ``render``. Default is None (the method's defaults).
     contrast : tuple of float, optional
         Contrast limits for scaling. If None, contrast is automatically
         determined.
@@ -356,6 +361,8 @@ def render_scene(
             indices=indices,
             global_precision=global_precision,
             quadtree_capacity=quadtree_capacity,
+            triangulation_passes=triangulation_passes,
+            triangulation_jitter=triangulation_jitter,
             render_index=render_index,
             contrast=contrast,
             invert_colors=invert_colors,
@@ -391,6 +398,8 @@ def render_scene(
             indices=indices,
             global_precision=global_precision,
             quadtree_capacity=quadtree_capacity,
+            triangulation_passes=triangulation_passes,
+            triangulation_jitter=triangulation_jitter,
             render_index=render_index,
             contrast=contrast,
             relative_intensities=relative_intensities,
@@ -424,6 +433,8 @@ def _render_channels(
     indices: list | None = None,
     global_precision: list | None = None,
     quadtree_capacity: int | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
     render_index: list | None = None,
 ) -> list[tuple[int, lib.FloatArray2D]]:
     """Render each channel's raw grayscale image through the selected
@@ -491,9 +502,11 @@ def _render_channels(
         min_blur_width=min_blur_width,
         ang=ang,
         quadtree_capacity=quadtree_capacity,
+        triangulation_passes=triangulation_passes,
+        triangulation_jitter=triangulation_jitter,
     )
-    if blur_method == "quadtree":
-        # tree descent over the sorted index: a CPU method
+    if blur_method in ("quadtree", "triangulation"):
+        # tree descent over the sorted index / Qhull passes: CPU methods
         return _cpu_backend().render_channels(columns, info, **kwargs)
     n_locs = sum(len(c) for c in columns)
     if ang is not None:
@@ -565,6 +578,8 @@ def _render_multi_channel(
     indices: list | None = None,
     global_precision: list | None = None,
     quadtree_capacity: int | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
     render_index: list | None = None,
     contrast: tuple[float, float] | None = None,
     relative_intensities: list[float] | None = None,
@@ -599,6 +614,8 @@ def _render_multi_channel(
             indices=indices,
             global_precision=global_precision,
             quadtree_capacity=quadtree_capacity,
+            triangulation_passes=triangulation_passes,
+            triangulation_jitter=triangulation_jitter,
             render_index=render_index,
         )
         n_locs = sum([rendering[0] for rendering in renderings])
@@ -691,6 +708,8 @@ def _render_single_channel(
     indices: list | None = None,
     global_precision: tuple[float, float] | list | None = None,
     quadtree_capacity: int | None = None,
+    triangulation_passes: int | None = None,
+    triangulation_jitter: float | None = None,
     render_index: object | list | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
@@ -730,6 +749,8 @@ def _render_single_channel(
             indices=indices,
             global_precision=global_precision,
             quadtree_capacity=quadtree_capacity,
+            triangulation_passes=triangulation_passes,
+            triangulation_jitter=triangulation_jitter,
             render_index=render_index,
         )
     vmin, vmax = contrast if contrast is not None else (None, None)

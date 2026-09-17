@@ -172,6 +172,14 @@ RENDER_GPU_MIN_LOCS = 20_000
 #: bin has a signal-to-noise ratio of about sqrt(capacity / 2) (10 -> 2.2;
 #: Baddeley et al. 2010 used 5)
 RENDER_QUADTREE_CAPACITY_DEFAULT = 10
+#: Jittered triangulation (blur method "triangulation", Baddeley et al.
+#: 2010): passes averaged, jitter width in units of the mean neighbor
+#: distance, and the most localizations in view the GUI renders it for
+#: (above, the histogram is shown: Qhull costs ~0.3 s per pass per
+#: 200k rows)
+RENDER_TRIANGULATION_PASSES_DEFAULT = 25
+RENDER_TRIANGULATION_JITTER_DEFAULT = 1.0
+RENDER_TRIANGULATION_MAX_LOCS_DEFAULT = 100_000
 #: how many times a rotated 3D localization counts towards
 #: ``RENDER_GPU_MIN_LOCS``: the projected z precision widens every
 #: footprint, so the CPU kernels cost 15-20x more per localization
