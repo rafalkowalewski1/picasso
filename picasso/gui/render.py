@@ -983,6 +983,14 @@ class DatasetDialog(lib.Dialog):
             return
         view_rot = window_rot.view_rot
         if view_rot.locs and getattr(view_rot, "viewport", None):
+            # the rotation window keeps its own copy of the picked locs,
+            # while the colors it renders with come from the main view;
+            # reload if files were added/removed since the last load so
+            # that both agree on the number of channels
+            if len(view_rot.locs) != len(self.window.view.locs):
+                if not self.window.view._picks:
+                    return  # nothing to reload from
+                view_rot.load_locs(update_window=True)
             view_rot.update_scene()
 
     def select_background_color(self) -> None:

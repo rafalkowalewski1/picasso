@@ -1,6 +1,9 @@
 # Changelog
 
-Last change: 04-SEP-2026 CEST
+Last change: 17-SEP-2026 CEST
+
+## 0.11.2
+- Fixed error when adding new channels when 3D render is open.
 
 ## 0.11.1
 
