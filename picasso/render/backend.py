@@ -312,12 +312,38 @@ def _get_backend(n_locs: int | None = None) -> SplatBackend:
     return backend if backend is not None else _cpu_backend()
 
 
+#: Why the last render on a non-CPU backend was re-rendered on the CPU
+#: (a ``SplatBackendError`` message), or None once a render succeeded
+#: on that backend again; see ``note_fallback``.
+_last_fallback: str | None = None
+
+
+def note_fallback(reason: str | None) -> None:
+    """Record why a render fell back to the CPU (``reason``), or that
+    the chosen backend rendered again (None). The scene dispatch calls
+    this; the GUI shows the reason in its info dialog, since the
+    warning in the log is invisible in the windowed application."""
+    global _last_fallback
+    _last_fallback = reason
+
+
+def last_fallback() -> str | None:
+    """The reason of the most recent CPU fallback, or None."""
+    return _last_fallback
+
+
 def describe_active() -> str:
     """Where large renders currently run, for the GUI's info dialog:
-    ``"GPU (Apple M4 via Metal)"`` or ``"CPU (5 workers)"``."""
+    ``"GPU (Apple M4 via Metal)"`` or ``"CPU (5 workers)"``. When the
+    last render on the GPU fell back to the CPU, the reason follows,
+    e.g. ``"GPU (...) - last render on the CPU: channel exceeds the
+    GPU storage-binding limit"``."""
     backend = _get_backend()
     if backend.persistent_uploads:
-        return f"GPU ({backend.describe()})"
+        text = f"GPU ({backend.describe()})"
+        if _last_fallback:
+            text += f" - last render on the CPU: {_last_fallback}"
+        return text
     workers = lib.n_workers(
         lib.RENDER_CPU_UTILIZATION_DEFAULT, settings_section="Render"
     )

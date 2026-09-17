@@ -59,6 +59,8 @@ Last change: 17-SEP-2026 CEST
 - The `scipy.ndimage.filters` deprecation warning is gone.
 - Render no longer fails on a `Render` settings section without a `Colormap` entry.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
+- `View > Show info` names the reason when a render fell back from the GPU to the CPU (for example a channel above the card's storage-binding limit).
+- Fixed `MemoryError: Allocation failed` while rendering on workstations: the multi-threaded CPU renderer kept every row chunk's full-size image until the end of a render, about two per worker; the chunks are now summed as they arrive, at most one image per worker plus one is alive, and the number of workers shrinks when the memory available at that moment would not hold them.
 - The display settings (main and 3D window) show the minimum blur only for the Gaussian blur methods that use it.
 
 ## 0.11.1

@@ -2849,3 +2849,174 @@ class TestFusedCompose:
                 np.asarray(result, dtype=np.float64),
                 np.asarray(expected, dtype=np.float64),
             )
+
+
+class TestChunkMemory:
+    """The chunked CPU path bounds its memory: chunk images are summed
+    as they arrive (at most one per worker plus one alive) and the
+    worker count shrinks with the memory available."""
+
+    def _locs(self, n=400_000, seed=0):
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame(
+            {
+                "x": rng.uniform(0, 64, n),
+                "y": rng.uniform(0, 64, n),
+                "lpx": rng.uniform(0.05, 0.2, n),
+                "lpy": rng.uniform(0.05, 0.2, n),
+            }
+        )
+
+    def _info(self):
+        return [{"Width": 64, "Height": 64, "Frames": 1, "Pixelsize": 130.0}]
+
+    def test_streamed_sum_equals_the_sequential_render(self, monkeypatch):
+        from picasso.render import splat
+
+        locs = self._locs()
+        info = self._info()
+        kwargs = dict(
+            disp_px_size=130 / 4,
+            viewport=((0, 0), (64, 64)),
+            blur_method="gaussian",
+        )
+        monkeypatch.setattr(splat, "_render_worker_budget", lambda: 1)
+        n1, sequential = render.render_scene(
+            locs, info, return_raw_image=True, **kwargs
+        )[1:]
+        monkeypatch.setattr(splat, "_render_worker_budget", lambda: 4)
+        n4, chunked = render.render_scene(
+            locs, info, return_raw_image=True, **kwargs
+        )[1:]
+        assert n1 == n4 == len(locs)
+        np.testing.assert_allclose(chunked, sequential, rtol=1e-5, atol=1e-6)
+        # and twice the same, whatever the completion order of the pool
+        again = render.render_scene(
+            locs, info, return_raw_image=True, **kwargs
+        )[2]
+        np.testing.assert_array_equal(chunked, again)
+
+    def test_at_most_one_image_per_worker_plus_one_is_alive(self, monkeypatch):
+        import threading
+        import weakref
+
+        from picasso.render import splat
+
+        original = splat._render_arrays
+        lock = threading.Lock()
+        live = [0]
+        peak = [0]
+        created = [0]
+
+        def freed():
+            with lock:
+                live[0] -= 1
+
+        def tracked(*args, **kwargs):
+            n, image = original(*args, **kwargs)
+            with lock:
+                live[0] += 1
+                created[0] += 1
+                peak[0] = max(peak[0], live[0])
+            weakref.finalize(image, freed)  # runs when the chunk is dropped
+            return n, image
+
+        monkeypatch.setattr(splat, "_render_arrays", tracked)
+        monkeypatch.setattr(splat, "_render_worker_budget", lambda: 3)
+        monkeypatch.setattr(splat, "_MIN_CHUNK_LOCS", 10_000)
+        render.render_scene(
+            self._locs(300_000),  # 6 chunks for 3 workers
+            self._info(),
+            disp_px_size=130 / 4,
+            viewport=((0, 0), (64, 64)),
+            blur_method="gaussian",
+        )
+        # never all kept: two in flight per worker, one being summed,
+        # the accumulator (six chunks here, so the bound is the window)
+        assert created[0] >= 6
+        assert peak[0] <= 2 * 3 + 2
+
+    def test_workers_shrink_with_available_memory(self, monkeypatch):
+        from picasso.render import splat
+
+        class _Memory:
+            def __init__(self, available):
+                self.available = available
+
+        image = 4 * 256 * 256
+        monkeypatch.setattr(
+            splat.psutil, "virtual_memory", lambda: _Memory(100 * image)
+        )
+        # room for (0.5 * 100 - 1) images, two per task: ~24 tasks,
+        # two of them in flight per worker
+        assert splat._memory_bounded_workers(32, 1, image, 0) == 11
+        monkeypatch.setattr(
+            splat.psutil, "virtual_memory", lambda: _Memory(3 * image)
+        )
+        assert splat._memory_bounded_workers(32, 1, image, 0) == 1  # never 0
+        monkeypatch.setattr(
+            splat.psutil, "virtual_memory", lambda: _Memory(10**12)
+        )
+        assert splat._memory_bounded_workers(8, 12, image, 100_000) == 8
+        # the render still runs, on one worker, when memory is tight
+        monkeypatch.setattr(
+            splat.psutil, "virtual_memory", lambda: _Memory(3 * image)
+        )
+        monkeypatch.setattr(splat, "_render_worker_budget", lambda: 4)
+        n, raw = render.render_scene(
+            self._locs(),
+            self._info(),
+            disp_px_size=130 / 4,
+            viewport=((0, 0), (64, 64)),
+            blur_method="gaussian",
+            return_raw_image=True,
+        )[1:]
+        assert n == 400_000 and raw.sum() > 0
+
+
+class TestFallbackNote:
+    """The reason of a CPU fallback reaches the info dialog's renderer
+    line (the log warning is invisible in the windowed application)."""
+
+    def test_reason_is_recorded_and_cleared(self, monkeypatch):
+        from picasso.render import backend, scene, splat
+
+        class _Flaky(backend.SplatBackend):
+            name = "fake"
+            persistent_uploads = True
+            fail = True
+
+            def describe(self):
+                return "Fake GPU"
+
+            def render_channels(self, columns, info, **kwargs):
+                if self.fail:
+                    raise backend.SplatBackendError(
+                        "channel exceeds the limit"
+                    )
+                return splat.CpuBackend().render_channels(
+                    columns, info, **kwargs
+                )
+
+        fake = _Flaky()
+        monkeypatch.setattr(scene, "_get_backend", lambda *a, **k: fake)
+        monkeypatch.setattr(backend, "_get_backend", lambda *a, **k: fake)
+        backend.note_fallback(None)
+        rng = np.random.default_rng(0)
+        locs = pd.DataFrame(
+            {"x": rng.uniform(0, 8, 500), "y": rng.uniform(0, 8, 500)}
+        )
+        info = [{"Width": 8, "Height": 8, "Frames": 1, "Pixelsize": 130.0}]
+        render.render_scene(
+            locs, info, disp_px_size=65, viewport=((0, 0), (8, 8))
+        )
+        assert backend.last_fallback() == "channel exceeds the limit"
+        assert backend.describe_active() == (
+            "GPU (Fake GPU) - last render on the CPU: channel exceeds the limit"
+        )
+        fake.fail = False
+        render.render_scene(
+            locs, info, disp_px_size=65, viewport=((0, 0), (8, 8))
+        )
+        assert backend.last_fallback() is None
+        assert backend.describe_active() == "GPU (Fake GPU)"

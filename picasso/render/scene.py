@@ -21,7 +21,12 @@ from scipy.spatial.transform import Rotation
 
 from .. import lib
 from .kernels import _compose_multi_lut, _quantize_rgb, _compose_single
-from .backend import SplatBackendError, _cpu_backend, _get_backend
+from .backend import (
+    SplatBackendError,
+    _cpu_backend,
+    _get_backend,
+    note_fallback,
+)
 from .splat import _extract_render_columns
 from .overlays_qt import rgb_to_qimage
 
@@ -518,13 +523,17 @@ def _render_channels(
     cpu = _cpu_backend()
     if chosen is not cpu:
         try:
-            return chosen.render_channels(columns, info, **kwargs)
-        except SplatBackendError:
+            renderings = chosen.render_channels(columns, info, **kwargs)
+        except SplatBackendError as error:
             _log.warning(
                 "splat backend '%s' failed; re-rendering on the CPU",
                 chosen.name,
                 exc_info=True,
             )
+            note_fallback(str(error))
+        else:
+            note_fallback(None)
+            return renderings
     return cpu.render_channels(columns, info, **kwargs)
 
 

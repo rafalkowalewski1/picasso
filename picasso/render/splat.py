@@ -12,12 +12,14 @@ images. ``_RenderColumns`` carries the per-localization arrays and the
 
 from __future__ import annotations
 
+from collections import deque
 from concurrent import futures
 from typing import Literal
 
 import numba
 import numpy as np
 import pandas as pd
+import psutil
 from scipy import signal, ndimage
 from scipy.spatial.transform import Rotation
 
@@ -1312,6 +1314,70 @@ def _render_worker_budget() -> int:
     )
 
 
+def _image_bytes(
+    info: list[list[dict]],
+    disp_px_size: float,
+    viewport: tuple[tuple[float, float], tuple[float, float]] | None,
+) -> int:
+    """Size in bytes of one channel's float32 image for the render
+    (the largest over the channels' pixel sizes; the field of view
+    without a viewport)."""
+    n_bytes = 0
+    for channel_info in info:
+        pixelsize = lib.get_from_metadata(channel_info, "Pixelsize")
+        if pixelsize is None:
+            continue
+        oversampling = float(pixelsize) / disp_px_size
+        if viewport is None:
+            height = lib.get_from_metadata(channel_info, "Height") or 0
+            width = lib.get_from_metadata(channel_info, "Width") or 0
+        else:
+            (y_min, x_min), (y_max, x_max) = viewport
+            height = y_max - y_min
+            width = x_max - x_min
+        n_py = int(np.ceil(oversampling * height))
+        n_px = int(np.ceil(oversampling * width))
+        n_bytes = max(n_bytes, 4 * max(n_py, 0) * max(n_px, 0))
+    return n_bytes
+
+
+#: Bytes a chunk task needs per row on top of its image: the in-view
+#: copies of x, y and the blur widths (float64) and the mask.
+_CHUNK_BYTES_PER_ROW = 40
+#: Share of the currently available memory a render may take for its
+#: chunk images in flight.
+_RENDER_MEMORY_SHARE = 0.5
+#: Chunk tasks in flight per worker (their images may be alive at
+#: once): with one, the pool idles whenever the oldest task, the
+#: biggest, is still running while the others finished (measured 2.7x
+#: slower on the 12-plex overview); two keeps it busy. Every one costs
+#: a full-size image, which ``_memory_bounded_workers`` accounts for.
+_CHUNKS_IN_FLIGHT_PER_WORKER = 2
+
+
+def _memory_bounded_workers(
+    n_workers: int, n_channels: int, image_bytes: int, rows_per_task: int
+) -> int:
+    """Reduce ``n_workers`` so that the chunk images in flight
+    (``_CHUNKS_IN_FLIGHT_PER_WORKER`` per worker plus the one being
+    summed), their per-row scratch and the channels' summed images fit in
+    ``_RENDER_MEMORY_SHARE`` of the memory available right now. Never
+    below 1: a single worker renders one chunk at a time, the same
+    footprint as the sequential path."""
+    try:
+        available = psutil.virtual_memory().available
+    except Exception:
+        return n_workers
+    per_task = 2 * image_bytes + _CHUNK_BYTES_PER_ROW * rows_per_task
+    if per_task <= 0:
+        return n_workers
+    room = _RENDER_MEMORY_SHARE * available - n_channels * image_bytes
+    tasks_that_fit = room // per_task - 1
+    return int(
+        max(1, min(n_workers, tasks_that_fit // _CHUNKS_IN_FLIGHT_PER_WORKER))
+    )
+
+
 def _chunk_tasks(
     n_locs_per_channel: list[int], budget: int
 ) -> list[tuple[int, int, int]]:
@@ -1422,35 +1488,50 @@ class CpuBackend(SplatBackend):
         else:
             tasks = [(i, 0, n) for i, n in enumerate(sizes)]
         n_workers = min(len(tasks), budget)
+        if n_workers > 1:
+            n_workers = _memory_bounded_workers(
+                n_workers,
+                n_channels,
+                _image_bytes(info, disp_px_size, viewport),
+                max(stop - start for _, start, stop in tasks),
+            )
+
+        # every chunk renders a full-size image; they are summed into
+        # the channel's image in submission order (biggest tasks first,
+        # so none serializes the tail of the pool; a fixed order, so a
+        # given worker budget always produces the same float rounding)
+        # with at most two per worker plus one alive -- never one per
+        # task, which exhausted the memory of workstations with many
+        # cores and large windows (Windows does not overcommit); the
+        # worker count itself is bounded by the memory available.
+        accumulated: list[tuple[int, lib.FloatArray2D] | None] = [None] * (
+            n_channels
+        )
+
+        def accumulate(task, result):
+            i = task[0]
+            n, image = result
+            if accumulated[i] is None:
+                accumulated[i] = (n, image)
+            else:
+                n_total, total_image = accumulated[i]
+                total_image += image
+                accumulated[i] = (n_total + n, total_image)
 
         if n_workers == 1:
-            chunk_results = [render_rows(*task) for task in tasks]
+            for task in tasks:
+                accumulate(task, render_rows(*task))
         else:
-            # dispatch biggest tasks first so none serializes the tail
-            # of the pool; results are mapped back to task order
-            order = sorted(
-                range(len(tasks)),
-                key=lambda j: tasks[j][2] - tasks[j][1],
-                reverse=True,
-            )
-            chunk_results = [None] * len(tasks)
+            order = sorted(tasks, key=lambda t: t[2] - t[1], reverse=True)
+            window = _CHUNKS_IN_FLIGHT_PER_WORKER * n_workers
+            pending: deque = deque()
             with futures.ThreadPoolExecutor(n_workers) as executor:
-                for j, result in zip(
-                    order,
-                    executor.map(lambda j: render_rows(*tasks[j]), order),
-                ):
-                    chunk_results[j] = result
-
-        # sum each channel's chunk images in fixed row order, so a given
-        # worker budget always produces the same float rounding
-        per_channel = [[] for _ in range(n_channels)]
-        for (i, _, _), result in zip(tasks, chunk_results):
-            per_channel[i].append(result)
-        renderings = []
-        for results in per_channel:
-            n = sum(result[0] for result in results)
-            image = results[0][1]
-            for _, other in results[1:]:
-                image += other
-            renderings.append((n, image))
-        return renderings
+                for task in order:
+                    pending.append((task, executor.submit(render_rows, *task)))
+                    if len(pending) > window:
+                        done_task, future = pending.popleft()
+                        accumulate(done_task, future.result())
+                while pending:
+                    done_task, future = pending.popleft()
+                    accumulate(done_task, future.result())
+        return [result for result in accumulated]
