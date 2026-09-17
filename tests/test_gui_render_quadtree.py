@@ -107,13 +107,14 @@ def test_renders_like_the_library(window):
     assert image.sum() == pytest.approx(n, rel=1e-3)
 
 
-def test_3d_window_renders_the_histogram_instead(window, monkeypatch):
+def test_3d_window_renders_the_quadtree_too(window, monkeypatch):
     monkeypatch.setattr(
         QtWidgets.QMessageBox,
         "information",
         staticmethod(lambda *a, **k: None),
     )
     view = window.view
+    window.display_settings_dlg.quadtree_capacity.setValue(7)
     view.locs[0] = view.locs[0].assign(z=np.zeros(len(view.locs[0])))
     view._pick_shape = "Circle"
     window.tools_settings_dialog.pick_diameter.setValue(12.0 * 130.0)
@@ -121,12 +122,26 @@ def test_3d_window_renders_the_histogram_instead(window, monkeypatch):
     window.open_3d_view()
     rot = window.window_rot
     dialog = rot.display_settings_dlg
-    # synced by button id: the quad-tree button is selected but disabled
-    assert (
-        dialog.blur_methods[dialog.blur_buttongroup.checkedButton()]
-        == "quadtree"
-    )
-    assert not dialog.blur_buttongroup.checkedButton().isEnabled()
-    assert dialog.blur_method() is None
-    assert rot.view_rot.get_render_kwargs()["blur_method"] is None
+    # synced by button id, enabled, with the main window's capacity
+    assert dialog.blur_method() == "quadtree"
+    assert dialog.blur_buttongroup.checkedButton().isEnabled()
+    assert not dialog.quadtree_widgets.isHidden()
+    assert dialog.quadtree_capacity.value() == 7
+    kwargs = rot.view_rot.get_render_kwargs()
+    assert kwargs["blur_method"] == "quadtree"
+    assert kwargs["quadtree_capacity"] == 7
+    # a rotated render works and is linear in the count
+    rot.view_rot.apply_rotation(np.array([0.4, 0.2, 0.0]))
+    rot.view_rot.update_scene(synchronous=True)
+    image = rot.view_rot.image
+    request = rot.view_rot._build_render_request()
+    _, n, _, raw = render.render_scene(**request)
+    assert n > 0
+    np.testing.assert_allclose(image, raw, rtol=1e-5, atol=1e-5)
+    assert image.sum() == pytest.approx(n, rel=1e-3)
+    # rotated previews may subsample (the tree is rebuilt per frame)
+    request = rot.view_rot._build_render_request()
+    request["contrast"] = (0.0, 1.0)
+    assert request["ang"] is not None
+    assert subsample_request(request, lambda population: 10)
     rot.view_rot.stop_render_worker()

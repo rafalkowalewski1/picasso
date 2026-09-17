@@ -135,6 +135,7 @@ def build_animation(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ) = None,
     min_blur_width: float = 0.0,
+    quadtree_capacity: int | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
     single_channel_colormap: str | lib.FloatArray2D = "magma",
@@ -203,6 +204,9 @@ def build_animation(
         localizations which is the median localization precision.
     min_blur_width : float, optional
         Minimum size of blur (camera pixels).
+    quadtree_capacity : int, optional
+        Leaf capacity of the 'quadtree' blur method, see ``render``.
+        Default is None (``lib.RENDER_QUADTREE_CAPACITY_DEFAULT``).
     contrast : tuple of float, optional
         Contrast limits for scaling. If None, contrast is automatically
         determined. If given, only the last checkpoint is used to
@@ -297,10 +301,11 @@ def build_animation(
         "gaussian_iso",
         "smooth",
         "convolve",
+        "quadtree",
         None,
     ), (
         "blur_method must be one of 'gaussian', 'gaussian_iso', 'smooth', "
-        "'convolve', or None."
+        "'convolve', 'quadtree' or None."
     )
     assert (
         isinstance(min_blur_width, (int, float)) and min_blur_width >= 0
@@ -357,6 +362,7 @@ def build_animation(
         image_size=image_size,
         blur_method=blur_method,
         min_blur_width=min_blur_width,
+        quadtree_capacity=quadtree_capacity,
         contrast=contrast,
         invert_colors=invert_colors,
         single_channel_colormap=single_channel_colormap,
@@ -382,6 +388,7 @@ def _build_animation(
         Literal["gaussian", "gaussian_iso", "smooth", "convolve"] | None
     ),
     min_blur_width: float,
+    quadtree_capacity: int | None,
     contrast: tuple[float, float] | None,
     invert_colors: bool,
     single_channel_colormap: str | lib.FloatArray2D,
@@ -440,6 +447,7 @@ def _build_animation(
             ang=rotations[i],
             blur_method=blur_method,
             min_blur_width=min_blur_width,
+            quadtree_capacity=quadtree_capacity,
             contrast=contrast_,
             invert_colors=invert_colors,
             single_channel_colormap=single_channel_colormap,

@@ -211,17 +211,16 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         )
         self.blur_buttongroup.addButton(gaussian_iso_button)
         # the same buttons as the main window's dialog, in the same
-        # order (the windows sync by button id); the adaptive histogram
-        # has no fixed 2D tree in a rotated view, so it is disabled here
-        # and the plain histogram is rendered in its place
+        # order (the windows sync by button id)
         quadtree_button = QtWidgets.QRadioButton(
             "Adaptive histogram (quad-tree)"
         )
         quadtree_button.setToolTip(
-            "Not available in the 3D view yet; the histogram (no blur) is\n"
-            "rendered instead."
+            "Histogram whose bins split while they hold more than the\n"
+            "leaf capacity, so every bin has about the same signal-to-noise\n"
+            "ratio (Baddeley, Cannell & Soeller, 2010). In 3D the tree is\n"
+            "built from the projected localizations for every orientation."
         )
-        quadtree_button.setEnabled(False)
         self.blur_buttongroup.addButton(quadtree_button)
 
         blur_grid.addWidget(points_button, 0, 0, 1, 2)
@@ -245,6 +244,32 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self.min_blur_width.setKeyboardTracking(False)
         self.min_blur_width.valueChanged.connect(self.render_scene_nocache)
         blur_grid.addWidget(self.min_blur_width, 6, 1, 1, 1)
+        # the quad-tree's settings, shown only while it is selected
+        self.quadtree_widgets = QtWidgets.QWidget()
+        quadtree_grid = QtWidgets.QGridLayout(self.quadtree_widgets)
+        quadtree_grid.setContentsMargins(0, 0, 0, 0)
+        capacity_label = QtWidgets.QLabel("Leaf capacity:")
+        capacity_label.setToolTip(
+            "Largest number of localizations a bin of the adaptive\n"
+            "histogram may hold before it is split into four; every bin\n"
+            "then has about the same signal-to-noise ratio,\n"
+            "sqrt(capacity / 2) on average."
+        )
+        quadtree_grid.addWidget(capacity_label, 0, 0, 1, 1)
+        self.quadtree_capacity = QtWidgets.QSpinBox()
+        self.quadtree_capacity.setRange(1, 100000)
+        self.quadtree_capacity.setValue(lib.RENDER_QUADTREE_CAPACITY_DEFAULT)
+        self.quadtree_capacity.setKeyboardTracking(False)
+        self.quadtree_capacity.setToolTip(capacity_label.toolTip())
+        quadtree_grid.addWidget(self.quadtree_capacity, 0, 1, 1, 1)
+        self.quadtree_snr = QtWidgets.QLabel()
+        quadtree_grid.addWidget(self.quadtree_snr, 1, 0, 1, 2)
+        blur_grid.addWidget(self.quadtree_widgets, 7, 0, 1, 2)
+        self.quadtree_capacity.valueChanged.connect(self._update_quadtree_snr)
+        self.quadtree_capacity.valueChanged.connect(self.render_scene_nocache)
+        self._update_quadtree_snr()
+        quadtree_button.toggled.connect(self._toggle_quadtree_widgets)
+        self.quadtree_widgets.setVisible(False)
 
         vbox.addWidget(blur_groupbox)
         self.blur_methods = {
@@ -291,11 +316,21 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self._silent_disp_px_update = False
 
     def blur_method(self) -> str | None:
-        """The blur method to render with in 3D: the selected one, or
-        the histogram where the main window's adaptive histogram is
-        selected (see ``__init__``)."""
-        method = self.blur_methods[self.blur_buttongroup.checkedButton()]
-        return None if method == "quadtree" else method
+        """The selected blur method (``render`` name)."""
+        return self.blur_methods[self.blur_buttongroup.checkedButton()]
+
+    def _update_quadtree_snr(self, *args) -> None:
+        """Show the signal-to-noise ratio the leaf capacity implies
+        (Baddeley et al. 2010, sqrt(N / 2))."""
+        snr = np.sqrt(self.quadtree_capacity.value() / 2.0)
+        self.quadtree_snr.setText(f"Mean SNR per bin \u2248 {snr:.1f}")
+
+    def _toggle_quadtree_widgets(self, checked: bool) -> None:
+        """Show the quad-tree settings only while its blur method is
+        selected, and let the dialog shrink back otherwise."""
+        self.quadtree_widgets.setVisible(checked)
+        if not checked:
+            self.adjustSize()
 
     def on_disp_px_changed(self, value: float) -> None:
         """Set new display pixel size, update contrast and update scene
@@ -736,6 +771,7 @@ class AnimationDialog(lib.Dialog):
             image_size=(width, height),
             blur_method=disp_dlg.blur_method(),
             min_blur_width=disp_dlg.min_blur_width.value() / pixelsize,
+            quadtree_capacity=disp_dlg.quadtree_capacity.value(),
             contrast=(disp_dlg.minimum.value(), disp_dlg.maximum.value()),
             invert_colors=data_dlg.wbackground.isChecked(),
             single_channel_colormap=disp_dlg.colormap.currentText(),
@@ -1242,6 +1278,9 @@ class ViewRotation(QtWidgets.QLabel):
             True
         )
         self.window.display_settings_dlg.colormap.setCurrentText(color)
+        self.window.display_settings_dlg.quadtree_capacity.setValue(
+            w.display_settings_dlg.quadtree_capacity.value()
+        )
 
         # remove measurement points
         self._points = []
@@ -2738,6 +2777,7 @@ class ViewRotation(QtWidgets.QLabel):
             "min_blur_width": float(
                 disp_dlg.min_blur_width.value() / pixelsize
             ),
+            "quadtree_capacity": disp_dlg.quadtree_capacity.value(),
         }
         return kwargs
 

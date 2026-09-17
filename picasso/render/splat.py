@@ -457,17 +457,49 @@ def _render_quadtree(
     pixel, like the histogram's, and ``n`` is the histogram's count in
     view.
 
-    Rendered from the channel's spatial index when ``columns`` carries
-    one (``pyramid``), else from an index built here (a sort of the
-    rows). Rotation is refused: a rotated view has no fixed 2D tree.
+    Unrotated, it renders from the channel's spatial index when
+    ``columns`` carries one (``pyramid``), else from an index built
+    here (a sort of the rows). Rotated (``ang``), it is the same
+    method applied to the projected point set: the rows in view are
+    projected onto the screen (``_locs_rotation_arrays``) and a
+    tree of the projected coordinates is built per render, which costs
+    a sort of the rows in view each time.
     """
-    if ang is not None:
-        raise ValueError(
-            "the quad-tree adaptive histogram cannot render rotated "
-            "localizations (a rotated view has no fixed 2D tree)"
-        )
     if capacity is None:
         capacity = lib.RENDER_QUADTREE_CAPACITY_DEFAULT
+    n_py = int(np.ceil(oversampling * (y_max - y_min)))
+    n_px = int(np.ceil(oversampling * (x_max - x_min)))
+    image = np.zeros((n_py, n_px), dtype=np.float32)
+    if ang is not None:
+        # the projected screen coordinates (display pixels) of the rows
+        # in view, indexed in that frame: the field is the image
+        xs, ys, _, _ = _locs_rotation_arrays(
+            columns, oversampling, x_min, x_max, y_min, y_max, ang
+        )
+        n = len(xs)
+        if n and n_py > 0 and n_px > 0:
+            pyramid = spatial_index.build_render_index_arrays(
+                xs, ys, float(n_px), float(n_py)
+            )
+            sorted_keys, perm, root_px, total_bits = (
+                spatial_index.quadtree_layout(pyramid)
+            )
+            _quadtree_fill(
+                image,
+                sorted_keys,
+                perm,
+                xs,
+                ys,
+                1.0,
+                0.0,
+                0.0,
+                float(n_py),
+                float(n_px),
+                root_px,
+                total_bits,
+                int(capacity),
+            )
+        return n, image
     pyramid = columns.pyramid
     if pyramid is None or pyramid.sorted_keys is None:
         width = lib.get_from_metadata(info, "Width", raise_error=True)
@@ -480,9 +512,6 @@ def _render_quadtree(
     )
     x = columns.x
     y = columns.y
-    n_py = int(np.ceil(oversampling * (y_max - y_min)))
-    n_px = int(np.ceil(oversampling * (x_max - x_min)))
-    image = np.zeros((n_py, n_px), dtype=np.float32)
     if len(perm) and n_py > 0 and n_px > 0:
         _quadtree_fill(
             image,

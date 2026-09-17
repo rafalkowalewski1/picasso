@@ -225,18 +225,82 @@ class TestQuadTree:
         # their overlap, so the total stays near the count in view
         assert image.sum() == pytest.approx(n, rel=0.15)
 
-    def test_rotation_is_refused(self):
+    @pytest.mark.parametrize("capacity", [0, 10])
+    def test_rotated_is_the_tree_of_the_projected_points(self, capacity):
+        # in 3D the method is applied to the projected point set: at
+        # capacity 0 that is exactly the rotated histogram, at any
+        # capacity the total is the count in view
+        rng = np.random.default_rng(6)
+        x, y = _clustered_locs()
+        z = rng.normal(0.0, 2.0, len(x)).astype(np.float32)
+        locs = pd.DataFrame({"x": x, "y": y, "z": z})
+        info = _info(self.W, self.H)
+        viewport = ((8.0, 8.0), (56.0, 56.0))
+        ang = (0.4, 0.3, 0.2)
+        n_h, hist = render.render(
+            locs, info, disp_px_size=130 / 4, viewport=viewport, ang=ang
+        )
+        n_q, quad = render.render(
+            locs,
+            info,
+            disp_px_size=130 / 4,
+            viewport=viewport,
+            blur_method="quadtree",
+            quadtree_capacity=capacity,
+            ang=ang,
+        )
+        assert n_q == n_h
+        assert quad.sum() == pytest.approx(n_q, rel=1e-5)
+        if capacity == 0:
+            assert np.array_equal(hist, quad)
+        else:
+            assert not np.array_equal(hist, quad)  # adaptive bins
+            assert quad.shape == hist.shape
+
+    def test_animation_passes_the_capacity(self, monkeypatch, tmp_path):
+        from picasso.render import animation
+
+        seen = []
+
+        def fake_render_scene(**kwargs):
+            seen.append(kwargs.get("quadtree_capacity"))
+            from PyQt6 import QtGui
+
+            return QtGui.QImage(4, 4, QtGui.QImage.Format.Format_RGB32), 0
+
+        monkeypatch.setattr(animation, "render_scene", fake_render_scene)
+
+        class _Writer:
+            def __init__(self, *a, **k):
+                pass
+
+            def append_data(self, *a, **k):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            animation.imageio, "get_writer", lambda *a, **k: _Writer()
+        )
         x, y = _clustered_locs()
         locs = pd.DataFrame({"x": x, "y": y, "z": np.zeros_like(x)})
-        with pytest.raises(ValueError):
-            render.render(
-                locs,
-                _info(self.W, self.H),
-                disp_px_size=130 / 4,
-                viewport=((0.0, 0.0), (self.H, self.W)),
-                blur_method="quadtree",
-                ang=(0.3, 0.0, 0.0),
-            )
+        from scipy.spatial.transform import Rotation
+
+        viewport = ((0.0, 0.0), (self.H, self.W))
+        animation.build_animation(
+            str(tmp_path / "a.mp4"),
+            locs,
+            _info(self.W, self.H),
+            positions=[(Rotation.identity(), viewport)] * 2,
+            durations=[0.1],
+            disp_px_size=130 / 4,
+            image_size=(16, 16),
+            blur_method="quadtree",
+            quadtree_capacity=7,
+            fps=10,
+        )
+        assert seen and all(c == 7 for c in seen)
 
     def test_scene_uses_the_given_index_on_the_cpu(self, monkeypatch):
         from picasso.render import scene
