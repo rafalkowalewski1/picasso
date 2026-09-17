@@ -3,6 +3,7 @@
 Last change: 17-SEP-2026 CEST
 
 ## 0.11.2
+- Fixed the calibrations stored in the camera config (z, experimental PSF and sCMOS) not being cleared when switching to a camera the config has no entry for.
 - Fixed 3D animations losing full turns
 - 3D animations no longer render each position twice, which held one frame at every position of the sequence.
 - Fixed error when adding new channels when 3D render is open.
