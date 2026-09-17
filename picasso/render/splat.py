@@ -21,7 +21,7 @@ import pandas as pd
 from scipy import signal, ndimage
 from scipy.spatial.transform import Rotation
 
-from .. import lib
+from .. import lib, spatial_index
 from .backend import SplatBackend
 from .kernels import (
     _render_setup,
@@ -33,6 +33,7 @@ from .kernels import (
     _fill_gaussian_theta,
     _fill_gaussian_rot,
     _fill_gaussian_rot_theta,
+    _quadtree_fill,
 )
 from .geometry import to_rotation
 
@@ -51,6 +52,8 @@ def render(
     ang: tuple | Rotation | None = None,
     indices: lib.IntArray1D | None = None,
     global_precision: tuple[float, float] | None = None,
+    quadtree_capacity: int | None = None,
+    render_index: spatial_index.RenderIndexPyramid | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """Render localizations given FOV and blur method.
 
@@ -99,12 +102,22 @@ def render(
         by the caller, so the blur is the same at every zoom level and
         rotation and nothing is recomputed per render. If None
         (default), the median of the rows rendered is used.
+    quadtree_capacity : int, optional
+        Leaf capacity of the 'quadtree' method (bins split while they
+        hold more localizations; SNR per bin about
+        ``sqrt(capacity / 2)``). If None (default),
+        ``lib.RENDER_QUADTREE_CAPACITY_DEFAULT``.
+    render_index : spatial_index.RenderIndexPyramid, optional
+        The spatial index of ``locs`` (all rows, in order), which the
+        'quadtree' method renders from; a GUI passes the one built when
+        the channel was loaded. If None (default), it is built here,
+        which costs a sort of the rows.
 
     Raises
     ------
     Exception
         If blur_method not one of 'gaussian', 'gaussian_iso', 'smooth',
-        'convolve' or None.
+        'convolve', 'quadtree' or None.
 
     Returns
     -------
@@ -115,7 +128,13 @@ def render(
     """
     return _render_arrays(
         _extract_render_columns(
-            locs, blur_method, ang, max_blur_width, indices, global_precision
+            locs,
+            blur_method,
+            ang,
+            max_blur_width,
+            indices,
+            global_precision,
+            render_index,
         ),
         info,
         disp_px_size=disp_px_size,
@@ -123,6 +142,7 @@ def render(
         blur_method=blur_method,
         min_blur_width=min_blur_width,
         ang=ang,
+        quadtree_capacity=quadtree_capacity,
     )
 
 
@@ -147,6 +167,7 @@ class _RenderColumns:
         "z",
         "indices",
         "global_lp",
+        "pyramid",
     )
 
     def __init__(
@@ -160,6 +181,7 @@ class _RenderColumns:
         z=None,
         indices=None,
         global_lp=None,
+        pyramid=None,
     ):
         self.x = x
         self.y = y
@@ -177,6 +199,11 @@ class _RenderColumns:
         #: the channel's median precision), or None to take the median
         #: of the rows given; a GUI computes it once per channel
         self.global_lp = global_lp
+        #: the ``spatial_index.RenderIndexPyramid`` of the whole channel
+        #: (all rows of ``x``, ``y`` in order) for the ``quadtree``
+        #: method, or None to build one on the fly; dropped by ``slice``
+        #: and ``materialize`` since it describes the whole channel only
+        self.pyramid = pyramid
 
     def __len__(self) -> int:
         """Number of rows to render."""
@@ -242,6 +269,7 @@ def _extract_render_columns(
     max_blur_width: float | None = None,
     indices: lib.IntArray1D | None = None,
     global_precision: tuple[float, float] | None = None,
+    render_index: spatial_index.RenderIndexPyramid | None = None,
 ) -> _RenderColumns:
     """Pull the columns ``blur_method`` (and rotation) needs out of the
     DataFrame, converting angle to radians and applying the lpz
@@ -259,7 +287,9 @@ def _extract_render_columns(
     rows without copying the columns (see ``_RenderColumns``); the
     filter above is applied to them as well. ``global_precision`` is
     the ``(lpx, lpy)`` blur of the ``convolve`` method (camera pixels),
-    see ``render``."""
+    see ``render``. ``render_index`` is the channel's pyramid for the
+    ``quadtree`` method; it indexes all rows, so it is only kept when
+    no row selection restricts the render."""
     need_lp = blur_method in ("gaussian", "gaussian_iso", "convolve")
     lpx = locs["lpx"].to_numpy() if need_lp else None
     lpy = locs["lpy"].to_numpy() if need_lp else None
@@ -296,7 +326,10 @@ def _extract_render_columns(
             float(global_precision[1]),
         )
     return _RenderColumns(
-        *columns, indices=indices, global_lp=global_precision
+        *columns,
+        indices=indices,
+        global_lp=global_precision,
+        pyramid=render_index if indices is None else None,
     )
 
 
@@ -311,6 +344,7 @@ def _render_arrays(
     ) = None,
     min_blur_width: float = 0.0,
     ang: tuple | Rotation | None = None,
+    quadtree_capacity: int | None = None,
 ) -> tuple[int, lib.FloatArray2D]:
     """``render`` on pre-extracted column arrays (see ``render`` for
     the parameters). The chunked parallel scheduler calls this per row
@@ -384,8 +418,89 @@ def _render_arrays(
             min_blur_width,
             ang=ang,
         )
+    elif blur_method == "quadtree":
+        # adaptive histogram
+        return _render_quadtree(
+            columns,
+            info,
+            oversampling,
+            y_min,
+            x_min,
+            y_max,
+            x_max,
+            quadtree_capacity,
+            ang=ang,
+        )
     else:
         raise Exception("blur_method not understood.")
+
+
+def _render_quadtree(
+    columns: _RenderColumns,
+    info: dict,
+    oversampling: float,
+    y_min: float,
+    x_min: float,
+    y_max: float,
+    x_max: float,
+    capacity: int | None,
+    ang: tuple | Rotation | None = None,
+) -> tuple[int, lib.FloatArray2D]:
+    """The quad-tree adaptive histogram of Baddeley, Cannell & Soeller
+    (2010): bins are split while they hold more than ``capacity``
+    localizations, so every bin has about the same signal-to-noise
+    ratio (on average the square root of ``capacity / 2``) and the bin
+    size shows the local sampling. Bins never split below a display
+    pixel (the paper's truncation, the zoom level of detail), so at an
+    overview the image is the histogram; a capacity of 0 gives the
+    histogram at any zoom. The image is in localizations per display
+    pixel, like the histogram's, and ``n`` is the histogram's count in
+    view.
+
+    Rendered from the channel's spatial index when ``columns`` carries
+    one (``pyramid``), else from an index built here (a sort of the
+    rows). Rotation is refused: a rotated view has no fixed 2D tree.
+    """
+    if ang is not None:
+        raise ValueError(
+            "the quad-tree adaptive histogram cannot render rotated "
+            "localizations (a rotated view has no fixed 2D tree)"
+        )
+    if capacity is None:
+        capacity = lib.RENDER_QUADTREE_CAPACITY_DEFAULT
+    pyramid = columns.pyramid
+    if pyramid is None or pyramid.sorted_keys is None:
+        width = lib.get_from_metadata(info, "Width", raise_error=True)
+        height = lib.get_from_metadata(info, "Height", raise_error=True)
+        pyramid = spatial_index.build_render_index_arrays(
+            columns.x, columns.y, float(width), float(height)
+        )
+    sorted_keys, perm, root_px, total_bits = spatial_index.quadtree_layout(
+        pyramid
+    )
+    x = columns.x
+    y = columns.y
+    n_py = int(np.ceil(oversampling * (y_max - y_min)))
+    n_px = int(np.ceil(oversampling * (x_max - x_min)))
+    image = np.zeros((n_py, n_px), dtype=np.float32)
+    if len(perm) and n_py > 0 and n_px > 0:
+        _quadtree_fill(
+            image,
+            sorted_keys,
+            perm,
+            x,
+            y,
+            float(oversampling),
+            float(y_min),
+            float(x_min),
+            float(y_max),
+            float(x_max),
+            root_px,
+            total_bits,
+            int(capacity),
+        )
+    in_view = (x > x_min) & (y > y_min) & (x < x_max) & (y < y_max)
+    return int(in_view.sum()), image
 
 
 def _render_hist(
@@ -1164,6 +1279,7 @@ class CpuBackend(SplatBackend):
         ),
         min_blur_width: float,
         ang: tuple | Rotation | None,
+        quadtree_capacity: int | None = None,
     ) -> list[tuple[int, lib.FloatArray2D]]:
         """See ``backend.SplatBackend.render_channels``."""
 
@@ -1179,6 +1295,7 @@ class CpuBackend(SplatBackend):
                 blur_method=blur_method,
                 min_blur_width=min_blur_width,
                 ang=ang,
+                quadtree_capacity=quadtree_capacity,
             )
 
         n_channels = len(columns)

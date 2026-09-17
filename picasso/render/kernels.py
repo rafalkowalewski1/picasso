@@ -976,3 +976,119 @@ def _compose_single(
             out[i, j, 1] = cmap[idx, 1]
             out[i, j, 2] = cmap[idx, 2]
     return out
+
+
+@numba.njit(cache=True, nogil=True)
+def _quadtree_fill(
+    image: lib.FloatArray2D,
+    sorted_keys: lib.IntArray1D,
+    perm: lib.IntArray1D,
+    x: lib.FloatArray1D,
+    y: lib.FloatArray1D,
+    oversampling: float,
+    y_min: float,
+    x_min: float,
+    y_max: float,
+    x_max: float,
+    root_px: float,
+    total_bits: int,
+    capacity: int,
+) -> None:
+    """Paint the quad-tree adaptive histogram (Baddeley, Cannell &
+    Soeller 2010) of the viewport into ``image``.
+
+    ``sorted_keys``, ``perm``, ``root_px`` and ``total_bits`` describe
+    the tree implicit in a channel's spatial index, see
+    ``picasso.spatial_index.quadtree_layout`` for the contract. Depth-
+    first descent from the root over the nodes overlapping the
+    viewport: a node holding more than ``capacity`` rows and wider
+    than a display pixel is split into its four children (their ranges
+    of the permutation found by binary search on the sorted keys); a
+    leaf wider than a pixel spreads its count over the display pixels
+    it covers in proportion to the overlap (the image is in
+    localizations per display pixel, like the histogram); a node no
+    wider than a pixel (or at the finest cell) bins its rows one by
+    one, exactly as ``_fill`` does, so a capacity of 0 gives the
+    histogram.
+    """
+    n = perm.shape[0]
+    n_py, n_px = image.shape
+    px = 1.0 / oversampling
+    cap = 4 * (total_bits + 2)
+    st_d = np.empty(cap, dtype=np.int64)
+    st_ix = np.empty(cap, dtype=np.int64)
+    st_iy = np.empty(cap, dtype=np.int64)
+    st_pre = np.empty(cap, dtype=np.uint64)
+    st_s = np.empty(cap, dtype=np.int64)
+    st_e = np.empty(cap, dtype=np.int64)
+    st_d[0] = 0
+    st_ix[0] = 0
+    st_iy[0] = 0
+    st_pre[0] = np.uint64(0)
+    st_s[0] = 0
+    st_e[0] = n
+    top = 1
+    while top > 0:
+        top -= 1
+        d = st_d[top]
+        ix = st_ix[top]
+        iy = st_iy[top]
+        pre = st_pre[top]
+        s = st_s[top]
+        e = st_e[top]
+        count = e - s
+        if count == 0:
+            continue
+        side = root_px / (1 << d)
+        x0 = ix * side
+        y0 = iy * side
+        x1 = x0 + side
+        y1 = y0 + side
+        if x1 <= x_min or x0 >= x_max or y1 <= y_min or y0 >= y_max:
+            continue
+        if count > capacity and side > px and d < total_bits:
+            shift = np.uint64(2 * (total_bits - d - 1))
+            base_pre = pre << np.uint64(2)
+            lo = s
+            for c in range(4):
+                if c < 3:
+                    hi_key = (base_pre + np.uint64(c + 1)) << shift
+                    hi = s + np.searchsorted(sorted_keys[s:e], hi_key)
+                else:
+                    hi = e
+                st_d[top] = d + 1
+                st_ix[top] = 2 * ix + (c & 1)
+                st_iy[top] = 2 * iy + (c >> 1)
+                st_pre[top] = base_pre + np.uint64(c)
+                st_s[top] = lo
+                st_e[top] = hi
+                top += 1
+                lo = hi
+        elif side > px:
+            # a leaf wider than a pixel: its density over its area
+            rho = count / (side * side)
+            j0 = max(int(np.floor((x0 - x_min) * oversampling)), 0)
+            j1 = min(int(np.floor((x1 - x_min) * oversampling)), n_px - 1)
+            i0 = max(int(np.floor((y0 - y_min) * oversampling)), 0)
+            i1 = min(int(np.floor((y1 - y_min) * oversampling)), n_py - 1)
+            for i in range(i0, i1 + 1):
+                py0 = y_min + i * px
+                oy = min(py0 + px, y1) - max(py0, y0)
+                if oy <= 0:
+                    continue
+                for j in range(j0, j1 + 1):
+                    qx0 = x_min + j * px
+                    ox = min(qx0 + px, x1) - max(qx0, x0)
+                    if ox > 0:
+                        image[i, j] += rho * ox * oy
+        else:
+            # within a pixel (or the finest cell): bin the rows exactly
+            for k in range(s, e):
+                p = perm[k]
+                xx = x[p]
+                yy = y[p]
+                if xx > x_min and xx < x_max and yy > y_min and yy < y_max:
+                    j = int(oversampling * (xx - x_min))
+                    i = int(oversampling * (yy - y_min))
+                    if i < n_py and j < n_px:
+                        image[i, j] += 1.0

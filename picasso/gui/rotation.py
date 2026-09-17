@@ -210,19 +210,33 @@ class DisplaySettingsRotationDialog(lib.Dialog):
             "its individual localization precision, isotropic in xy."
         )
         self.blur_buttongroup.addButton(gaussian_iso_button)
+        # the same buttons as the main window's dialog, in the same
+        # order (the windows sync by button id); the adaptive histogram
+        # has no fixed 2D tree in a rotated view, so it is disabled here
+        # and the plain histogram is rendered in its place
+        quadtree_button = QtWidgets.QRadioButton(
+            "Adaptive histogram (quad-tree)"
+        )
+        quadtree_button.setToolTip(
+            "Not available in the 3D view yet; the histogram (no blur) is\n"
+            "rendered instead."
+        )
+        quadtree_button.setEnabled(False)
+        self.blur_buttongroup.addButton(quadtree_button)
 
         blur_grid.addWidget(points_button, 0, 0, 1, 2)
         blur_grid.addWidget(smooth_button, 1, 0, 1, 2)
         blur_grid.addWidget(convolve_button, 2, 0, 1, 2)
         blur_grid.addWidget(gaussian_button, 3, 0, 1, 2)
         blur_grid.addWidget(gaussian_iso_button, 4, 0, 1, 2)
+        blur_grid.addWidget(quadtree_button, 5, 0, 1, 2)
         convolve_button.setChecked(True)
         self.blur_buttongroup.buttonReleased.connect(self.render_scene_nocache)
         min_blur_label = QtWidgets.QLabel("Min. Blur (nm):")
         min_blur_label.setToolTip(
             "Minimum blur applied to all localizations in nm."
         )
-        blur_grid.addWidget(min_blur_label, 5, 0, 1, 1)
+        blur_grid.addWidget(min_blur_label, 6, 0, 1, 1)
         self.min_blur_width = QtWidgets.QDoubleSpinBox()
         self.min_blur_width.setRange(0, 999999)
         self.min_blur_width.setSingleStep(0.1)
@@ -230,7 +244,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self.min_blur_width.setDecimals(1)
         self.min_blur_width.setKeyboardTracking(False)
         self.min_blur_width.valueChanged.connect(self.render_scene_nocache)
-        blur_grid.addWidget(self.min_blur_width, 5, 1, 1, 1)
+        blur_grid.addWidget(self.min_blur_width, 6, 1, 1, 1)
 
         vbox.addWidget(blur_groupbox)
         self.blur_methods = {
@@ -239,6 +253,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
             convolve_button: "convolve",
             gaussian_button: "gaussian",
             gaussian_iso_button: "gaussian_iso",
+            quadtree_button: "quadtree",
         }
 
         # scalebar
@@ -274,6 +289,13 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         scalebar_grid.addWidget(self.optimal_scalebar_check, 1, 1)
 
         self._silent_disp_px_update = False
+
+    def blur_method(self) -> str | None:
+        """The blur method to render with in 3D: the selected one, or
+        the histogram where the main window's adaptive histogram is
+        selected (see ``__init__``)."""
+        method = self.blur_methods[self.blur_buttongroup.checkedButton()]
+        return None if method == "quadtree" else method
 
     def on_disp_px_changed(self, value: float) -> None:
         """Set new display pixel size, update contrast and update scene
@@ -712,9 +734,7 @@ class AnimationDialog(lib.Dialog):
             segment_rotations=segment_rotations,
             disp_px_size=float(disp_px_size),
             image_size=(width, height),
-            blur_method=disp_dlg.blur_methods[
-                disp_dlg.blur_buttongroup.checkedButton()
-            ],
+            blur_method=disp_dlg.blur_method(),
             min_blur_width=disp_dlg.min_blur_width.value() / pixelsize,
             contrast=(disp_dlg.minimum.value(), disp_dlg.maximum.value()),
             invert_colors=data_dlg.wbackground.isChecked(),
@@ -2506,7 +2526,7 @@ class ViewRotation(QtWidgets.QLabel):
             "Min. density": d.minimum.value(),
             "Max. density": d.maximum.value(),
             "Colormap": d.colormap.currentText(),
-            "Blur method": d.blur_methods[d.blur_buttongroup.checkedButton()],
+            "Blur method": d.blur_method(),
             "Scale bar length (nm)": d.scalebar.value(),
             "Min. blur (nm)": d.min_blur_width.value() / pixelsize,
             "Localizations loaded": self.paths,
@@ -2684,8 +2704,6 @@ class ViewRotation(QtWidgets.QLabel):
         disp_dlg = self.window.display_settings_dlg
         pixelsize = self.window.window.view.pixelsize
 
-        # blur method
-        blur_button = disp_dlg.blur_buttongroup.checkedButton()
         # oversampling
         opt_oversampling = self.display_pixels_per_viewport_pixels(
             viewport=viewport
@@ -2716,7 +2734,7 @@ class ViewRotation(QtWidgets.QLabel):
         kwargs = {
             "disp_px_size": disp_px_size,
             "viewport": viewport,
-            "blur_method": disp_dlg.blur_methods[blur_button],
+            "blur_method": disp_dlg.blur_method(),
             "min_blur_width": float(
                 disp_dlg.min_blur_width.value() / pixelsize
             ),

@@ -182,6 +182,8 @@ def render_scene(
     ang: tuple | Rotation | None = None,
     indices: list | None = None,
     global_precision: list | tuple[float, float] | None = None,
+    quadtree_capacity: int | None = None,
+    render_index: list | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
     single_channel_colormap: str | lib.FloatArray2D = "magma",
@@ -272,6 +274,14 @@ def render_scene(
         quaternion) or a tuple of 3 rotation angles around the x, y
         and z axes in radians (legacy Euler convention, see
         ``rotation_matrix``). If None, locs are not rotated.
+    quadtree_capacity : int, optional
+        Leaf capacity of the 'quadtree' method, see ``render``. If None
+        (default), ``lib.RENDER_QUADTREE_CAPACITY_DEFAULT``.
+    render_index : list of spatial_index.RenderIndexPyramid or None, \
+            optional
+        Per channel, its spatial index for the 'quadtree' method (see
+        ``render``); None entries (or None) build one on the fly.
+        Default is None.
     contrast : tuple of float, optional
         Contrast limits for scaling. If None, contrast is automatically
         determined.
@@ -345,6 +355,8 @@ def render_scene(
             ang=ang,
             indices=indices,
             global_precision=global_precision,
+            quadtree_capacity=quadtree_capacity,
+            render_index=render_index,
             contrast=contrast,
             invert_colors=invert_colors,
             single_channel_colormap=single_channel_colormap,
@@ -378,6 +390,8 @@ def render_scene(
             ang=ang,
             indices=indices,
             global_precision=global_precision,
+            quadtree_capacity=quadtree_capacity,
+            render_index=render_index,
             contrast=contrast,
             relative_intensities=relative_intensities,
             invert_colors=invert_colors,
@@ -409,6 +423,8 @@ def _render_channels(
     ang: tuple | Rotation | None,
     indices: list | None = None,
     global_precision: list | None = None,
+    quadtree_capacity: int | None = None,
+    render_index: list | None = None,
 ) -> list[tuple[int, lib.FloatArray2D]]:
     """Render each channel's raw grayscale image through the selected
     splat backend.
@@ -435,6 +451,13 @@ def _render_channels(
     global_precision : list of tuple or None, optional
         Per channel, the 'convolve' blur (see ``render``); None entries
         (or None) use the median precision of the rows rendered.
+    quadtree_capacity : int or None, optional
+        Leaf capacity of the 'quadtree' method (see ``render``).
+    render_index : list of spatial_index.RenderIndexPyramid or None, \
+            optional
+        Per channel, its spatial index for the 'quadtree' method (see
+        ``render``); None entries (or None) build one on the fly. The
+        method renders on the CPU only.
 
     Returns
     -------
@@ -445,6 +468,8 @@ def _render_channels(
         indices = [None] * len(locs)
     if global_precision is None:
         global_precision = [None] * len(locs)
+    if render_index is None:
+        render_index = [None] * len(locs)
     columns = [
         _extract_render_columns(
             channel,
@@ -453,9 +478,10 @@ def _render_channels(
             max_blur_width,
             channel_indices,
             channel_precision,
+            channel_index,
         )
-        for channel, channel_indices, channel_precision in zip(
-            locs, indices, global_precision
+        for channel, channel_indices, channel_precision, channel_index in zip(
+            locs, indices, global_precision, render_index
         )
     ]
     kwargs = dict(
@@ -464,7 +490,11 @@ def _render_channels(
         blur_method=blur_method,
         min_blur_width=min_blur_width,
         ang=ang,
+        quadtree_capacity=quadtree_capacity,
     )
+    if blur_method == "quadtree":
+        # tree descent over the sorted index: a CPU method
+        return _cpu_backend().render_channels(columns, info, **kwargs)
     n_locs = sum(len(c) for c in columns)
     if ang is not None:
         # a rotated 3D localization costs the CPU far more than a 2D
@@ -534,6 +564,8 @@ def _render_multi_channel(
     ang: tuple | Rotation | None = None,
     indices: list | None = None,
     global_precision: list | None = None,
+    quadtree_capacity: int | None = None,
+    render_index: list | None = None,
     contrast: tuple[float, float] | None = None,
     relative_intensities: list[float] | None = None,
     invert_colors: bool = False,
@@ -566,6 +598,8 @@ def _render_multi_channel(
             ang=ang,
             indices=indices,
             global_precision=global_precision,
+            quadtree_capacity=quadtree_capacity,
+            render_index=render_index,
         )
         n_locs = sum([rendering[0] for rendering in renderings])
         raw_image = np.array([rendering[1] for rendering in renderings])
@@ -656,6 +690,8 @@ def _render_single_channel(
     ang: tuple | Rotation | None = None,
     indices: list | None = None,
     global_precision: tuple[float, float] | list | None = None,
+    quadtree_capacity: int | None = None,
+    render_index: object | list | None = None,
     contrast: tuple[float, float] | None = None,
     invert_colors: bool = False,
     single_channel_colormap: str = "magma",
@@ -678,6 +714,10 @@ def _render_single_channel(
             and not np.isscalar(global_precision[0])
         ):
             global_precision = [global_precision]  # one channel's pair
+        if render_index is not None and not isinstance(
+            render_index, (list, tuple)
+        ):
+            render_index = [render_index]  # a single channel's pyramid
         ((n_locs, raw_image),) = _render_channels(
             [locs],
             [info],
@@ -689,6 +729,8 @@ def _render_single_channel(
             ang=ang,
             indices=indices,
             global_precision=global_precision,
+            quadtree_capacity=quadtree_capacity,
+            render_index=render_index,
         )
     vmin, vmax = contrast if contrast is not None else (None, None)
     autoscale = True if contrast is None else False

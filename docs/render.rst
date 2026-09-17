@@ -209,11 +209,12 @@ Define the minimum and maximum density of the and select a colormap. Over 100 co
 Blur
 ^^^^
 Select a blur method. Available options are:
-* None
-* One-Pixel-Blur
-* Individual Localization Precision
-* Individual Localization Precision, iso
-* Global Localization Precision
+
+* None: each localization adds one count to the display pixel it falls in (a histogram).
+* One-Pixel-Blur: the histogram blurred with a Gaussian of one display pixel.
+* Individual Localization Precision: each localization is drawn as a Gaussian whose width is its own localization precision (``lpx``, ``lpy``); *iso* uses the mean of the two. Note that this blurs the data a second time by the localization error already contained in the positions, which costs a factor of about 1.4 in resolution (Baddeley, Cannell & Soeller, *Microsc. Microanal.* 2010).
+* Global Localization Precision: every localization is drawn with the same Gaussian, the median precision of the whole channel (computed once per channel).
+* Adaptive Histogram (Quad-Tree): the quad-tree adaptive histogram of Baddeley, Cannell & Soeller (2010). A bin is split into four while it holds more localizations than the **leaf capacity**, so every bin has about the same signal-to-noise ratio whatever the local density: bin counts are Poisson distributed and bins hold between about a quarter of the capacity and the capacity, so the mean SNR is the square root of half the capacity (the paper's estimate; the dialog shows it), and the bin size shows the local sampling: large bins where localizations are sparse, small ones where they are dense. Choose the capacity below the number of localizations of the smallest structure you want to see; structures with fewer than about half the capacity are merged into their surroundings, which suppresses spurious detail in undersampled regions. The default of 10 (SNR about 2.2) suits DNA-PAINT data with tens of localizations per binding site; the original paper used 5 for STORM data. Bins never split below a display pixel, so zoomed out the image is the histogram; the mode renders on the CPU from the spatial index of each channel (see :ref:`files <spatial-index>`), which makes it fast at any zoom. It is not available in the 3D rotation window yet, which renders the histogram in its place.
 
 Camera
 ^^^^^^

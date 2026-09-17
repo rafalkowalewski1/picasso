@@ -2722,15 +2722,21 @@ class ExportKwargsDialog(lib.Dialog):
                 "Global loc. prec.",
                 "Individual loc. prec.",
                 "Individual loc. prec., iso",
+                "Adaptive hist. (quad-tree)",
             ]
         )
         current_button = disp_settings.blur_methods[
             disp_settings.blur_buttongroup.checkedButton()
         ]
         self.blur_method.setCurrentIndex(
-            ["None", "smooth", "convolve", "gaussian", "gaussian_iso"].index(
-                current_button
-            )
+            [
+                "None",
+                "smooth",
+                "convolve",
+                "gaussian",
+                "gaussian_iso",
+                "quadtree",
+            ].index(current_button)
         )
         layout.addRow("Blur method", self.blur_method)
 
@@ -6781,19 +6787,30 @@ class DisplaySettingsDialog(lib.Dialog):
             "its individual localization precision, isotropic in xy."
         )
         self.blur_buttongroup.addButton(gaussian_iso_button)
+        quadtree_button = QtWidgets.QRadioButton(
+            "Adaptive Histogram (Quad-Tree)"
+        )
+        quadtree_button.setToolTip(
+            "Histogram whose bins split while they hold more than the\n"
+            "leaf capacity, so every bin has about the same signal-to-noise\n"
+            "ratio and the bin size shows the local sampling\n"
+            "(Baddeley, Cannell & Soeller, 2010). No blur is added."
+        )
+        self.blur_buttongroup.addButton(quadtree_button)
 
         blur_grid.addWidget(points_button, 0, 0, 1, 2)
         blur_grid.addWidget(smooth_button, 1, 0, 1, 2)
         blur_grid.addWidget(convolve_button, 2, 0, 1, 2)
         blur_grid.addWidget(gaussian_button, 3, 0, 1, 2)
         blur_grid.addWidget(gaussian_iso_button, 4, 0, 1, 2)
+        blur_grid.addWidget(quadtree_button, 5, 0, 1, 2)
         convolve_button.setChecked(True)
         self.blur_buttongroup.buttonReleased.connect(self.render_scene)
         min_blur_label = QtWidgets.QLabel("Min. blur (nm):")
         min_blur_label.setToolTip(
             "Minimum blur applied to each localization (in nm)."
         )
-        blur_grid.addWidget(min_blur_label, 5, 0, 1, 1)
+        blur_grid.addWidget(min_blur_label, 6, 0, 1, 1)
         self.min_blur_width = QtWidgets.QDoubleSpinBox()
         self.min_blur_width.setRange(0, 999999)
         self.min_blur_width.setSingleStep(0.1)
@@ -6801,7 +6818,38 @@ class DisplaySettingsDialog(lib.Dialog):
         self.min_blur_width.setDecimals(1)
         self.min_blur_width.setKeyboardTracking(False)
         self.min_blur_width.valueChanged.connect(self.render_scene)
-        blur_grid.addWidget(self.min_blur_width, 5, 1, 1, 1)
+        blur_grid.addWidget(self.min_blur_width, 6, 1, 1, 1)
+        # the quad-tree's settings
+        self.quadtree_widgets = QtWidgets.QWidget()
+        quadtree_grid = QtWidgets.QGridLayout(self.quadtree_widgets)
+        quadtree_grid.setContentsMargins(0, 0, 0, 0)
+        capacity_label = QtWidgets.QLabel("Leaf capacity:")
+        capacity_label.setToolTip(
+            "Largest number of localizations a bin of the adaptive\n"
+            "histogram may hold before it is split into four. Bins then\n"
+            "hold between about a quarter of the capacity and the\n"
+            "capacity, so their Poisson counting noise gives every bin\n"
+            "about the same signal-to-noise ratio, sqrt(capacity / 2) on\n"
+            "average (Baddeley et al. 2010); structures with fewer\n"
+            "localizations than about half the capacity are merged into\n"
+            "larger bins."
+        )
+        quadtree_grid.addWidget(capacity_label, 0, 0, 1, 1)
+        self.quadtree_capacity = QtWidgets.QSpinBox()
+        self.quadtree_capacity.setRange(1, 100000)
+        self.quadtree_capacity.setValue(lib.RENDER_QUADTREE_CAPACITY_DEFAULT)
+        self.quadtree_capacity.setKeyboardTracking(False)
+        self.quadtree_capacity.setToolTip(capacity_label.toolTip())
+        quadtree_grid.addWidget(self.quadtree_capacity, 0, 1, 1, 1)
+        self.quadtree_snr = QtWidgets.QLabel()
+        self.quadtree_snr.setToolTip(capacity_label.toolTip())
+        quadtree_grid.addWidget(self.quadtree_snr, 1, 0, 1, 2)
+        blur_grid.addWidget(self.quadtree_widgets, 7, 0, 1, 2)
+        self.quadtree_capacity.valueChanged.connect(self._update_quadtree_snr)
+        self.quadtree_capacity.valueChanged.connect(self.render_scene)
+        self._update_quadtree_snr()
+        quadtree_button.toggled.connect(self._toggle_quadtree_widgets)
+        self.quadtree_widgets.setVisible(False)
 
         vbox.addWidget(blur_groupbox)
         self.blur_methods = {
@@ -6810,6 +6858,7 @@ class DisplaySettingsDialog(lib.Dialog):
             convolve_button: "convolve",
             gaussian_button: "gaussian",
             gaussian_iso_button: "gaussian_iso",
+            quadtree_button: "quadtree",
         }
 
         # Camera_parameters
@@ -7013,6 +7062,20 @@ class DisplaySettingsDialog(lib.Dialog):
     def on_zoom_changed(self, value: float) -> None:
         """Zoom the image in the main window."""
         self.window.view.set_zoom(value)
+
+    def _update_quadtree_snr(self, *args) -> None:
+        """Show the signal-to-noise ratio the leaf capacity implies:
+        bins hold about half the capacity on average and their counts
+        are Poisson distributed (Baddeley et al. 2010, sqrt(N / 2))."""
+        snr = np.sqrt(self.quadtree_capacity.value() / 2.0)
+        self.quadtree_snr.setText(f"Mean SNR per bin \u2248 {snr:.1f}")
+
+    def _toggle_quadtree_widgets(self, checked: bool) -> None:
+        """Show the quad-tree settings only while its blur method is
+        selected, and let the dialog shrink back otherwise."""
+        self.quadtree_widgets.setVisible(checked)
+        if not checked:
+            self.adjustSize()
 
     def set_disp_px_silently(self, disp_px_size: int) -> None:
         """Change the value of self.disp_px_size in the background."""
@@ -9532,14 +9595,18 @@ class View(QtWidgets.QLabel):
             kwargs["viewport"], VIEWPORT_MARGIN
         )
         kwargs["viewport"] = rendered_viewport
+        # the adaptive histogram renders whole channels from their
+        # spatial index (it culls to the viewport itself)
+        quadtree = kwargs["blur_method"] == "quadtree"
         locs, infos = self._prepare_locs_for_rendering(
-            viewport=rendered_viewport
+            viewport=None if quadtree else rendered_viewport
         )
         # a backend with resident uploads gets whole channels plus the
         # pyramid's row selection (the CPU path slices the channels)
         indices = None
-        if self._persistent_uploads():
+        if self._persistent_uploads() and not quadtree:
             indices = self._render_indices(rendered_viewport)
+        render_index = self._render_pyramids(locs) if quadtree else None
         cmap = self.window.display_settings_dlg.colormap.currentText()
         if cmap == "Custom":
             cmap = np.uint8(np.round(255 * self.custom_cmap))
@@ -9551,6 +9618,7 @@ class View(QtWidgets.QLabel):
                 locs=locs,
                 info=infos,
                 indices=indices,
+                render_index=render_index,
                 global_precision=self._global_precisions(
                     locs, kwargs["blur_method"]
                 ),
@@ -9649,6 +9717,30 @@ class View(QtWidgets.QLabel):
             INTERACTION_SUBSAMPLE_AUTO,
             int(INTERACTION_SUBSAMPLE_FRACTION * population),
         )
+
+    def _render_pyramids(self, locs):
+        """Per channel of ``locs`` (whole channels, as prepared without
+        a viewport), the render pyramid the quad-tree adaptive
+        histogram renders from: a single pyramid for a bare DataFrame,
+        a list for a list of channels. None for the paths that rebuild
+        channels per render (render by property, group splitting, the
+        z slicer): the renderer then builds an index on the fly."""
+        if self.window.display_settings_dlg.render_check.isChecked():
+            return None
+        if self.window.slicer_dialog.slicer_radio_button.isChecked():
+            return None
+        if len(self.locs) == 1 and "group" in self.locs[0].columns:
+            return None
+        pyramids = []
+        for i in range(len(self.locs)):
+            if len(self.locs) > 1 and not (
+                self.window.dataset_dialog.checks[i].isChecked()
+            ):
+                continue
+            pyramids.append(self._ensure_render_index(i))
+        if isinstance(locs, pd.DataFrame):
+            return pyramids[0] if pyramids else None
+        return pyramids
 
     def _render_indices(self, viewport: tuple) -> list | None:
         """Per channel, in the order ``_prepare_locs_for_rendering``
@@ -10111,6 +10203,7 @@ class View(QtWidgets.QLabel):
                 "Global loc. prec.": "convolve",
                 "Individual loc. prec.": "gaussian",
                 "Individual loc. prec., iso": "gaussian_iso",
+                "Adaptive hist. (quad-tree)": "quadtree",
             }[
                 blur_method
             ]  # convert from display name to render name
@@ -10156,6 +10249,7 @@ class View(QtWidgets.QLabel):
             "blur_method": blur_method,
             "min_blur_width": min_blur_width,
             "max_blur_width": max_blur_width,
+            "quadtree_capacity": disp_dlg.quadtree_capacity.value(),
         }
         return kwargs
 
@@ -12099,9 +12193,11 @@ class View(QtWidgets.QLabel):
         # restrict each channel to the active viewport via the
         # render-index pyramid so the renderer doesn't have to do a
         # full-N viewport scan on every redraw
+        quadtree = kwargs["blur_method"] == "quadtree"
         locs, infos = self._prepare_locs_for_rendering(
-            viewport=kwargs["viewport"]
+            viewport=None if quadtree else kwargs["viewport"]
         )
+        render_index = self._render_pyramids(locs) if quadtree else None
 
         # prepare other keywords for rendering
         cmap = self.window.display_settings_dlg.colormap.currentText()
@@ -12115,6 +12211,7 @@ class View(QtWidgets.QLabel):
         qimage, n_locs, (vmin, vmax), raw_image = render.render_scene(
             locs=locs,
             info=infos,
+            render_index=render_index,
             global_precision=self._global_precisions(
                 locs, kwargs["blur_method"]
             ),

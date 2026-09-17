@@ -119,6 +119,76 @@ class TestQueryCircle:
 
 
 # ---------------------------------------------------------------------------
+# Quad-tree layout
+# ---------------------------------------------------------------------------
+
+
+def _clustered_locs(n=2000, width=64.0, height=64.0, seed=0):
+    rng = np.random.default_rng(seed)
+    x = np.concatenate(
+        [rng.uniform(0, width, n // 2), rng.normal(20, 1.5, n // 2)]
+    )
+    y = np.concatenate(
+        [rng.uniform(0, height, n // 2), rng.normal(40, 1.5, n // 2)]
+    )
+    keep = (x > 0) & (x < width) & (y > 0) & (y < height)
+    return x[keep].astype(np.float32), y[keep].astype(np.float32)
+
+
+class TestQuadTreeLayout:
+    W = H = 64.0
+
+    def test_keys_are_sorted_and_refine_the_blocks(self):
+        x, y = _clustered_locs()
+        pyramid = spatial_index.build_render_index_arrays(x, y, self.W, self.H)
+        keys = pyramid.sorted_keys
+        assert keys is not None and len(keys) == len(x)
+        assert np.all(np.diff(keys.astype(np.int64)) >= 0)
+        # the base-level block tables still describe the permutation
+        info = _info(self.W, self.H)
+        locs = pd.DataFrame({"x": x, "y": y})
+        assert spatial_index.validate_render_index(pyramid, locs, info)
+        assert pyramid.root_bits == 6 and pyramid.fine_bits == 8
+
+    def test_layout_contract(self):
+        x, y = _clustered_locs()
+        pyramid = spatial_index.build_render_index_arrays(x, y, self.W, self.H)
+        keys, perm, root_px, total_bits = spatial_index.quadtree_layout(
+            pyramid
+        )
+        assert root_px == pyramid.block_sizes[0] * 2**pyramid.root_bits
+        assert total_bits == pyramid.root_bits + pyramid.fine_bits
+        # every node's key range holds exactly the rows inside its square
+        rng = np.random.default_rng(1)
+        for _ in range(50):
+            d = int(rng.integers(1, 8))
+            ix, iy = (int(v) for v in rng.integers(0, 2**d, 2))
+            # the prefix of (ix, iy): interleave d bits, x in the even bits
+            prefix = 0
+            for bit in range(d):
+                prefix |= ((ix >> bit) & 1) << (2 * bit)
+                prefix |= ((iy >> bit) & 1) << (2 * bit + 1)
+            shift = 2 * (total_bits - d)
+            lo = np.searchsorted(keys, np.uint64(prefix << shift))
+            hi = np.searchsorted(keys, np.uint64((prefix + 1) << shift))
+            side = root_px / 2**d
+            inside = (
+                (x >= ix * side)
+                & (x < (ix + 1) * side)
+                & (y >= iy * side)
+                & (y < (iy + 1) * side)
+            )
+            assert np.array_equal(np.sort(perm[lo:hi]), np.nonzero(inside)[0])
+
+    def test_pyramid_without_keys_is_refused(self):
+        x, y = _clustered_locs()
+        pyramid = spatial_index.build_render_index_arrays(x, y, self.W, self.H)
+        pyramid.sorted_keys = None
+        with pytest.raises(ValueError):
+            spatial_index.quadtree_layout(pyramid)
+
+
+# ---------------------------------------------------------------------------
 # Persistence in the localizations file
 # ---------------------------------------------------------------------------
 
@@ -149,9 +219,16 @@ class TestPersistence:
         for a, b in zip(stored.block_ends, built.block_ends):
             assert np.array_equal(a, b)
         assert (stored.width, stored.height) == (self.W, self.H)
+        assert (stored.root_bits, stored.fine_bits) == (
+            built.root_bits,
+            built.fine_bits,
+        )
+        assert stored.sorted_keys is None  # unchecked: no keys yet
         assert spatial_index.validate_render_index(stored, locs, info)
+        assert np.array_equal(stored.sorted_keys, built.sorted_keys)
         loaded = spatial_index.load_render_index(path, locs, info)
         assert loaded is not None
+        assert loaded.sorted_keys is not None
         # and it queries like the built one
         vp = ((10.0, 10.0), (30.0, 40.0))
         assert np.array_equal(

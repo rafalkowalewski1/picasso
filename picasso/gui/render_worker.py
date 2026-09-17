@@ -163,6 +163,11 @@ def subsample_request(request: dict, target_for: Callable[[int], int]) -> bool:
         False when subsampling is disabled or not needed (the request
         is left untouched).
     """
+    if request.get("blur_method") == "quadtree":
+        # the adaptive histogram renders from the channel's index over
+        # all its rows; a strided subset has none, and its overview is
+        # cheap enough to render whole
+        return False
     locs = request["locs"]
     single = isinstance(locs, pd.DataFrame)
     channels = [locs] if single else locs

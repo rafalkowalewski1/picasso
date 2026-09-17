@@ -840,9 +840,12 @@ class WgpuBackend(SplatBackend):
         ),
         min_blur_width: float,
         ang: tuple | Rotation | None,
+        quadtree_capacity: int | None = None,
     ) -> list[tuple[int, lib.FloatArray2D]]:
         """Render each channel offscreen on the GPU (see
-        ``backend.SplatBackend.render_channels``)."""
+        ``backend.SplatBackend.render_channels``). The ``quadtree``
+        method is CPU-only (``scene._render_channels`` never sends it
+        here; ``quadtree_capacity`` is accepted for the contract)."""
         if blur_method not in (
             None,
             "gaussian",
