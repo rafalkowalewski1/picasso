@@ -3,6 +3,8 @@
 Last change: 17-SEP-2026 CEST
 
 ## 0.11.2
+- Fixed 3D animations losing full turns
+- 3D animations no longer render each position twice, which held one frame at every position of the sequence.
 - Fixed error when adding new channels when 3D render is open.
 - Updated readme.txt for both installers regarding camera config and plugins.
 

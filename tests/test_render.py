@@ -1842,6 +1842,56 @@ class TestAnimationSequence:
             rotations[2].as_rotvec(), [0.0, 0.0, np.pi / 2], atol=1e-6
         )
 
+    def test_full_turn_survives_off_axis_residual(self):
+        """A segment of more than one turn keeps its turns even when
+        the two checkpoints are nearly the same orientation (the turn
+        cannot be read off the checkpoints, so the given path defines
+        it)."""
+        R1 = Rotation.identity()
+        # a wobbly full turn plus 18 degrees around y: the checkpoints
+        # differ by a small, mostly off-axis rotation
+        R2 = Rotation.from_rotvec(np.radians([-0.8, 18.0, -0.5]))
+        segment = np.radians([-0.8, 378.0, -0.5])
+        rotations, _ = render._animation_sequence(
+            positions=[(R1, FULL_VIEWPORT), (R2, FULL_VIEWPORT)],
+            durations=[1.0],
+            fps=60,
+            segment_rotations=[segment],
+        )
+        swept = sum(
+            (rotations[i + 1] * rotations[i].inv()).magnitude()
+            for i in range(len(rotations) - 1)
+        )
+        assert np.degrees(swept) == pytest.approx(378.0, abs=1.0)
+        assert (rotations[-1] * R2.inv()).magnitude() == pytest.approx(
+            0.0, abs=1e-9
+        )
+
+    def test_segments_do_not_repeat_checkpoints(self):
+        """Every checkpoint is rendered once, so no frame is held twice
+        at the junction between two segments."""
+        R1 = Rotation.identity()
+        R2 = Rotation.from_rotvec([0.0, 0.0, np.pi / 2])
+        R3 = Rotation.from_rotvec([0.0, 0.0, np.pi])
+        positions = [
+            (R1, FULL_VIEWPORT),
+            (R2, FULL_VIEWPORT),
+            (R3, FULL_VIEWPORT),
+        ]
+        rotations, viewports = render._animation_sequence(
+            positions, [1.0, 1.0], fps=4
+        )
+        assert len(rotations) == 8
+        assert len(viewports) == 8
+        steps = [
+            (rotations[i + 1] * rotations[i].inv()).magnitude()
+            for i in range(len(rotations) - 1)
+        ]
+        assert min(steps) > 1e-9
+        assert (rotations[-1] * R3.inv()).magnitude() == pytest.approx(
+            0.0, abs=1e-9
+        )
+
     def test_multi_segment_viewports(self):
         """Viewports interpolate linearly per segment."""
         R = Rotation.identity()
