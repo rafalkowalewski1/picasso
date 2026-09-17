@@ -231,11 +231,16 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         blur_grid.addWidget(quadtree_button, 5, 0, 1, 2)
         convolve_button.setChecked(True)
         self.blur_buttongroup.buttonReleased.connect(self.render_scene_nocache)
+        # the minimum blur, shown only for the Gaussian methods that
+        # use it (a container, so the grid keeps no empty row otherwise)
+        self.min_blur_widgets = QtWidgets.QWidget()
+        min_blur_grid = QtWidgets.QGridLayout(self.min_blur_widgets)
+        min_blur_grid.setContentsMargins(0, 0, 0, 0)
         min_blur_label = QtWidgets.QLabel("Min. Blur (nm):")
         min_blur_label.setToolTip(
             "Minimum blur applied to all localizations in nm."
         )
-        blur_grid.addWidget(min_blur_label, 6, 0, 1, 1)
+        min_blur_grid.addWidget(min_blur_label, 0, 0, 1, 1)
         self.min_blur_width = QtWidgets.QDoubleSpinBox()
         self.min_blur_width.setRange(0, 999999)
         self.min_blur_width.setSingleStep(0.1)
@@ -243,7 +248,8 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self.min_blur_width.setDecimals(1)
         self.min_blur_width.setKeyboardTracking(False)
         self.min_blur_width.valueChanged.connect(self.render_scene_nocache)
-        blur_grid.addWidget(self.min_blur_width, 6, 1, 1, 1)
+        min_blur_grid.addWidget(self.min_blur_width, 0, 1, 1, 1)
+        blur_grid.addWidget(self.min_blur_widgets, 6, 0, 1, 2)
         # the quad-tree's settings, shown only while it is selected
         self.quadtree_widgets = QtWidgets.QWidget()
         quadtree_grid = QtWidgets.QGridLayout(self.quadtree_widgets)
@@ -268,7 +274,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self.quadtree_capacity.valueChanged.connect(self._update_quadtree_snr)
         self.quadtree_capacity.valueChanged.connect(self.render_scene_nocache)
         self._update_quadtree_snr()
-        quadtree_button.toggled.connect(self._toggle_quadtree_widgets)
+        self.blur_buttongroup.buttonToggled.connect(self._toggle_blur_widgets)
         self.quadtree_widgets.setVisible(False)
 
         vbox.addWidget(blur_groupbox)
@@ -325,12 +331,34 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         snr = np.sqrt(self.quadtree_capacity.value() / 2.0)
         self.quadtree_snr.setText(f"Mean SNR per bin \u2248 {snr:.1f}")
 
-    def _toggle_quadtree_widgets(self, checked: bool) -> None:
-        """Show the quad-tree settings only while its blur method is
-        selected, and let the dialog shrink back otherwise."""
-        self.quadtree_widgets.setVisible(checked)
-        if not checked:
-            self.adjustSize()
+    def _toggle_blur_widgets(self, *args) -> None:
+        """Show only the settings the selected blur method uses: the
+        minimum blur for the Gaussian methods, the leaf capacity for
+        the quad-tree. The dialog then grows or shrinks by exactly the
+        change of its content (``_follow_content_height``), so it keeps
+        the size the user gave it and shows no empty space."""
+        method = self.blur_methods[self.blur_buttongroup.checkedButton()]
+        content = self
+        if getattr(self, "_content_height", None) is None:
+            self._content_height = content.sizeHint().height()
+        self.min_blur_widgets.setVisible(
+            method in ("gaussian", "gaussian_iso", "convolve")
+        )
+        self.quadtree_widgets.setVisible(method == "quadtree")
+        # the layouts settle in the event loop; measure afterwards
+        QtCore.QTimer.singleShot(0, self._follow_content_height)
+
+    def _follow_content_height(self) -> None:
+        """Resize the dialog by the change of its content's height since
+        the last measurement (see ``_toggle_blur_widgets``)."""
+        content = self
+        height = content.sizeHint().height()
+        previous = self._content_height
+        self._content_height = height
+        if self.isVisible() and height != previous:
+            self.resize(
+                self.width(), max(self.height() + height - previous, 1)
+            )
 
     def on_disp_px_changed(self, value: float) -> None:
         """Set new display pixel size, update contrast and update scene

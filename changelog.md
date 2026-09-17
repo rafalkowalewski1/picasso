@@ -58,6 +58,7 @@ Last change: 17-SEP-2026 CEST
 - The `scipy.ndimage.filters` deprecation warning is gone.
 - Render no longer fails on a `Render` settings section without a `Colormap` entry.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
+- The display settings (main and 3D window) show the minimum blur only for the Gaussian blur methods that use it.
 
 ## 0.11.1
 

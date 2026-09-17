@@ -45,11 +45,31 @@ def window(qt_offscreen, tmp_path):
 def test_settings_show_only_while_the_method_is_selected(window):
     dialog = window.display_settings_dlg
     assert not dialog.quadtree_widgets.isHidden()  # quadtree selected
+    assert dialog.min_blur_widgets.isHidden()  # no blur to bound
     _select(dialog, "gaussian")
     assert dialog.quadtree_widgets.isHidden()
     assert not dialog.quadtree_capacity.isVisibleTo(dialog)
+    assert not dialog.min_blur_widgets.isHidden()
     _select(dialog, "quadtree")
     assert not dialog.quadtree_widgets.isHidden()
+
+
+@pytest.mark.parametrize(
+    "method,min_blur",
+    [
+        (None, False),
+        ("smooth", False),
+        ("convolve", True),
+        ("gaussian", True),
+        ("gaussian_iso", True),
+        ("quadtree", False),
+    ],
+)
+def test_minimum_blur_shows_only_where_it_applies(window, method, min_blur):
+    dialog = window.display_settings_dlg
+    _select(dialog, method)
+    assert dialog.min_blur_widgets.isHidden() is not min_blur
+    assert dialog.quadtree_widgets.isHidden() is not (method == "quadtree")
 
 
 def test_dialog_offers_the_method_with_its_capacity(window):
@@ -126,6 +146,7 @@ def test_3d_window_renders_the_quadtree_too(window, monkeypatch):
     assert dialog.blur_method() == "quadtree"
     assert dialog.blur_buttongroup.checkedButton().isEnabled()
     assert not dialog.quadtree_widgets.isHidden()
+    assert dialog.min_blur_widgets.isHidden()  # the 3D dialog hides it too
     assert dialog.quadtree_capacity.value() == 7
     kwargs = rot.view_rot.get_render_kwargs()
     assert kwargs["blur_method"] == "quadtree"
