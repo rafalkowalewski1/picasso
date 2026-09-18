@@ -1,9 +1,11 @@
 # Changelog
 
-Last change: 17-SEP-2026 CEST
+Last change: 18-SEP-2026 CEST
 
 ## 0.11.2
 - Fixed the calibrations stored in the camera config (z, experimental PSF and sCMOS) not being cleared when switching to a camera the config has no entry for.
+- Render saves the color bar (LUT) of the rendered property next to every image exported while rendering by property (`*_colorbar.png`), from the main and from the 3D window.
+- Fixed Render failing to start when `~/.picasso/settings.yaml` holds a `Render` section without a `Colormap` entry.
 - Fixed 3D animations losing full turns
 - 3D animations no longer render each position twice, which held one frame at every position of the sequence.
 - Fixed error when adding new channels when 3D render is open.

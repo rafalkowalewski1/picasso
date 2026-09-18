@@ -28,6 +28,9 @@ INITIAL_REL_MAXIMUM = 0.5
 N_GROUP_COLORS = render.N_GROUP_COLORS  # 8
 SHIFT = 0.1
 ZOOM = 9 / 7
+# suffix of the color bar saved next to an image exported while
+# rendering by property
+COLORBAR_SUFFIX = "_colorbar"
 
 
 class DisplaySettingsRotationDialog(lib.Dialog):
@@ -1830,6 +1833,8 @@ class ViewRotation(QtWidgets.QLabel):
         scalebar = scalebar_box.isChecked()
         if scalebar:
             check_ext.append("_scalebar.png")
+        if self.x_render_state:
+            check_ext.append(COLORBAR_SUFFIX + io.colorbar_export_format())
         path, ext = lib.get_save_filename_ext_dialog(
             self,
             "Save image",
@@ -1839,6 +1844,7 @@ class ViewRotation(QtWidgets.QLabel):
         )
         if path:
             self.qimage.save(path)
+            self.save_property_colorbar(path)
             self.export_current_view_info(path)
             if not scalebar:
                 self.set_optimal_scalebar(force=True)
@@ -1847,6 +1853,25 @@ class ViewRotation(QtWidgets.QLabel):
                 self.qimage.save(os.path.splitext(path)[0] + "_scalebar.png")
                 scalebar_box.setChecked(False)
                 self.update_scene()
+
+    def save_property_colorbar(self, path: str) -> None:
+        """Save the color bar (LUT) of the rendered property next to an
+        exported image, as ``*_colorbar.*``.
+
+        The color bar is saved by the main window, which holds the
+        colormap and the property values that the rotated view is
+        rendered with, and the format it is saved in. Does nothing if
+        rendering by property is inactive.
+
+        Parameters
+        ----------
+        path : str
+            Path that the image itself was saved to. The color bar is
+            saved next to it.
+        """
+        if not self.x_render_state:
+            return
+        self.window.window.view.save_property_colorbar(path)
 
     def export_current_view_info(self, path: str) -> None:
         """Export current view's information."""
@@ -1877,6 +1902,12 @@ class ViewRotation(QtWidgets.QLabel):
             "Localizations loaded": self.paths,
             "Colors": colors,
         }
+        if self.x_render_state:  # rendering by property
+            info["Render property"] = self.x_property
+            info["Render property min."] = self.x_min_val
+            info["Render property max."] = self.x_max_val
+            info["Render property colors"] = self.x_n_colors
+            info["Colormap property"] = self.x_colormap
         path, ext = os.path.splitext(path)
         path = path + ".yaml"
         io.save_info(path, [info])
