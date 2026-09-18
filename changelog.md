@@ -1,6 +1,6 @@
 # Changelog
 
-Last change: 17-SEP-2026 CEST
+Last change: 18-SEP-2026 CEST
 
 ## Unreleased
 
@@ -57,11 +57,22 @@ Last change: 17-SEP-2026 CEST
 
 ### Fixes
 - The `scipy.ndimage.filters` deprecation warning is gone.
-- Render no longer fails on a `Render` settings section without a `Colormap` entry.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
 - `View > Show info` names the reason when a render fell back from the GPU to the CPU (for example a channel above the card's storage-binding limit).
 - Fixed `MemoryError: Allocation failed` while rendering on workstations: the multi-threaded CPU renderer kept every row chunk's full-size image until the end of a render, about two per worker; the chunks are now summed as they arrive, at most one image per worker plus one is alive, and the number of workers shrinks when the memory available at that moment would not hold them.
 - The display settings (main and 3D window) show the minimum blur only for the Gaussian blur methods that use it.
+
+## 0.11.2
+- Fixed the calibrations stored in the camera config (z, experimental PSF and sCMOS) not being cleared when switching to a camera the config has no entry for.
+- Render saves the color bar (LUT) of the rendered property next to every image exported while rendering by property (`*_colorbar.png`), from the main and from the 3D window.
+- Fixed AIM's second round barely correcting the drift ([HohlbeinLab/webSMLM#9](https://github.com/HohlbeinLab/webSMLM/issues/9), reported by @HazenBabcock against a port of this code). Also, thanks to @jhohlbein for the information.
+- Fixed AIM drift correction underestimating the drift.
+- AIM no longer extrapolates the drift with a cubic spline before the first and after the last segment midpoint, where it could swing far off; the spline knots are now padded as in the reference implementation.
+- Fixed Render failing to start when `~/.picasso/settings.yaml` holds a `Render` section without a `Colormap` entry.
+- Fixed 3D animations losing full turns
+- 3D animations no longer render each position twice, which held one frame at every position of the sequence.
+- Fixed error when adding new channels when 3D render is open.
+- Updated readme.txt for both installers regarding camera config and plugins.
 
 ## 0.11.1
 

@@ -100,9 +100,16 @@ def closest_rotvec(
     A rotation vector (axis * angle, radians) is not unique: adding
     full turns (2 pi) around the same axis yields the same rotation.
     This function picks the representation closest to ``reference``,
-    which allows keeping track of rotations beyond +/- 180 degrees
-    (e.g. unwrapping a continuously updated rotation, or encoding
-    multiple full turns in an animation segment).
+    which allows keeping track of rotations beyond +/- 180 degrees,
+    e.g. unwrapping a continuously updated rotation.
+
+    Note that full turns cannot be recovered from an orientation this
+    way: near a full turn ``rotation`` is close to the identity and the
+    axis of its rotation vector is dominated by whatever small residual
+    rotation is left, so the turns held by ``reference`` are dropped.
+    Rotation paths that may contain full turns (the displayed angles of
+    the rotation window, animation segments) are therefore accumulated
+    as a path integral of the applied rotations instead.
 
     Parameters
     ----------
