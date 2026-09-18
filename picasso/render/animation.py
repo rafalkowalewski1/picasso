@@ -20,7 +20,7 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 from .. import io, lib, __version__
-from .geometry import rotation_matrix, closest_rotvec, viewport_width
+from .geometry import rotation_matrix, viewport_width
 from .scene import render_scene
 
 if TYPE_CHECKING:
@@ -79,38 +79,58 @@ def _animation_sequence(
     checkpoint rotations at constant angular velocity (slerp). If
     ``segment_rotations`` is given, the corresponding rotation vector
     defines the rotation path of each segment and may include full
-    turns (magnitude beyond pi), e.g. 4 pi for two full turns. The
-    vector is snapped to the true relative rotation between the two
-    checkpoints (see ``closest_rotvec``) so that each segment always
-    ends exactly at the next checkpoint. This is equivalent to
-    splitting a segment with a rotation larger than 180 degrees into
-    sub-180-degree pieces and applying slerp to each piece."""
+    turns (magnitude beyond pi), e.g. 4 pi for two full turns.
+
+    Such a path is followed as
+    ``from_rotvec(t * correction) * from_rotvec(t * rotvec) * R1``,
+    where ``correction`` is the (shortest) residual rotation left
+    between the end of the given path and the next checkpoint. The
+    segment therefore always ends exactly at the next checkpoint while
+    keeping the requested turns, without having to re-derive the turns
+    from the checkpoint orientations - which is impossible, as a full
+    turn leaves the orientation unchanged. When the given path already
+    matches the relative rotation (e.g. both around the same axis),
+    the correction vanishes and this is plain slerp, split into
+    sub-180-degree pieces.
+
+    Frames are placed at ``t = 0, 1/n, ...`` for every segment but the
+    last, whose final frame lands on the last checkpoint. This way each
+    checkpoint is rendered once, rather than once as the end of one
+    segment and again as the start of the next."""
     rotations = []
     viewports = []
     for i in range(len(positions) - 1):
-        n_frames = int(fps * durations[i])
+        n_frames = max(1, int(fps * durations[i]))
+        # only the last segment includes its final checkpoint; the
+        # others end where the next segment starts
+        endpoint = i == len(positions) - 2
 
         # rotations
         R1, vp1 = positions[i]
         R2, vp2 = positions[i + 1]
         relative = R2 * R1.inv()
         if segment_rotations is not None:
-            rotvec = closest_rotvec(
-                relative, np.asarray(segment_rotations[i], dtype=float)
-            )
+            rotvec = np.asarray(segment_rotations[i], dtype=float)
         else:
             rotvec = relative.as_rotvec()
-        fractions = np.linspace(0, 1, n_frames)
+        # residual rotation between the end of the requested path and
+        # the next checkpoint, spread evenly over the segment
+        correction = (
+            relative * Rotation.from_rotvec(rotvec).inv()
+        ).as_rotvec()
+        fractions = np.linspace(0, 1, n_frames, endpoint=endpoint)
         rotations.extend(
-            Rotation.from_rotvec(fraction * rotvec) * R1
+            Rotation.from_rotvec(fraction * correction)
+            * Rotation.from_rotvec(fraction * rotvec)
+            * R1
             for fraction in fractions
         )
 
         # viewports
-        ymin = np.linspace(vp1[0][0], vp2[0][0], n_frames)
-        xmin = np.linspace(vp1[0][1], vp2[0][1], n_frames)
-        ymax = np.linspace(vp1[1][0], vp2[1][0], n_frames)
-        xmax = np.linspace(vp1[1][1], vp2[1][1], n_frames)
+        ymin = np.linspace(vp1[0][0], vp2[0][0], n_frames, endpoint=endpoint)
+        xmin = np.linspace(vp1[0][1], vp2[0][1], n_frames, endpoint=endpoint)
+        ymax = np.linspace(vp1[1][0], vp2[1][0], n_frames, endpoint=endpoint)
+        xmax = np.linspace(vp1[1][1], vp2[1][1], n_frames, endpoint=endpoint)
         current_viewports = [
             ((ymin[j], xmin[j]), (ymax[j], xmax[j])) for j in range(len(ymin))
         ]
@@ -190,10 +210,10 @@ def build_animation(
         full rotation path from one checkpoint to the next. The
         magnitude may exceed pi to encode rotations larger than 180
         degrees, e.g. (0, 0, 4 * pi) for two full turns around the z
-        axis. Each vector is snapped to the true relative rotation
-        between its two checkpoints, so the segment always ends
-        exactly at the next checkpoint. If None, each segment follows
-        the shortest path (slerp). Default is None.
+        axis. Any rotation left between the end of such a path and the
+        next checkpoint is spread over the segment, so the segment
+        always ends exactly at the next checkpoint. If None, each
+        segment follows the shortest path (slerp). Default is None.
     blur_method : {"gaussian", "gaussian_iso", "smooth", "convolve"} or None, \
             optional
         Defines localizations' blur. The string has to be one of
