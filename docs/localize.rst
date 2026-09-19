@@ -55,6 +55,8 @@ Using it
 
 When a CUDA GPU is detected, the **Use GPU** checkbox becomes available in the ``Parameters`` dialog for both optimizers, since Picasso implements a least-squares and a maximum-likelihood estimator on the GPU. Otherwise the checkbox stays hidden and the CPU implementations are used. GPU fitting is entirely optional; it is typically one to two orders of magnitude faster than a serial CPU fit.
 
+CPU fitting spreads spot identification and fitting over a pool of worker processes. The fraction of CPU cores it may use is set by ``cpu_utilization`` under ``Localize`` in ``~/.picasso/settings.yaml`` (see :ref:`user-settings-file`), a number between 0 and 1 (exclusive), default 0.8 An invalid value (e.g. 1 or above) is reset to 0.8 the next time it is read.
+
 Identification and fitting of single-molecule spots
 ---------------------------------------------------
 
@@ -67,6 +69,8 @@ Identification and fitting of single-molecule spots
 7. (Optional) Restrict the analysis to one or more regions of interest (ROIs) instead of the whole frame; see *Regions of interest (ROIs)* below.
 8. In the ``Photon conversion`` group, adjust ``EM Gain``, ``Baseline``, ``Sensitivity`` and ``Quantum Efficiency`` according to your camera specifications and the experimental conditions. Set ``EM Gain`` to 1 for conventional output amplification. ``Baseline`` is the average dark camera count. ``Sensitivity`` is the conversion factor (electrons per analog-to-digital (A/D) count). ``Quantum Efficiency`` is not used since version 0.6.0 and is kept for backward compatibility only. These parameters are critical to converting camera counts to photons correctly. The quality of the upcoming maximum likelihood fit strongly depends on a Poisson photon noise model, and thus on the absolute photon count. For simulated data, generated with ``Picasso: Simulate``, set the parameters as follows: ``EM Gain`` = 1, ``Baseline`` = 0, ``Sensitivity`` = 1. If you use an sCMOS camera, consider loading a per-pixel camera calibration instead of relying on the two scalars; see *sCMOS camera calibration* below.
 9. From the menu bar, select ``Analyze`` > ``Localize (Identify & Fit)`` to start spot identification and fitting in all movie frames. The status of this computation is displayed in the window's status bar. After completion, the fit results will be saved in a new file in the same folder as the movie, in which the filename is the base name of the movie file with the extension ``_locs.hdf5``. Furthermore, information about the movie and analysis procedure will be saved in an accompanying file with the extension ``_locs.yaml``; this file can be inspected using a text editor.
+
+The values entered in the ``Parameters`` dialog - ``Box side length``, ``Min. net gradient``, the temporal median and Gaussian filters (and whether each is ticked), the fit **Model**, **Optimizer** and **Fit mode** - are all remembered across sessions, under the ``Localize`` section of ``~/.picasso/settings.yaml`` (see :ref:`user-settings-file`), together with the last directory used in the file dialogs (``PWD``) and which columns are ticked in the ``File`` > ``Select columns to save...`` dialog when saving fit results.
 
 Temporal median filter
 ----------------------
