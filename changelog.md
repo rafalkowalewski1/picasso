@@ -1,8 +1,11 @@
 # Changelog
 
-Last change: 18-SEP-2026 CEST
+Last change: 19-SEP-2026 CEST
 
 ## Unreleased
+
+### Others
+- Removed support for Python 3.10 (Python 3.11–3.14 are supported).
 
 ### Rendering engine
 - **Multi-threaded CPU rendering**: the render kernels release the GIL and channels are rendered in parallel by a thread pool; a single large channel is split into row chunks rendered in parallel and summed in a fixed order.
