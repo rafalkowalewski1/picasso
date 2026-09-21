@@ -202,9 +202,13 @@ Minimap
 +++++++
 Click ``show minimap`` to display a minimap in the upper left corner to localize where the current field of view is within the image.
 
+.. _render-colormap-setting:
+
 Contrast
 ^^^^^^^^
-Define the minimum and maximum density of the and select a colormap. Over 100 colormaps are available. The last option ``Custom`` requires the user to load their own ``.npy`` file containg a numpy array with a custom colormap. The selected colormap will be saved when closing render.
+Define the minimum and maximum density of the and select a colormap. Over 100 colormaps are available. The last option ``Custom`` requires the user to load their own ``.npy`` file containg a numpy array with a custom colormap. The selected colormap will be saved when closing render, under ``Colormap`` in the ``Render`` section of ``~/.picasso/settings.yaml`` (see :ref:`user-settings-file`), and restored the next time Render starts.
+
+Colormaps built with the custom colormap editor (``Edit custom colormaps`` in the **Datasets** dialog, see ``View > Files``/``Ctrl+F`` below, one per channel with its own list of color stops) are kept separately, under ``Render: CustomColormaps``, keyed by name.
 
 Blur
 ^^^^
@@ -227,7 +231,9 @@ Activate scale bar. The length of the scale bar is calculated with the Pixel Siz
 
 Render properties
 ^^^^^^^^^^^^^^^^^
-This allows rendering properties by color.
+This allows rendering properties by color. The colormap chosen here is kept separately from the channel colormap above, under ``Colormap Property`` in the ``Render`` section of ``~/.picasso/settings.yaml`` (default ``gist_rainbow``, see :ref:`user-settings-file`), and restored the next time a property is rendered.
+
+.. _render-colorbar-format:
 
 Color bar (LUT)
 +++++++++++++++
@@ -284,6 +290,8 @@ Opens localizations that were saved via the rotation window, see above.
 Save localizations [Ctrl+S]
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Save the localizations that are currently loaded in render to an hdf5 file.
+
+.. _render-save-picks-in-metadata:
 
 Save picked localizations [Ctrl+Shift+S]
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -676,6 +684,8 @@ Nearest Neighbor Analysis
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 Calculates distances to the ``k``-th nearest neighbors between two channels (can be the same channel). ``k`` is defined by the user. The distances are stored in nm as a .hdf5 localizations file with new columns ``nnd_1``, ``nnd_2``, ..., ``nnd_k`` for each localization in channel 1. The distances are calculated in 3D if both datasets have z information.
 
+.. _render-cpu-usage:
+
 CPU usage on shared workstations
 --------------------------------
 Rendering uses a limited number of CPU worker threads so that Picasso stays polite on shared analysis computers where several users work at the same time. The budget is set in the user settings file ``~/.picasso/settings.yaml`` (also editable via ``File > Picasso settings`` in any module):
@@ -699,6 +709,8 @@ Rendering uses a limited number of CPU worker threads so that Picasso stays poli
 The settings file is read every time a render starts, so changes apply immediately, without restarting Picasso. At least one worker is always used and, on Windows, the number of workers is capped at 61 (a limitation of Python's process handling).
 
 Picasso: Render writes the ``Render`` keys it does not find in the file with their defaults when it starts (``max_workers`` excepted, as it is optional), so every setting is visible and editable. How the settings file is kept safe from editing mistakes is described under :ref:`user-settings-file`.
+
+.. _render-gpu-rendering:
 
 GPU rendering
 -------------

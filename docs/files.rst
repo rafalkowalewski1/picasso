@@ -77,6 +77,8 @@ Since v0.12, ``picasso.io.save_locs`` also stores the spatial index that ``Picas
 
 Localizations are stored with float32 floating-point columns and a uint32 ``frame`` column, whatever dtypes a pipeline produced in memory (``picasso.lib.standardize_dtypes``, applied when loading, saving and by most processing functions). float32 resolvesfar below any localization precision, and halves memory and file size compared to float64.
 
+.. _files-metadata-settings:
+
 Metadata
 --------
 

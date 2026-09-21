@@ -69,6 +69,13 @@ class Dialog(QtWidgets.QDialog):
 class UserSettingsDialog(Dialog):
     """Dialog for inspecting and editing the user settings YAML file."""
 
+    #: Reference listing every settings key, its default and what it
+    #: does, grouped by section - see docs/others.rst.
+    DOCS_URL = (
+        "https://picassosr.readthedocs.io/en/latest/others.html"
+        "#user-settings-file"
+    )
+
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("User Settings")
@@ -77,6 +84,7 @@ class UserSettingsDialog(Dialog):
 
         layout = QtWidgets.QVBoxLayout(self)
 
+        header = QtWidgets.QHBoxLayout()
         path_label = QtWidgets.QLabel(
             f"Settings file: {io._user_settings_filename()}\n"
             "Warning: editing this file can affect the behavior of Picasso.\n"
@@ -86,7 +94,10 @@ class UserSettingsDialog(Dialog):
         path_label.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        layout.addWidget(path_label)
+        header.addWidget(path_label, 1)
+        help_button = HelpButton(self.DOCS_URL)
+        header.addWidget(help_button, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(header)
 
         self.editor = QtWidgets.QPlainTextEdit()
         self.editor.setFont(QtGui.QFont("Helvetica", 12))

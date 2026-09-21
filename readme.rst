@@ -52,7 +52,6 @@ For Windows, two one-click installers are provided: a default build and a **CUDA
 
 Python is also distributed as a PyPI package that is platform-independent (``pip install picassosr``) which grants not only GUI but also access to Picasso’s internal routines in custom Python programs. For more details, see the `Via PyPI <https://github.com/jungmannlab/picasso#via-pypi>`__ section below. For examples of how to use Picasso in Python scripts, see the section `Example Usage <https://github.com/jungmannlab/picasso#example-usage>`__ below.
 
-Note: Since v0.10.0 Picasso is more flexible in terms of dependencies and Python versions. Previously only Python 3.10 was supported, now newer versions are encouraged.
 
 Via PyPI
 ^^^^^^^^
