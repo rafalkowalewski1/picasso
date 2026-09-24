@@ -9986,8 +9986,58 @@ class View(QtWidgets.QLabel):
         ``_render_indices``) is subsampled through it, so the preview
         targets the visible population; the others through a strided
         view of the DataFrame, which a backend with resident uploads
-        renders straight from its buffers."""
-        return subsample_request(request, self._interaction_subsample_target)
+        renders straight from its buffers.
+
+        Whole channels without a row selection (render by property,
+        and group splitting or the z slicer on a backend with resident
+        uploads) count every row as population; the target is then
+        rescaled by the in-view fraction, so a zoomed-in preview keeps
+        its visible density."""
+        target_for = self._interaction_subsample_target
+        fraction = self._whole_channel_view_fraction(request)
+        if fraction < 1.0:
+            visible_target = target_for
+
+            def target_for(population: int) -> int:
+                target = visible_target(int(fraction * population))
+                if target <= 0 or fraction <= 0.0:
+                    return target
+                return ceil(target / fraction)
+
+        return subsample_request(request, target_for)
+
+    def _whole_channel_view_fraction(self, request: dict) -> float:
+        """Fraction of the rows of a request's whole (not viewport
+        restricted) channels that fall inside its viewport, from the
+        render-index pyramids; 1 when the channels are already
+        restricted, carry a row selection, are rotated, or the pyramid
+        is unavailable or bypassed (the viewport covers a large part of
+        the FOV)."""
+        viewport = request.get("viewport")
+        if (
+            viewport is None
+            or request.get("indices") is not None
+            or request.get("ang") is not None
+        ):
+            return 1.0
+        if self.window.display_settings_dlg.render_check.isChecked():
+            channels = [0]  # x_locs is split from the first channel
+        elif self._persistent_uploads():
+            channels = [
+                i
+                for i in range(len(self.locs))
+                if len(self.locs) == 1
+                or self.window.dataset_dialog.checks[i].isChecked()
+            ]
+        else:
+            return 1.0  # the CPU path restricts channels to the viewport
+        total = visible = 0
+        for i in channels:
+            n = len(self.locs[i])
+            idx = self._viewport_indices(i, viewport)
+            total += n
+            visible += n if idx is None else len(idx)
+        return visible / total if total else 1.0
 
     def _submit_async_render(
         self, autoscale: bool = False, interactive: bool = False

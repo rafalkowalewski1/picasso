@@ -387,6 +387,41 @@ class TestAsyncRender:
         window.remove_locs()
         assert released
 
+    def test_property_preview_targets_visible_population(
+        self, window, monkeypatch
+    ):
+        # render by property renders whole channels without a row
+        # selection; a zoomed-in preview must stride by the in-view
+        # population, not the whole FOV's, or it thins out to nothing
+        view = window.view
+        window.display_settings_dlg.parameter.setCurrentText("frame")
+        window.display_settings_dlg.render_check.setChecked(True)
+        view.activate_render_property()
+        assert view.x_render_state
+        monkeypatch.setattr(
+            view, "_interaction_subsample_target", lambda population=0: 50
+        )
+        zoomed = ((0.0, 0.0), (HEIGHT / 4, WIDTH / 4))
+        locs, _ = view._prepare_locs_for_rendering(viewport=zoomed)
+        assert sum(len(channel) for channel in locs) == len(view.locs[0])
+        in_view = len(view._viewport_indices(0, zoomed))
+        assert 50 < in_view < len(view.locs[0])
+        preview = {"locs": locs, "viewport": zoomed, "contrast": (0.0, 1.0)}
+        assert view._subsample_request(preview)
+        sampled = pd.concat(preview["locs"])
+        visible = sampled[
+            (sampled["x"] < WIDTH / 4) & (sampled["y"] < HEIGHT / 4)
+        ]
+        # about the target in view (a whole-FOV stride would leave ~3)
+        assert len(visible) >= 25
+        # a full-FOV preview is unchanged: strided over all rows
+        full = {
+            "locs": locs,
+            "viewport": ((0.0, 0.0), (HEIGHT, WIDTH)),
+            "contrast": (0.0, 1.0),
+        }
+        assert view._whole_channel_view_fraction(full) == 1.0
+
     def test_ctrl_left_drag_pans_in_every_tool(self, window, qapp):
         from PyQt6 import QtCore, QtGui
 

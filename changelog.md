@@ -1,8 +1,8 @@
 # Changelog
 
-Last change: 19-SEP-2026 CEST
+Last change: 24-SEP-2026 CEST
 
-## Unreleased
+## 0.12.0
 
 ### Others
 - Removed support for Python 3.10 (Python 3.11–3.14 are supported).
