@@ -355,3 +355,26 @@ def release_uploads() -> None:
     (e.g. when the GUI closes a dataset)."""
     if _gpu_singleton is not None:
         _gpu_singleton.release_uploads()
+
+
+def close() -> None:
+    """Release the GPU backend and its device, if one is running.
+
+    Meant for a deterministic teardown while the interpreter is still
+    intact (the GUI calls it once its event loop has ended): leaving the
+    device to be collected at interpreter shutdown risks a native crash
+    in the driver on the way out. A failure here is logged and swallowed
+    - the process is exiting anyway, and the OS reclaims the device.
+    """
+    global _gpu_singleton, _gpu_adapter, _gpu_unavailable
+    with _singleton_lock:
+        if _gpu_singleton is None:
+            return
+        try:
+            _gpu_singleton.close()
+        except Exception as error:  # pragma: no cover - driver teardown
+            _log.info("Closing the GPU backend failed: %s", error)
+        finally:
+            _gpu_singleton = None
+            _gpu_adapter = None
+            _gpu_unavailable = False

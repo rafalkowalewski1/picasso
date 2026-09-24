@@ -15533,7 +15533,13 @@ class Window(QtWidgets.QMainWindow):
 
 def main() -> None:
     """Start Picasso: Render - see ``picasso.gui.app.run_gui``."""
-    sys.exit(run_gui(Window, "render"))
+    try:
+        exit_code = run_gui(Window, "render")
+    finally:
+        # release the GPU device here, with the event loop over but the
+        # interpreter still intact, rather than at shutdown
+        render.backend.close()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
