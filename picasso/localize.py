@@ -47,7 +47,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sqlalchemy import create_engine
 import matplotlib.gridspec as gridspec
-from scipy.ndimage import affine_transform, gaussian_filter
+from scipy.ndimage import gaussian_filter
 from scipy.optimize import curve_fit
 from scipy.signal import fftconvolve
 from scipy.spatial.distance import cdist
@@ -109,10 +109,11 @@ MAX_LOCS = int(1e6)
 FIT_MODE_JOINT = "Jointly (registered channels)"
 FIT_MODE_INDEPENDENT = "Each channel separately"
 
-# Axial multi-start. A single in-focus seed leaves a spline fit z-degenerate at
-# large |z|. Several seeds spanning the calibration stack are run per spot and the
-# one that best explains the data is kept. One seed per ~20 calibration planes,
-# bounded; the rule the calibration diagnostic has always used.
+# Axial multi-start. A single in-focus seed leaves a spline fit z-degenerate
+# at large |z|. Several seeds spanning the calibration stack are run per spot
+# and the one that best explains the data is kept. One seed per ~20
+# calibration planes, bounded; the rule the calibration diagnostic has
+# always used.
 _Z_STARTS_PER_PLANES = 20
 _Z_STARTS_MIN = 5
 _Z_STARTS_MAX = 15
@@ -188,7 +189,8 @@ TEMPORAL_MEDIAN_CACHE_BYTES = 512 * 1024**2
 # Gaussian filter for spot identification
 GAUSSIAN_FILTER_TRUNCATE = 4.0
 GAUSSIAN_FILTER_MODE = "nearest"
-# Default bead-detection / matching parameters for `calibrate_lateral_transform`.
+# Default bead-detection / matching parameters for
+# `calibrate_lateral_transform`.
 _LATERAL_MATCH_MAX_DIST_PX = 40.0  # max distance between matched pair
 _AFFINE_XCORR_HALF_WIDTH = 18  # half-width of bead crop for xcorr
 
@@ -3069,6 +3071,73 @@ def fit(
     new_info : dict
         New metadata.
     """
+    _validate_fit_args(
+        movie,
+        camera_info,
+        identifications,
+        box,
+        fitting_method,
+        spline_calibration,
+        eps,
+        max_it,
+        multiprocess,
+        camera_calibration,
+    )
+    spots, variance = get_spots(
+        movie,
+        identifications,
+        box,
+        camera_info,
+        progress_callback=cut_progress_callback,
+        camera_calibration=camera_calibration,
+        return_variance=True,
+    )
+    em = camera_info["Gain"] > 1
+    gauss_flags = parse_gauss_code(fitting_method)
+    locs = _dispatch_fit(
+        fitting_method=fitting_method,
+        gauss_flags=gauss_flags,
+        spots=spots,
+        identifications=identifications,
+        box=box,
+        em=em,
+        variance=variance,
+        eps=eps,
+        max_it=max_it,
+        spline_calibration=spline_calibration,
+        multiprocess=multiprocess,
+        progress_callback=progress_callback,
+        abort_callback=abort_callback,
+    )
+    localize_info = _fit_localize_info(
+        fitting_method,
+        gauss_flags,
+        eps,
+        max_it,
+        spline_calibration,
+        camera_calibration,
+    )
+    new_info = localize_info | camera_info
+    return locs, new_info
+
+
+def _validate_fit_args(
+    movie: LoadedMovie,
+    camera_info: dict,
+    identifications: pd.DataFrame,
+    box: int,
+    fitting_method: str,
+    spline_calibration: dict | None,
+    eps: float | None,
+    max_it: int | None,
+    multiprocess: bool,
+    camera_calibration: dict | None,
+) -> None:
+    """Validate ``fit``'s arguments and fill in ``camera_info`` defaults.
+
+    Mutates ``camera_info`` in place (fills in "Pixelsize" if missing), as
+    ``fit`` relies on that side effect.
+    """
     accepted_movie_types = (io.AbstractPicassoMovie, np.memmap)
     if bitplane.IMSWRITER:
         accepted_movie_types += (
@@ -3120,17 +3189,31 @@ def fit(
                 "camera_info, which is written to the metadata file as-is."
             )
     _validate_camera_calibration(camera_calibration, movie, camera_info)
-    spots, variance = get_spots(
-        movie,
-        identifications,
-        box,
-        camera_info,
-        progress_callback=cut_progress_callback,
-        camera_calibration=camera_calibration,
-        return_variance=True,
-    )
-    em = camera_info["Gain"] > 1
-    gauss_flags = parse_gauss_code(fitting_method)
+
+
+def _dispatch_fit(
+    *,
+    fitting_method: str,
+    gauss_flags: dict | None,
+    spots: np.ndarray,
+    identifications: pd.DataFrame,
+    box: int,
+    em: bool,
+    variance: np.ndarray | None,
+    eps: float | None,
+    max_it: int | None,
+    spline_calibration: dict | None,
+    multiprocess: bool,
+    progress_callback: Callable[[int], None] | Literal["console"] | None,
+    abort_callback: Callable[[], bool] | None,
+) -> pd.DataFrame | None:
+    """Run the fitting backend selected by ``fitting_method``.
+
+    Returns
+    -------
+    locs : pd.DataFrame or None
+        Data frame containing the localized spots.
+    """
     if gauss_flags is not None:
         if gauss_flags["use_gpu"] and callable(progress_callback):
             progress_callback(1)
@@ -3196,7 +3279,18 @@ def fit(
             abort_callback,
             variance=variance,
         )
-    # updated metadata
+    return locs
+
+
+def _fit_localize_info(
+    fitting_method: str,
+    gauss_flags: dict | None,
+    eps: float | None,
+    max_it: int | None,
+    spline_calibration: dict | None,
+    camera_calibration: dict | None,
+) -> dict:
+    """Build the "Generated by"/schedule metadata dict written by ``fit``."""
     localize_info = {
         "Generated by": f"Picasso: v{__version__} Fit 2D",
         "Fit method": fitting_method,
@@ -3231,8 +3325,7 @@ def fit(
         localize_info["Max iterations"] = max_iterations
         localize_info["Axial seeds"] = n_z_starts if apply_seeds else 1
     localize_info.update(camera_calibration_info(camera_calibration))
-    new_info = localize_info | camera_info
-    return locs, new_info
+    return localize_info
 
 
 # TODO: remove in v0.12.0
@@ -3670,8 +3763,8 @@ def locs_from_fits_gauss(
         and the per-parameter uncertainties (``photons_unc``, ``bg_unc``,
         ``sx_unc``, ``sy_unc`` and, for the rotated model, ``angle_unc``)
         are the Poisson Cramer-Rao bound from the Fisher information of
-        the fitted Gaussian model (:func:`precision._gauss_crlb`), matching the CPU
-        MLE fit output. If False (least squares), ``lpx`` / ``lpy`` use
+        the fitted Gaussian model (:func:`precision._gauss_crlb`), matching
+        the CPU MLE fit output. If False (least squares), ``lpx`` / ``lpy`` use
         the Mortensen et al. closed form and no per-parameter
         uncertainties are added. Default is False.
     log_likelihood : lib.FloatArray1D, optional
@@ -3712,8 +3805,8 @@ def locs_from_fits_gauss(
     y = theta[:, 2] + identifications["y"] - box_offset
     if mle:
         # Poisson Cramer-Rao bound from the Fisher information of the
-        # point-sampled Gaussian model the fitters optimize. Columns of ``crlb``
-        # follow ``theta``: [photons, x, y, sx, sy, bg, (angle)].
+        # point-sampled Gaussian model the fitters optimize. Columns of
+        # ``crlb`` follow ``theta``: [photons, x, y, sx, sy, bg, (angle)].
         crlb = precision._gauss_crlb(
             theta, box, em, rotated=rotated, variance=variance
         )
@@ -4490,8 +4583,8 @@ def _as_link_xyz_calibration(calibration: dict) -> dict:
     if not 2 <= n_channels <= precision._LINK_XYZ_MAX_CHANNELS:
         raise ValueError(
             "Photon decoupling (link-XYZ) supports 2 to "
-            f"{precision._LINK_XYZ_MAX_CHANNELS} channels; this calibration has "
-            f"{n_channels}. The limit is the per-thread device memory the "
+            f"{precision._LINK_XYZ_MAX_CHANNELS} channels; this calibration "
+            f"has {n_channels}. The limit is the per-thread device memory the "
             "fit kernel needs, which grows as the square of the parameter "
             "count. Keep photons linked - the shared-amplitude model works "
             "for any number of channels."
@@ -4687,6 +4780,60 @@ def _run_splinefit(
     # locs_from_fits_spline crops identically itself, so its CRLB matches
     # the fit geometry.
     calibration = crop_spline_calibration(calibration, box)
+    args, kwargs, n_spots = _prepare_splinefit_args(
+        spots,
+        calibration,
+        mle,
+        n_z_starts,
+        residuals,
+        jacobians,
+        tolerance,
+        max_iterations,
+        variance,
+    )
+    aborted = callable(abort_callback) and abort_callback()
+    if aborted:
+        return None
+    if use_gpu:
+        return _run_splinefit_gpu(
+            args, kwargs, progress_callback, abort_callback
+        )
+    if not multiprocess or n_spots == 0:
+        return splinefit.fit_spots(
+            *args, progress_callback=progress_callback, **kwargs
+        )
+    return _run_splinefit_threaded(
+        args, kwargs, n_spots, progress_callback, abort_callback
+    )
+
+
+def _prepare_splinefit_args(
+    spots: lib.FloatArray3D,
+    calibration: dict,
+    mle: bool,
+    n_z_starts: int | None,
+    residuals: np.ndarray | None,
+    jacobians: np.ndarray | None,
+    tolerance: float | None,
+    max_iterations: int | None,
+    variance: lib.FloatArray3D | None,
+) -> tuple[tuple, dict, int]:
+    """Build the positional/keyword arguments shared by both fit kernels.
+
+    Everything computed here - the channel-major reshape, the coefficient
+    view, the channel Jacobians, the ROI residuals, the initial parameters
+    and the schedule - must be byte-identical between the CPU and GPU
+    backends for a CPU/GPU comparison to be meaningful.
+
+    Returns
+    -------
+    args : tuple
+        Positional arguments for ``splinefit(_cuda).fit_spots*``.
+    kwargs : dict
+        Keyword arguments for the same.
+    n_spots : int
+        Number of spots, after the MLE clip (unaffected by it).
+    """
     model = calibration["model"]
     kind = _spline_kind(model)
     n_channels = precision._spline_n_channels(calibration)
@@ -4738,58 +4885,50 @@ def _run_splinefit(
         "max_iterations": max_iterations,
         "variance": fit_variance,
     }
-    aborted = callable(abort_callback) and abort_callback()
-    if aborted:
-        return None
-    if use_gpu:
-        stopped_early = False
+    return args, kwargs, len(spots)
 
-        def _abort() -> bool:
-            nonlocal stopped_early
-            if abort_callback():
-                stopped_early = True
-                return True
-            return False
 
-        result = splinefit_cuda.fit_spots(
-            *args,
-            progress_callback=progress_callback,
-            abort_callback=_abort if callable(abort_callback) else None,
-            **kwargs,
-        )
-        return None if stopped_early else result
-    if not multiprocess or len(spots) == 0:
-        return splinefit.fit_spots(
-            *args, progress_callback=progress_callback, **kwargs
-        )
+def _run_splinefit_gpu(
+    args: tuple,
+    kwargs: dict,
+    progress_callback: Callable[[int], None] | Literal["console"] | None,
+    abort_callback: Callable[[], bool] | None,
+) -> tuple | None:
+    """Run the CUDA spline kernel, translating its abort signal to None."""
+    stopped_early = False
 
-    n_spots = len(spots)
+    def _abort() -> bool:
+        nonlocal stopped_early
+        if abort_callback():
+            stopped_early = True
+            return True
+        return False
+
+    result = splinefit_cuda.fit_spots(
+        *args,
+        progress_callback=progress_callback,
+        abort_callback=_abort if callable(abort_callback) else None,
+        **kwargs,
+    )
+    return None if stopped_early else result
+
+
+def _run_splinefit_threaded(
+    args: tuple,
+    kwargs: dict,
+    n_spots: int,
+    progress_callback: Callable[[int], None] | Literal["console"] | None,
+    abort_callback: Callable[[], bool] | None,
+) -> tuple | None:
+    """Run the CPU spline kernel's thread pool and poll it to completion."""
     fit = splinefit.fit_spots_async(*args, **kwargs)
     use_tqdm = progress_callback == "console"
     iter_range = (
         tqdm(total=n_spots, desc="Fitting", unit="spot") if use_tqdm else None
     )
-    last = 0
-    while fit.current[0] < n_spots:
-        if callable(abort_callback) and abort_callback():
-            fit.stop()
-            aborted = True
-            break
-        if use_tqdm:
-            iter_range.update(fit.current[0] - last)
-            last = fit.current[0]
-        elif callable(progress_callback):
-            progress_callback(fit.current[0])
-        # The workers write into preallocated arrays and nothing ever collects
-        # their futures, so a worker that died would leave the counter frozen
-        # and this loop spinning forever. Surface the error instead.
-        fit.raise_errors()
-        if fit.finished() and fit.current[0] < n_spots:
-            raise RuntimeError(
-                "The spline fitting workers stopped after "
-                f"{fit.current[0]} of {n_spots} spots."
-            )
-        time.sleep(0.2)
+    aborted, last = _await_splinefit(
+        fit, n_spots, progress_callback, abort_callback, use_tqdm, iter_range
+    )
     while not fit.finished():
         # A spot is claimed before it is fitted, so the last few may still be
         # in flight once the counter reaches n_spots. Aborted runs wait too, so
@@ -4810,6 +4949,46 @@ def _run_splinefit(
     return fit.results()
 
 
+def _await_splinefit(
+    fit,
+    n_spots: int,
+    progress_callback: Callable[[int], None] | Literal["console"] | None,
+    abort_callback: Callable[[], bool] | None,
+    use_tqdm: bool,
+    iter_range,
+) -> tuple[bool, int]:
+    """Poll the thread pool until every spot is claimed, or an abort fires.
+
+    Returns
+    -------
+    aborted : bool
+    last : int
+        Spot count last reported to ``iter_range``, for the caller's final
+        tqdm update.
+    """
+    last = 0
+    while fit.current[0] < n_spots:
+        if callable(abort_callback) and abort_callback():
+            fit.stop()
+            return True, last
+        if use_tqdm:
+            iter_range.update(fit.current[0] - last)
+            last = fit.current[0]
+        elif callable(progress_callback):
+            progress_callback(fit.current[0])
+        # The workers write into preallocated arrays and nothing ever collects
+        # their futures, so a worker that died would leave the counter frozen
+        # and this loop spinning forever. Surface the error instead.
+        fit.raise_errors()
+        if fit.finished() and fit.current[0] < n_spots:
+            raise RuntimeError(
+                "The spline fitting workers stopped after "
+                f"{fit.current[0]} of {n_spots} spots."
+            )
+        time.sleep(0.2)
+    return False, last
+
+
 def fit_spots_splinefit(
     spots: lib.FloatArray3D,
     calibration: dict,
@@ -4828,14 +5007,15 @@ def fit_spots_splinefit(
     use_gpu: bool = False,
     variance: lib.FloatArray3D | None = None,
 ) -> np.ndarray | tuple | None:
-    """Fit multiple spots with a cubic-spline PSF model using the numba kernels.
+    """Fit multiple spots with a cubic-spline PSF model using the numba
+    kernels.
 
     Runs on the CPU by default and on the GPU with ``use_gpu``; the two are the
     same algorithm, so the choice only affects speed. Same arguments, parameter
     conventions and return shape as :func:`fit_spots_spline_gpu`, so all
-    three are interchangeable (see :func:`fit_spots_spline`, which picks between
-    them). Every spline model is supported: ``spline-2d``, ``spline-3d``,
-    ``spline-3d-multichannel`` and the photon-decoupled
+    three are interchangeable (see :func:`fit_spots_spline`, which picks
+    between them). Every spline model is supported: ``spline-2d``,
+    ``spline-3d``, ``spline-3d-multichannel`` and the photon-decoupled
     ``spline-3d-multichannel-link-xyz``.
 
     Parameters
@@ -5090,7 +5270,8 @@ def _locs_from_fits_spline_link_xyz(
     chi_square: lib.FloatArray1D | None = None,
     variance: lib.FloatArray4D | None = None,
 ) -> pd.DataFrame:
-    """Localizations from a photon-decoupled (link-XYZ) multichannel spline fit.
+    """Localizations from a photon-decoupled (link-XYZ) multichannel spline
+    fit.
 
     ``theta`` columns are ``[x_shift, y_shift, z_shift, N_0..N_{c-1},
     bg_0..bg_{c-1}]``. Emits the shared ``x, y, z`` plus per-channel photon and
@@ -5140,7 +5321,8 @@ def _locs_from_fits_spline_link_xyz(
     with np.errstate(invalid="ignore"):
         lpx = np.sqrt(crlb[:, 0]) / oversampling
         lpy = np.sqrt(crlb[:, 1]) / oversampling
-        # total-photon uncertainty: independent per-channel photon variances add
+        # total-photon uncertainty: independent per-channel photon
+        # variances add
         photons_unc = np.sqrt(np.sum(var_amp * (ps[None, :] ** 2), axis=1))
         bg_unc = np.sqrt(np.sum(var_bg, axis=1))
 
@@ -5511,7 +5693,8 @@ def _fit2d_spline_cpu(
 def _region_origin_xy(
     rect: tuple[tuple[int, int], tuple[int, int]] | list,
 ) -> np.ndarray:
-    """``(x, y)`` top-left origin of a ``[[y_a, x_a], [y_b, x_b]]`` rectangle."""
+    """``(x, y)`` top-left origin of a ``[[y_a, x_a], [y_b, x_b]]``
+    rectangle."""
     (ya, xa), (yb, xb) = rect
     return np.array([float(min(xa, xb)), float(min(ya, yb))], dtype=np.float64)
 
@@ -5527,12 +5710,13 @@ def decompose_region_transforms(
     region placement and returns the transform ``A_c`` that maps
     reference-**region-local** coordinates (relative to the reference region's
     top-left) to channel-``c``-region-local coordinates - the *inter-channel*
-    registration, independent of where the regions sit on the chip (identity for
-    a perfectly aligned, same-orientation split; ``A_0`` is the identity).
+    registration, independent of where the regions sit on the chip (identity
+    for a perfectly aligned, same-orientation split; ``A_0`` is the identity).
 
-    This is the ROI-agnostic form stored in the calibration: the coarse region
-    offset lives in the ROI positions (chosen at fit time), while ``A_c`` carries
-    only the fine sub-pixel/rotation/scale registration. Inverse of
+    This is the ROI-agnostic form stored in the calibration: the coarse
+    region offset lives in the ROI positions (chosen at fit time), while
+    ``A_c`` carries only the fine sub-pixel/rotation/scale registration.
+    Inverse of
     :func:`compose_region_transforms`.
 
     Both directions are ``T(x + pre) + post`` with the region origins as the
@@ -5575,8 +5759,8 @@ def compose_region_transforms(
     Inverse of :func:`decompose_region_transforms`: given the region rectangles
     in use (e.g. re-drawn at fit time) and the stored region-local ``affines``,
     rebuild the absolute reference->channel transforms placed at those regions.
-    Only the region *origins* enter, so fit-time regions may differ in size from
-    the calibration ones - the placement follows their top-left corners.
+    Only the region *origins* enter, so fit-time regions may differ in size
+    from the calibration ones - the placement follows their top-left corners.
 
     A fit-time region that reaches well beyond the field the transform was
     calibrated on is warned about: harmless for an affine, but a polynomial
@@ -5687,10 +5871,10 @@ def multichannel_inbounds_ids(
         return identifications
     n_total = len(inside)
     n_dropped = int((~inside).sum())
-    # Dropping a few edge detections is normal; dropping a large fraction almost
-    # always means the inter-channel registration is wrong (detections map off
-    # the frame in another channel), so make that visible instead of silently
-    # returning a tiny, edge-clustered subset.
+    # Dropping a few edge detections is normal; dropping a large fraction
+    # almost always means the inter-channel registration is wrong (detections
+    # map off the frame in another channel), so make that visible instead of
+    # silently returning a tiny, edge-clustered subset.
     if n_total and n_dropped / n_total >= 0.2:
         warnings.warn(
             f"Multichannel spot extraction dropped {n_dropped} of {n_total} "
@@ -5747,12 +5931,12 @@ def link_identifications_multichannel(
     """Boolean mask over the reference channel's detections marking those that
     are also detected in *every* other channel.
 
-    A molecule that the joint multichannel model can describe must be present in
-    all channels: the fit ties one shared ``x, y, z`` to the *relative*
-    intensities across channels. A reference detection with no counterpart in
-    some channel is fitted there against background only, which biases the
-    shared parameters. Filtering on this mask keeps only the
-    cross-channel-linked molecules.
+    A molecule that the joint multichannel model can describe must be
+    present in all channels: the fit ties one shared ``x, y, z`` to the
+    *relative* intensities across channels. A reference detection with no
+    counterpart in some channel is fitted there against background only,
+    which biases the shared parameters. Filtering on this mask keeps only
+    the cross-channel-linked molecules.
 
     Parameters
     ----------
@@ -5773,8 +5957,8 @@ def link_identifications_multichannel(
     Returns
     -------
     linked : np.ndarray
-        Boolean mask over ``identifications_per_channel[0]`` rows. All ``False``
-        if no other channel carries identifications.
+        Boolean mask over ``identifications_per_channel[0]`` rows. All
+        ``False`` if no other channel carries identifications.
     """
     reference = identifications_per_channel[0]
     n_ref = 0 if reference is None else len(reference)
@@ -6331,13 +6515,14 @@ def scale_channel_blocks(
     """Scale each channel's spline coefficient block by a per-channel factor.
 
     ``coefficients`` is a multichannel table
-    ``(64, n_int_x, n_int_y, n_int_z, n_channels)``. Because the cubic spline is
-    linear in its coefficients, multiplying channel ``c``'s block by ``r[c]``
-    scales that channel's model exactly: ``mu_c = offset + amplitude * r[c] *
-    phi_c``. This is how a fixed per-channel photon **ratio** is imposed for
-    ratiometric color assignment (and how an unequal biplane photon split is
-    baked in) without changing the model itself. Only the *relative*
-    ratios matter - the shared amplitude absorbs any overall scale.
+    ``(64, n_int_x, n_int_y, n_int_z, n_channels)``. Because the cubic
+    spline is linear in its coefficients, multiplying channel ``c``'s block
+    by ``r[c]`` scales that channel's model exactly:
+    ``mu_c = offset + amplitude * r[c] * phi_c``. This is how a fixed
+    per-channel photon **ratio** is imposed for ratiometric color assignment
+    (and how an unequal biplane photon split is baked in) without changing
+    the model itself. Only the *relative* ratios matter - the shared
+    amplitude absorbs any overall scale.
 
     Parameters
     ----------
@@ -6469,6 +6654,98 @@ def fit_spline_multichannel_ratiometric(
         ``photon_ratios`` are given or stored, or if the movie count or the
         ratio width disagrees with the calibration's channel count.
     """
+    photon_ratios, transforms, n_channels = _validate_ratiometric_inputs(
+        calibration, photon_ratios, movies
+    )
+
+    identifications = multichannel_inbounds_ids(
+        identifications, box, movies, transforms
+    )
+    spots, roi_residuals, variance, jacobians = get_spots_multichannel(
+        movies,
+        identifications,
+        box,
+        camera_infos,
+        transforms,
+        progress_callback=progress_callback,
+        return_residuals=True,
+        camera_calibrations=camera_calibrations,
+        return_variance=True,
+        return_jacobians=True,
+    )
+    if not apply_roi_residuals:
+        roi_residuals = None
+    n_hyp = len(photon_ratios)
+    # Normalize each hypothesis so the shared amplitude keeps a total-photon
+    # meaning; the ranking is unaffected by the overall scale.
+    ratios_norm = photon_ratios / photon_ratios.sum(axis=1, keepdims=True)
+
+    # Every hypothesis gets the same axial multi-start, so the scores that
+    # rank them are comparable - a hypothesis must not win by having landed in
+    # a better axial minimum by luck.
+    if n_z_starts is None:
+        n_z_starts = _default_n_z_starts(calibration)
+    thetas, chis, scores, valid = _fit_ratiometric_hypotheses(
+        spots,
+        calibration,
+        ratios_norm,
+        mle,
+        n_z_starts,
+        roi_residuals,
+        jacobians,
+        tolerance,
+        max_iterations,
+        use_gpu,
+        variance,
+    )
+
+    # Per spot: the best VALID hypothesis (lowest residual / chi2), falling
+    # back to the best finite score if none was flagged valid.
+    best_k = np.argmin(np.where(valid, scores, np.inf), axis=0)
+    none_valid = ~valid.any(axis=0)
+    if none_valid.any():
+        best_k[none_valid] = np.argmin(scores[:, none_valid], axis=0)
+
+    em = camera_infos[0].get("Gain", 1) > 1
+    parts = _assemble_ratiometric_locs(
+        n_hyp,
+        best_k,
+        calibration,
+        ratios_norm,
+        identifications,
+        thetas,
+        chis,
+        box,
+        em,
+        roi_residuals,
+        jacobians,
+        mle,
+        variance,
+        n_channels,
+    )
+
+    locs = pd.concat(parts) if parts else pd.DataFrame()
+    if len(locs):
+        locs.sort_values(by="frame", kind="quicksort", inplace=True)
+    return locs
+
+
+def _validate_ratiometric_inputs(
+    calibration: dict,
+    photon_ratios: lib.FloatArray2D | None,
+    movies: list,
+) -> tuple[lib.FloatArray2D, list, int]:
+    """Validate and normalize ``fit_spline_multichannel_ratiometric``'s inputs.
+
+    Returns
+    -------
+    photon_ratios : lib.FloatArray2D
+        ``(n_hypotheses, n_channels)``, resolved from the calibration if not
+        given, and cast to a 2D float array.
+    transforms : list
+        The calibration's channel transforms.
+    n_channels : int
+    """
     if calibration.get("model") != "spline-3d-multichannel":
         raise ValueError(
             "fit_spline_multichannel_ratiometric requires a "
@@ -6494,36 +6771,38 @@ def fit_spline_multichannel_ratiometric(
             f"photon_ratios has {photon_ratios.shape[1]} channels but the "
             f"calibration has {n_channels}."
         )
+    return photon_ratios, transforms, n_channels
 
-    identifications = multichannel_inbounds_ids(
-        identifications, box, movies, transforms
-    )
-    spots, roi_residuals, variance, jacobians = get_spots_multichannel(
-        movies,
-        identifications,
-        box,
-        camera_infos,
-        transforms,
-        progress_callback=progress_callback,
-        return_residuals=True,
-        camera_calibrations=camera_calibrations,
-        return_variance=True,
-        return_jacobians=True,
-    )
-    if not apply_roi_residuals:
-        roi_residuals = None
+
+def _fit_ratiometric_hypotheses(
+    spots: lib.FloatArray3D,
+    calibration: dict,
+    ratios_norm: lib.FloatArray2D,
+    mle: bool,
+    n_z_starts: int,
+    roi_residuals: np.ndarray | None,
+    jacobians: np.ndarray | None,
+    tolerance: float | None,
+    max_iterations: int | None,
+    use_gpu: bool | None,
+    variance: lib.FloatArray3D | None,
+) -> tuple[list, list, np.ndarray, np.ndarray]:
+    """Fit every photon-ratio hypothesis, keeping per-spot params and score.
+
+    Returns
+    -------
+    thetas : list of np.ndarray
+        Fitted parameters per hypothesis.
+    chis : list of np.ndarray
+        Raw per-hypothesis chi-squares, kept for the saved column.
+    scores : np.ndarray
+        ``(n_hypotheses, n_spots)`` ranking score (chi-square, or inf where
+        non-finite).
+    valid : np.ndarray
+        ``(n_hypotheses, n_spots)`` boolean mask of usable fits.
+    """
     n_spots = len(spots)
-    n_hyp = len(photon_ratios)
-    # Normalize each hypothesis so the shared amplitude keeps a total-photon
-    # meaning; the ranking is unaffected by the overall scale.
-    ratios_norm = photon_ratios / photon_ratios.sum(axis=1, keepdims=True)
-
-    # Fit every hypothesis; keep per-spot parameters, fit state and score.
-    # Every hypothesis gets the same axial multi-start, so the scores that
-    # rank them are comparable - a hypothesis must not win by having landed in
-    # a better axial minimum by luck.
-    if n_z_starts is None:
-        n_z_starts = _default_n_z_starts(calibration)
+    n_hyp = len(ratios_norm)
     thetas = []
     chis = []  # raw per-hypothesis chi-squares, kept for the saved column
     scores = np.full((n_hyp, n_spots), np.inf)
@@ -6552,19 +6831,36 @@ def fit_spline_multichannel_ratiometric(
         # chi-square is unreliable on the frequent negative-curvature exits.
         valid[k] = finite & (converged if mle else True)
         scores[k] = np.where(finite, chi_squares, np.inf)
+    return thetas, chis, scores, valid
 
-    # Per spot: the best VALID hypothesis (lowest residual / chi2), falling back
-    # to the best finite score if none was flagged valid.
-    best_k = np.argmin(np.where(valid, scores, np.inf), axis=0)
-    none_valid = ~valid.any(axis=0)
-    if none_valid.any():
-        best_k[none_valid] = np.argmin(scores[:, none_valid], axis=0)
 
-    # Build localizations per winning-hypothesis group so z-conversion and CRLB
-    # use that hypothesis's (scaled) calibration. Index-aligned column
-    # assignment keeps per-channel photons correct across the internal
-    # frame-sort of locs_from_fits_spline.
-    em = camera_infos[0].get("Gain", 1) > 1
+def _assemble_ratiometric_locs(
+    n_hyp: int,
+    best_k: np.ndarray,
+    calibration: dict,
+    ratios_norm: lib.FloatArray2D,
+    identifications: pd.DataFrame,
+    thetas: list,
+    chis: list,
+    box: int,
+    em: bool,
+    roi_residuals: np.ndarray | None,
+    jacobians: np.ndarray | None,
+    mle: bool,
+    variance: lib.FloatArray3D | None,
+    n_channels: int,
+) -> list:
+    """Build localizations per winning-hypothesis group.
+
+    Each group uses that hypothesis's (scaled) calibration for z-conversion
+    and CRLB. Index-aligned column assignment keeps per-channel photons
+    correct across the internal frame-sort of :func:`locs_from_fits_spline`.
+
+    Returns
+    -------
+    parts : list of pd.DataFrame
+        One data frame per non-empty winning hypothesis.
+    """
     parts = []
     for k in range(n_hyp):
         rows = np.where(best_k == k)[0]
@@ -6601,11 +6897,7 @@ def fit_spline_multichannel_ratiometric(
         locs_k["photons"] = total.astype(np.float32)
         locs_k["color"] = np.int32(k)
         parts.append(locs_k)
-
-    locs = pd.concat(parts) if parts else pd.DataFrame()
-    if len(locs):
-        locs.sort_values(by="frame", kind="quicksort", inplace=True)
-    return locs
+    return parts
 
 
 def _split_fov_channel_affines(calibration: dict) -> list | None:
@@ -6801,14 +7093,15 @@ def fit_spline_split_fov(
     Global fit as in globLoc (Li et al., Nat. Commun. 13, 3133, 2022), for the
     single-camera split-FOV geometry.
 
-    The calibration (built by :func:`picasso.spline.calibrate_spline_split_fov`)
-    stores the *inter-channel* registration as region-local
-    ``channel_registration``
-    (see :func:`decompose_region_transforms`), independent of where the channels sit
-    on the chip. This function repeats the one ``movie``/``camera_info`` once per
-    channel and delegates to the standard multichannel fitters. The model is
-    chosen exactly as in the GUI ``MultichannelSplineFitWorker``: ratiometric if
-    photon ratios are present, otherwise the plain linked fit.
+    The calibration (built by
+    :func:`picasso.spline.calibrate_spline_split_fov`) stores the
+    *inter-channel* registration as region-local ``channel_registration``
+    (see :func:`decompose_region_transforms`), independent of where the
+    channels sit on the chip. This function repeats the one
+    ``movie``/``camera_info`` once per channel and delegates to the standard
+    multichannel fitters. The model is chosen exactly as in the GUI
+    ``MultichannelSplineFitWorker``: ratiometric if photon ratios are
+    present, otherwise the plain linked fit.
 
     Parameters
     ----------
@@ -6816,15 +7109,16 @@ def fit_spline_split_fov(
         The single loaded movie and its camera info dict.
     identifications : pd.DataFrame
         Detections; when ``confine_to_reference`` is True (default) they are
-        filtered to the reference region so each molecule yields one spot that is
-        mapped into the other regions via the transforms.
+        filtered to the reference region so each molecule yields one spot
+        that is mapped into the other regions via the transforms.
     regions : list, optional
         The channel ROIs *for this data* (one ``[[y_min, x_min], [y_max,
-        x_max]]`` per channel, reference first), e.g. re-drawn in the GUI. When
-        given, the absolute channel transforms are rebuilt at these positions via
-        the stored region-local affines - so the same calibration can be applied
-        to data whose split sits at a different position. When omitted, the
-        calibration's own ``regions`` (the calibration-time positions) are used.
+        x_max]]`` per channel, reference first), e.g. re-drawn in the GUI.
+        When given, the absolute channel transforms are rebuilt at these
+        positions via the stored region-local affines - so the same
+        calibration can be applied to data whose split sits at a different
+        position. When omitted, the calibration's own ``regions`` (the
+        calibration-time positions) are used.
     box : int
         Box side length (camera pixels), must match the calibration.
     calibration : dict
@@ -8601,6 +8895,138 @@ def _estimate_lateral_transform(
     return transform, keep
 
 
+def _normalize_img(img: np.ndarray) -> np.ndarray:
+    """Rescale an image to [0, 1] for RGB overlay display."""
+    mn, mx = img.min(), img.max()
+    return (img - mn) / (mx - mn + 1e-12)
+
+
+def _prep_for_xcorr(x: np.ndarray) -> np.ndarray:
+    """Zero-mean, unit-variance normalize a patch before cross-correlating."""
+    x = x - x.mean()
+    s = x.std()
+    return x / (s + 1e-12)
+
+
+def _bead_xcorr_mean(
+    frame_a: np.ndarray,
+    coords_a: np.ndarray,
+    frame_b: np.ndarray,
+    coords_b: np.ndarray,
+) -> tuple[np.ndarray, int]:
+    """Mean cross-correlation of matched bead crops across two frames.
+
+    Returns
+    -------
+    mean_xcorr : np.ndarray
+        The averaged cross-correlation map, or zeros if no pair yielded a
+        usable crop.
+    count : int
+        Number of pairs that contributed.
+    """
+    crop_r = _AFFINE_XCORR_HALF_WIDTH
+    acc, count = None, 0
+    ny, nx = frame_a.shape
+    for (ry_a, rx_a), (ry_b, rx_b) in zip(
+        coords_a.astype(int), coords_b.astype(int)
+    ):
+        ya0 = max(0, ry_a - crop_r)
+        ya1 = min(ny, ry_a + crop_r)
+        xa0 = max(0, rx_a - crop_r)
+        xa1 = min(nx, rx_a + crop_r)
+        yb0 = max(0, ry_b - crop_r)
+        yb1 = min(ny, ry_b + crop_r)
+        xb0 = max(0, rx_b - crop_r)
+        xb1 = min(nx, rx_b + crop_r)
+        pa = frame_a[ya0:ya1, xa0:xa1]
+        pb = frame_b[yb0:yb1, xb0:xb1]
+        if pa.shape[0] < 4 or pb.shape[0] < 4:
+            continue
+        cc = fftconvolve(
+            _prep_for_xcorr(pa), _prep_for_xcorr(pb[::-1, ::-1]), mode="full"
+        )
+        cc -= cc.min()
+        if acc is None:
+            acc = np.zeros_like(cc)
+        if cc.shape == acc.shape:
+            acc += cc
+            count += 1
+    if count == 0 or acc is None:
+        s = 4 * crop_r - 1
+        return np.zeros((s, s)), 0
+    return acc / count, count
+
+
+def _xcorr_gaussian2d(xy, x0, y0, sx, sy, amp, bg):
+    """2D Gaussian model for sub-pixel cross-correlation peak fitting."""
+    x, y = xy
+    return bg + amp * np.exp(
+        -((x - x0) ** 2 / (2 * sx**2) + (y - y0) ** 2 / (2 * sy**2))
+    )
+
+
+def _xcorr_peak_nm(cc: np.ndarray, nm: float) -> tuple[float, float]:
+    """Sub-pixel cross-correlation peak, in ``nm`` (or px if ``nm`` is 1)."""
+    py, px = np.unravel_index(np.argmax(cc), cc.shape)
+    cy_cc, cx_cc = cc.shape[0] // 2, cc.shape[1] // 2
+    r = 5
+    y0 = max(0, py - r)
+    y1 = min(cc.shape[0], py + r + 1)
+    x0 = max(0, px - r)
+    x1 = min(cc.shape[1], px + r + 1)
+    patch = cc[y0:y1, x0:x1]
+    nyp, nxp = patch.shape
+    yg, xg = np.mgrid[0:nyp, 0:nxp].astype(float)
+    try:
+        popt, _ = curve_fit(
+            _xcorr_gaussian2d,
+            (xg.ravel(), yg.ravel()),
+            patch.ravel(),
+            p0=[
+                nxp / 2,
+                nyp / 2,
+                2.0,
+                2.0,
+                patch.max() - patch.min(),
+                patch.min(),
+            ],
+            maxfev=400,
+        )
+        sub_px = x0 + popt[0] - cx_cc
+        sub_py = y0 + popt[1] - cy_cc
+    except Exception:
+        sub_px = float(px - cx_cc)
+        sub_py = float(py - cy_cc)
+    return sub_py * nm, sub_px * nm
+
+
+def _alignment_title(
+    decomp: dict,
+    n_pairs: int,
+    pixelsize: float | None,
+    transform_type: str,
+    ref_path: str,
+    target_path: str,
+) -> str:
+    """Build the suptitle for the lateral-alignment QC figure."""
+    if pixelsize is not None:
+        trans_str = f"Tx={decomp['tx_nm']:.1f} nm  Ty={decomp['ty_nm']:.1f} nm"
+    else:
+        trans_str = f"Tx={decomp['tx_px']:.3f} px  Ty={decomp['ty_px']:.3f} px"
+    title = (
+        f"Alignment check  |  {n_pairs} bead pairs  |  "
+        f"Scale X={decomp['scale_x']:.5f}  Y={decomp['scale_y']:.5f}  "
+        f"Rot={decomp['rotation_deg']:.4f}°  " + trans_str
+    )
+    title = f"{transform_type.capitalize()}  |  " + title
+    if ref_path or target_path:
+        title += (
+            f"\nref: {os.path.basename(ref_path)}   "
+            f"target: {os.path.basename(target_path)}"
+        )
+    return title
+
+
 def _lateral_plot_alignment(
     img_ref: np.ndarray,
     img_mov: np.ndarray,
@@ -8623,116 +9049,22 @@ def _lateral_plot_alignment(
     nm = pixelsize if pixelsize is not None else 1.0
     unit = "nm" if pixelsize is not None else "px"
 
-    def norm(img):
-        mn, mx = img.min(), img.max()
-        return (img - mn) / (mx - mn + 1e-12)
+    ref_n = _normalize_img(img_ref)
+    mov_n = _normalize_img(img_mov)
+    cor_n = _normalize_img(img_cor)
 
-    ref_n = norm(img_ref)
-    mov_n = norm(img_mov)
-    cor_n = norm(img_cor)
+    cc_raw, n_raw = _bead_xcorr_mean(ref_n, pairs_ref, mov_n, pairs_ref)
+    cc_cor, n_cor = _bead_xcorr_mean(ref_n, pairs_ref, cor_n, pairs_ref)
 
-    crop_r = _AFFINE_XCORR_HALF_WIDTH
-
-    def bead_xcorr_mean(frame_a, coords_a, frame_b, coords_b):
-        acc, count = None, 0
-        ny, nx = frame_a.shape
-        for (ry_a, rx_a), (ry_b, rx_b) in zip(
-            coords_a.astype(int), coords_b.astype(int)
-        ):
-            ya0 = max(0, ry_a - crop_r)
-            ya1 = min(ny, ry_a + crop_r)
-            xa0 = max(0, rx_a - crop_r)
-            xa1 = min(nx, rx_a + crop_r)
-            yb0 = max(0, ry_b - crop_r)
-            yb1 = min(ny, ry_b + crop_r)
-            xb0 = max(0, rx_b - crop_r)
-            xb1 = min(nx, rx_b + crop_r)
-            pa = frame_a[ya0:ya1, xa0:xa1]
-            pb = frame_b[yb0:yb1, xb0:xb1]
-            if pa.shape[0] < 4 or pb.shape[0] < 4:
-                continue
-
-            def prep(x):
-                x = x - x.mean()
-                s = x.std()
-                return x / (s + 1e-12)
-
-            cc = fftconvolve(prep(pa), prep(pb[::-1, ::-1]), mode="full")
-            cc -= cc.min()
-            if acc is None:
-                acc = np.zeros_like(cc)
-            if cc.shape == acc.shape:
-                acc += cc
-                count += 1
-        if count == 0 or acc is None:
-            s = 4 * crop_r - 1
-            return np.zeros((s, s)), 0
-        return acc / count, count
-
-    def peak_nm(cc):
-        py, px = np.unravel_index(np.argmax(cc), cc.shape)
-        cy_cc, cx_cc = cc.shape[0] // 2, cc.shape[1] // 2
-        r = 5
-        y0 = max(0, py - r)
-        y1 = min(cc.shape[0], py + r + 1)
-        x0 = max(0, px - r)
-        x1 = min(cc.shape[1], px + r + 1)
-        patch = cc[y0:y1, x0:x1]
-        nyp, nxp = patch.shape
-        yg, xg = np.mgrid[0:nyp, 0:nxp].astype(float)
-
-        def g2d(xy, x0, y0, sx, sy, amp, bg):
-            x, y = xy
-            return bg + amp * np.exp(
-                -((x - x0) ** 2 / (2 * sx**2) + (y - y0) ** 2 / (2 * sy**2))
-            )
-
-        try:
-            popt, _ = curve_fit(
-                g2d,
-                (xg.ravel(), yg.ravel()),
-                patch.ravel(),
-                p0=[
-                    nxp / 2,
-                    nyp / 2,
-                    2.0,
-                    2.0,
-                    patch.max() - patch.min(),
-                    patch.min(),
-                ],
-                maxfev=400,
-            )
-            sub_px = x0 + popt[0] - cx_cc
-            sub_py = y0 + popt[1] - cy_cc
-        except Exception:
-            sub_px = float(px - cx_cc)
-            sub_py = float(py - cy_cc)
-        return sub_py * nm, sub_px * nm
-
-    cc_raw, n_raw = bead_xcorr_mean(ref_n, pairs_ref, mov_n, pairs_ref)
-    cc_cor, n_cor = bead_xcorr_mean(ref_n, pairs_ref, cor_n, pairs_ref)
-
-    dy_raw, dx_raw = peak_nm(cc_raw) if n_raw > 0 else (0.0, 0.0)
-    dy_cor, dx_cor = peak_nm(cc_cor) if n_cor > 0 else (0.0, 0.0)
+    dy_raw, dx_raw = _xcorr_peak_nm(cc_raw, nm) if n_raw > 0 else (0.0, 0.0)
+    dy_cor, dx_cor = _xcorr_peak_nm(cc_cor, nm) if n_cor > 0 else (0.0, 0.0)
     off_raw = np.hypot(dy_raw, dx_raw)
     off_cor = np.hypot(dy_cor, dx_cor)
 
     fig = plt.figure(figsize=(11, 11))
-    if pixelsize is not None:
-        trans_str = f"Tx={decomp['tx_nm']:.1f} nm  Ty={decomp['ty_nm']:.1f} nm"
-    else:
-        trans_str = f"Tx={decomp['tx_px']:.3f} px  Ty={decomp['ty_px']:.3f} px"
-    title = (
-        f"Alignment check  |  {n_pairs} bead pairs  |  "
-        f"Scale X={decomp['scale_x']:.5f}  Y={decomp['scale_y']:.5f}  "
-        f"Rot={decomp['rotation_deg']:.4f}°  " + trans_str
+    title = _alignment_title(
+        decomp, n_pairs, pixelsize, transform_type, ref_path, target_path
     )
-    title = f"{transform_type.capitalize()}  |  " + title
-    if ref_path or target_path:
-        title += (
-            f"\nref: {os.path.basename(ref_path)}   "
-            f"target: {os.path.basename(target_path)}"
-        )
     fig.suptitle(title, fontsize=10, fontweight="bold")
     gs = gridspec.GridSpec(2, 2, figure=fig, wspace=0.30, hspace=0.25)
 

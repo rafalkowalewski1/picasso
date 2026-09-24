@@ -702,6 +702,39 @@ def _blocks_hold_their_locs(
     return total == n
 
 
+def _validate_index_dimensions(
+    pyramid: RenderIndexPyramid, info: list[dict]
+) -> bool:
+    """Whether the pyramid's field-of-view size matches ``info``."""
+    width = lib.get_from_metadata(info, "Width")
+    height = lib.get_from_metadata(info, "Height")
+    if width is None or height is None:
+        return False
+    return float(width) == pyramid.width and float(height) == pyramid.height
+
+
+def _validate_index_block_shapes(
+    pyramid: RenderIndexPyramid, x: np.ndarray, y: np.ndarray
+) -> bool:
+    """Whether every block level has consistent shapes and holds its locs."""
+    if len(pyramid.block_sizes) != len(pyramid.block_starts) or len(
+        pyramid.block_starts
+    ) != len(pyramid.block_ends):
+        return False
+    for size, bs, be in zip(
+        pyramid.block_sizes, pyramid.block_starts, pyramid.block_ends
+    ):
+        K = max(1, int(np.ceil(pyramid.height / size)))
+        L = max(1, int(np.ceil(pyramid.width / size)))
+        if bs.shape != (K, L) or be.shape != (K, L):
+            return False
+        if not _blocks_hold_their_locs(
+            pyramid.perm, bs, be, x, y, float(size)
+        ):
+            return False
+    return True
+
+
 def validate_render_index(
     pyramid: RenderIndexPyramid, locs: pd.DataFrame, info: list[dict]
 ) -> bool:
@@ -730,35 +763,18 @@ def validate_render_index(
     -------
     valid : bool
     """
-    width = lib.get_from_metadata(info, "Width")
-    height = lib.get_from_metadata(info, "Height")
-    if width is None or height is None:
-        return False
-    if float(width) != pyramid.width or float(height) != pyramid.height:
+    if not _validate_index_dimensions(pyramid, info):
         return False
     n = len(locs)
     if not _is_permutation(pyramid.perm, n):
-        return False
-    if len(pyramid.block_sizes) != len(pyramid.block_starts) or len(
-        pyramid.block_starts
-    ) != len(pyramid.block_ends):
         return False
     if n == 0:
         pyramid.sorted_keys = np.empty(0, dtype=np.uint64)
         return True
     x = locs["x"].to_numpy()
     y = locs["y"].to_numpy()
-    for size, bs, be in zip(
-        pyramid.block_sizes, pyramid.block_starts, pyramid.block_ends
-    ):
-        K = max(1, int(np.ceil(pyramid.height / size)))
-        L = max(1, int(np.ceil(pyramid.width / size)))
-        if bs.shape != (K, L) or be.shape != (K, L):
-            return False
-        if not _blocks_hold_their_locs(
-            pyramid.perm, bs, be, x, y, float(size)
-        ):
-            return False
+    if not _validate_index_block_shapes(pyramid, x, y):
+        return False
     base = pyramid.block_sizes[0]
     L0, K0, root_bits = _quadtree_geometry(pyramid.width, pyramid.height, base)
     if pyramid.root_bits != root_bits or pyramid.fine_bits <= 0:

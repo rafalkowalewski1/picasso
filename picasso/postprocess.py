@@ -603,44 +603,16 @@ def pick_similar(
     new_picks : list of tuples
         List of similar picks, in the same format as ``picks``.
     """
-    _valid_shapes = ("Circle", "Rectangle", "Square", "Box")
-    assert (
-        pick_shape in _valid_shapes
-    ), f"Invalid pick shape: {pick_shape}. Choose one of {_valid_shapes}."
+    _validate_pick_similar_args(pick_shape, pick_size, grid_spacing)
     if len(picks) == 0:
         return []
-    if pick_shape != "Box":
-        assert isinstance(
-            pick_size, (int, float)
-        ), "pick_size must be a number."
-    if grid_spacing is not None and pick_shape != "Rectangle":
-        raise ValueError(
-            "grid_spacing is only supported for rectangular picks."
-        )
 
     # the index grid size must guarantee that the 3x3 block neighborhood
     # around a pick's center contains all localizations in that pick
-    if pick_shape == "Rectangle":
-        length = _median_pick_length(picks)
-        block_size = np.sqrt(length**2 + pick_size**2) / 2
-    elif pick_shape == "Box":
-        box_w, box_h = _median_box_size(picks)
-        # a box reaches at most half its longer side in x and y
-        block_size = max(box_w, box_h) / 2
-    else:  # circles and squares reach at most pick_size / 2 in x and y
-        block_size = pick_size / 2
-    if _is_pyramid(index_blocks):
-        # the grid search below walks blocks of the pick size, which
-        # the pyramid does not have; circular picks still use it to
-        # characterize the current picks (see _pick_similar_circular)
-        if pick_shape != "Circle":
-            index_blocks = None
-    elif index_blocks is not None and not np.isclose(
-        index_blocks[1], block_size
-    ):
-        index_blocks = None
-    if index_blocks is None:
-        index_blocks = get_index_blocks(locs, info, block_size)
+    block_size = _pick_similar_block_size(pick_shape, picks, pick_size)
+    index_blocks = _resolve_pick_similar_index_blocks(
+        locs, info, index_blocks, pick_shape, block_size
+    )
 
     if pick_shape == "Circle":
         return _pick_similar_circular(
@@ -651,6 +623,7 @@ def pick_similar(
             info, picks, pick_size, std_range, index_blocks
         )
     elif pick_shape == "Box":
+        box_w, box_h = _median_box_size(picks)
         return _pick_similar_box(
             info, picks, box_w, box_h, std_range, index_blocks
         )
@@ -658,6 +631,64 @@ def pick_similar(
         return _pick_similar_rectangular(
             info, picks, pick_size, std_range, index_blocks, grid_spacing
         )
+
+
+def _validate_pick_similar_args(
+    pick_shape: str, pick_size: float | None, grid_spacing: float | None
+) -> None:
+    """Validate ``pick_similar``'s shape/size/spacing arguments."""
+    _valid_shapes = ("Circle", "Rectangle", "Square", "Box")
+    assert (
+        pick_shape in _valid_shapes
+    ), f"Invalid pick shape: {pick_shape}. Choose one of {_valid_shapes}."
+    if pick_shape != "Box":
+        assert isinstance(
+            pick_size, (int, float)
+        ), "pick_size must be a number."
+    if grid_spacing is not None and pick_shape != "Rectangle":
+        raise ValueError(
+            "grid_spacing is only supported for rectangular picks."
+        )
+
+
+def _pick_similar_block_size(
+    pick_shape: str, picks: list[tuple], pick_size: float | None
+) -> float:
+    """Index-block half-size covering a pick's 3x3 block neighborhood."""
+    if pick_shape == "Rectangle":
+        length = _median_pick_length(picks)
+        return np.sqrt(length**2 + pick_size**2) / 2
+    if pick_shape == "Box":
+        box_w, box_h = _median_box_size(picks)
+        # a box reaches at most half its longer side in x and y
+        return max(box_w, box_h) / 2
+    # circles and squares reach at most pick_size / 2 in x and y
+    return pick_size / 2
+
+
+def _resolve_pick_similar_index_blocks(
+    locs: pd.DataFrame,
+    info: list[dict],
+    index_blocks: tuple | None,
+    pick_shape: str,
+    block_size: float,
+) -> tuple:
+    """Reuse ``index_blocks`` when compatible, else rebuild for ``block_size``.
+
+    A pyramid has no fixed block size; keep it only for circular picks,
+    which use it to characterize the current picks rather than to walk
+    the grid search (see ``_pick_similar_circular``).
+    """
+    if _is_pyramid(index_blocks):
+        if pick_shape != "Circle":
+            index_blocks = None
+    elif index_blocks is not None and not np.isclose(
+        index_blocks[1], block_size
+    ):
+        index_blocks = None
+    if index_blocks is None:
+        index_blocks = get_index_blocks(locs, info, block_size)
+    return index_blocks
 
 
 def _median_pick_length(picks: list[tuple]) -> float:

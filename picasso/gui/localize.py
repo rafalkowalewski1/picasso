@@ -340,8 +340,8 @@ CAMERA_CALIB_TOOLTIP = (
     "noise model.\n\n"
     "Least-squares fits are unaffected by the noise model itself but their "
     "reported\n"
-    "uncertainty grows. **For sCMOS data prefer an MLE method, whose Cramer-Rao"
-    "\nbound is exact under the model.**\n\n"
+    "uncertainty grows. **For sCMOS data prefer an MLE method, whose\n"
+    "Cramer-Rao bound is exact under the model.**\n\n"
     "Build one with Calibrate > Compute sCMOS camera calibration."
 )
 
@@ -611,6 +611,57 @@ class MovieLoadWorker(QtCore.QObject):
 
         return wrapper
 
+    def _make_report(self):
+        """Build the mid-file progress/cancellation callback for one job.
+
+        Queued to the GUI thread as io scans a file's IFDs, so the bar
+        advances smoothly within a file. It is also the only code of ours
+        that runs *during* the otherwise-blocking io call, so it doubles
+        as the mid-file cancellation point.
+        """
+
+        def report(done: int, total: int) -> None:
+            if self._canceled:
+                raise _LoadCanceledError
+            self.subprogress.emit(done, total)
+
+        return report
+
+    def _load_job(self, path: str, job: list[str], prompt, report):
+        """Load one job with the loader matching the worker's mode.
+
+        Returns
+        -------
+        list of tuple
+            ``(movie, info, path)`` triples, empty if the loader itself
+            reported nothing to load (e.g. the user skipped a prompt).
+        """
+        if self.concat:
+            result = io.load_tif_concatenated(
+                job, prompt_info=prompt, progress=report
+            )
+            if result is None:
+                return []
+            movie, info = result
+            return [(movie, info, path)]
+        elif self.load_all:
+            result = io.load_movie_all(
+                path, prompt_info=prompt, progress=report
+            )
+            if result is None:
+                return []
+            file_movies, file_infos = result
+            return [
+                (movie, info, path)
+                for movie, info in zip(file_movies, file_infos)
+            ]
+        else:
+            result = io.load_movie(path, prompt_info=prompt, progress=report)
+            if result is None:
+                return []
+            movie, info = result
+            return [(movie, info, path)]
+
     def run(self) -> None:
         movies, infos, paths = [], [], []
         try:
@@ -629,48 +680,12 @@ class MovieLoadWorker(QtCore.QObject):
                 )
                 self.progress.emit(i, label)
                 prompt = self._proxy_prompt(self._prompt_for_path(path))
-
-                # Called (queued to the GUI thread) as io scans the
-                # file's IFDs, so the bar advances smoothly within a
-                # file. It is also the only code of ours that runs
-                # *during* the otherwise-blocking io call, so it doubles
-                # as the mid-file cancellation point.
-                def report(done: int, total: int) -> None:
-                    if self._canceled:
-                        raise _LoadCanceledError
-                    self.subprogress.emit(done, total)
-
-                if self.concat:
-                    result = io.load_tif_concatenated(
-                        job, prompt_info=prompt, progress=report
-                    )
-                    if result is None:
-                        continue
-                    movie, info = result
+                report = self._make_report()
+                job_result = self._load_job(path, job, prompt, report)
+                for movie, info, p in job_result:
                     movies.append(movie)
                     infos.append(info)
-                    paths.append(path)
-                elif self.load_all:
-                    result = io.load_movie_all(
-                        path, prompt_info=prompt, progress=report
-                    )
-                    if result is None:
-                        continue
-                    file_movies, file_infos = result
-                    for movie, info in zip(file_movies, file_infos):
-                        movies.append(movie)
-                        infos.append(info)
-                        paths.append(path)
-                else:
-                    result = io.load_movie(
-                        path, prompt_info=prompt, progress=report
-                    )
-                    if result is None:
-                        continue
-                    movie, info = result
-                    movies.append(movie)
-                    infos.append(info)
-                    paths.append(path)
+                    paths.append(p)
         except Exception as e:  # noqa: BLE001 - reported to the GUI
             if not self._canceled:
                 self.failed.emit(str(e))
@@ -759,16 +774,17 @@ class View(QtWidgets.QGraphicsView):
         self.roi_mngs = []
         # per-region fit settings in split-FOV mode, see roi_params above
         self.roi_params = []
-        # Split-FOV region mode: ROIs are equal-size rectangular channels of one
-        # movie. The first region drawn fixes the size (derived live from the
-        # existing regions, so clearing them frees the size again); further
-        # regions snap to it, and an existing region can be dragged (moved) to
-        # fine-tune its registration. Toggled by ``window.set_split_fov_mode``.
+        # Split-FOV region mode: ROIs are equal-size rectangular channels of
+        # one movie. The first region drawn fixes the size (derived live
+        # from the existing regions, so clearing them frees the size again);
+        # further regions snap to it, and an existing region can be dragged
+        # (moved) to fine-tune its registration. Toggled by
+        # ``window.set_split_fov_mode``.
         self.split_fov_mode = False
         self._moving_roi = None  # index of the region being dragged
         self._move_anchor = None  # (scene_dy, scene_dx) press offset in region
-        # A double click fires press/release/doubleClick/release; this flag lets
-        # the trailing release be ignored so deleting a region does not
+        # A double click fires press/release/doubleClick/release; this flag
+        # lets the trailing release be ignored so deleting a region does not
         # immediately re-add one at the same spot.
         self._suppress_release = False
 
@@ -2210,8 +2226,9 @@ class CalibrateSplineDialog(lib.Dialog):
         """Show the dialog and return the chosen step size, number of frames
         per step, frame order, spline model, magnification factor, whether to
         correct the z bias, whether to link photons across channels, the
-        channel-registration model, and whether it was accepted. ``multichannel`` shows the multichannel-only options (link
-        photons, registration model); they are hidden for a single-channel
+        channel-registration model, and whether it was accepted.
+        ``multichannel`` shows the multichannel-only options (link photons,
+        registration model); they are hidden for a single-channel
         calibration."""
         dialog = CalibrateSplineDialog(parent, multichannel=multichannel)
         result = dialog.exec()
@@ -2503,9 +2520,9 @@ class RegisterChannelsDialog(lib.Dialog):
         )
         self.multi_fov.setToolTip(
             "CHECK when the bead movie images a different field of view in\n"
-            "every frame, e.g. a stage scan over several positions. Beads are\n"
-            "then detected frame by frame and only ever paired within the\n"
-            "same frame.\n\n"
+            "every frame, e.g. a stage scan over several positions. Beads\n"
+            "are then detected frame by frame and only ever paired within\n"
+            "the same frame.\n\n"
             "UNCHECK for a plain bead acquisition, where the frames are\n"
             "repeats of one field and are averaged to beat down the noise."
         )
@@ -3486,12 +3503,13 @@ class ParametersDialog(lib.Dialog):
         preview_row.addWidget(self.preview_checkbox)
         self.link_colors_checkbox = QtWidgets.QCheckBox("Link colors")
         self.link_colors_checkbox.setToolTip(
-            "Color-code the identification boxes by their cross-channel link.\n\n"
-            "Spots paired across channels share a color; unmatched spots are\n"
-            "gray. Pairing uses the loaded multichannel / split-FOV spline\n"
-            "calibration's inter-channel transform. With no calibration\n"
-            "loaded, the transform is estimated from the identifications "
-            "themselves."
+            "Color-code the identification boxes by their cross-channel\n"
+            "link.\n\n"
+            "Spots paired across channels share a color; unmatched spots\n"
+            "are gray. Pairing uses the loaded multichannel / split-FOV\n"
+            "spline calibration's inter-channel transform. With no\n"
+            "calibration loaded, the transform is estimated from the\n"
+            "identifications themselves."
         )
         self.link_colors_checkbox.setTristate(False)
         self.link_colors_checkbox.stateChanged.connect(
@@ -3565,13 +3583,14 @@ class ParametersDialog(lib.Dialog):
         # Split-FOV: treat the drawn ROIs as separate channels of one movie.
         self.split_fov_checkbox = QtWidgets.QCheckBox("Regions = channels")
         self.split_fov_checkbox.setToolTip(
-            "Split-FOV mode: treat the drawn ROIs as separate channels imaged\n"
-            "side-by-side on one camera (spectral / biplane split\n"
+            "Split-FOV mode: treat the drawn ROIs as separate channels\n"
+            "imaged side-by-side on one camera (spectral / biplane split\n"
             "optics). The first region is the reference channel and all\n"
-            "regions are kept the same size: drag once to set the size, click\n"
-            "to drop more regions, drag a region (or use the arrow keys) to\n"
-            "fine-tune its registration. 'Calibrate spline PSF' and the\n"
-            "spline fit then use these regions as channels of this movie.\n\n"
+            "regions are kept the same size: drag once to set the size,\n"
+            "click to drop more regions, drag a region (or use the arrow\n"
+            "keys) to fine-tune its registration. 'Calibrate spline PSF'\n"
+            "and the spline fit then use these regions as channels of\n"
+            "this movie.\n\n"
             "Each region also carries its own min. net gradient, since the\n"
             "channels need not share a brightness scale: select a region\n"
             "and the slider above tunes that region alone."
@@ -4893,10 +4912,11 @@ class ParametersDialog(lib.Dialog):
             )
             self.spline_calib_label.setText(os.path.basename(path))
             self.spline_calib_label.setToolTip(path)
-            # split-FOV: drop the calibration's channel regions into the view
-            # and enter split-FOV mode, so the registration can be inspected and
-            # fine-tuned on this data (arrow-key nudge / drag) and re-drawn if
-            # the split moved. The fit then uses whatever regions are shown.
+            # split-FOV: drop the calibration's channel regions into the
+            # view and enter split-FOV mode, so the registration can be
+            # inspected and fine-tuned on this data (arrow-key nudge /
+            # drag) and re-drawn if the split moved. The fit then uses
+            # whatever regions are shown.
             if self.spline_calibration.get("split_fov"):
                 regions = self.spline_calibration.get("regions") or []
                 self.window.view.rois = [
@@ -5973,9 +5993,14 @@ class Window(QtWidgets.QMainWindow):
 
         self.load_user_settings()
 
-    def load_user_settings(self) -> None:
-        """Load user settings based on the last-used parameters."""
-        settings = io.load_user_settings()
+    def _load_pwd_box_gradient(self, settings: dict) -> list:
+        """Restore the last-used working directory, box size and gradient.
+
+        Returns
+        -------
+        list
+            The working directory (``pwd``), for storing on ``self``.
+        """
         pwd = []
         box_size = []
         gradient = []
@@ -5992,7 +6017,10 @@ class Window(QtWidgets.QMainWindow):
             self.parameters_dialog.box_spinbox.setValue(box_size)
         if type(gradient) is int:
             self.parameters_dialog.mng_slider.setValue(gradient)
+        return pwd
 
+    def _load_filter_settings(self, settings: dict) -> None:
+        """Restore the last-used temporal median and Gaussian filter."""
         temporal_median = settings["Localize"].get("temporal_median", None)
         if type(temporal_median) is int and temporal_median > 0:
             self.parameters_dialog.temporal_median_spinbox.setValue(
@@ -6010,8 +6038,12 @@ class Window(QtWidgets.QMainWindow):
                 float(gaussian_sigma)
             )
 
-        # Restore the last-used fitting model and optimizer. The model must
-        # be set first, since it repopulates the optimizer combobox.
+    def _load_fit_settings(self, settings: dict) -> None:
+        """Restore the last-used fitting model, optimizer and fit mode.
+
+        The model must be set first, since it repopulates the optimizer
+        combobox.
+        """
         fit_model = settings["Localize"].get("fit_model", None)
         if fit_model is not None:
             index = self.parameters_dialog.fit_model.findText(fit_model)
@@ -6030,6 +6062,12 @@ class Window(QtWidgets.QMainWindow):
             if index >= 0:
                 self.parameters_dialog.fit_mode_combo.setCurrentIndex(index)
 
+    def load_user_settings(self) -> None:
+        """Load user settings based on the last-used parameters."""
+        settings = io.load_user_settings()
+        pwd = self._load_pwd_box_gradient(settings)
+        self._load_filter_settings(settings)
+        self._load_fit_settings(settings)
         self.pwd = pwd
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -6562,6 +6600,66 @@ class Window(QtWidgets.QMainWindow):
         self.affine_calibration_worker = None
         self.status_bar.showMessage("Lateral calibration canceled.")
 
+    @staticmethod
+    def _load_camera_calibration_movies(
+        dark_path: str, light_paths: list[str]
+    ) -> tuple:
+        """Load the dark movie and any bright movies for a calibration.
+
+        Returns
+        -------
+        tuple
+            ``(dark_movie, light_movies, total_frames)``.
+        """
+        dark_movie, _ = io.load_movie(dark_path)
+        light_movies = []
+        for path in light_paths:
+            movie, _ = io.load_movie(path)
+            light_movies.append(movie)
+        total = len(dark_movie) + sum(len(m) for m in light_movies)
+        return dark_movie, light_movies, total
+
+    @staticmethod
+    def _camera_calibration_summary_lines(
+        calibration: dict,
+        out_path: str,
+        caught: list,
+        plot_path: str | None,
+        plot_error: str | None,
+    ) -> list[str]:
+        """Build the informational message shown after a calibration run."""
+        lines = [
+            f"Frames used: {calibration['Frames']}",
+            "Offset: median " f"{calibration['Offset median (ADU)']:.2f} ADU",
+            "Readout variance: median "
+            f"{calibration['Variance median (ADU^2)']:.2f}, max "
+            f"{calibration['Variance max (ADU^2)']:.1f} ADU^2",
+            f"Hot pixels: {calibration['Hot pixels']}",
+        ]
+        if calibration.get("gain") is not None:
+            lines.append(
+                "Gain: median "
+                f"{calibration['Gain median (ADU/e-)']:.3f} ADU/e- from "
+                f"{calibration['Gain levels']} illumination levels"
+            )
+        else:
+            lines.append(
+                "No gain map (no light movies given); the scalar "
+                "Sensitivity is still used."
+            )
+        for warning in caught:
+            lines.append("")
+            lines.append(str(warning.message))
+        lines.append("")
+        lines.append(f"Saved to {out_path}.")
+        if plot_path is None:
+            lines.append(
+                "The diagnostic plot could not be saved: " + plot_error
+            )
+        else:
+            lines.append(f"Maps and histograms: {plot_path}")
+        return lines
+
     def calibrate_camera(self) -> None:
         """Characterize the sCMOS camera from a dark movie.
 
@@ -6583,12 +6681,9 @@ class Window(QtWidgets.QMainWindow):
             return
 
         try:
-            dark_movie, _ = io.load_movie(dark_path)
-            light_movies = []
-            for path in light_paths:
-                movie, _ = io.load_movie(path)
-                light_movies.append(movie)
-            total = len(dark_movie) + sum(len(m) for m in light_movies)
+            dark_movie, light_movies, total = (
+                self._load_camera_calibration_movies(dark_path, light_paths)
+            )
         except Exception as error:
             QtWidgets.QMessageBox.critical(
                 self, "Camera calibration", str(error)
@@ -6626,42 +6721,16 @@ class Window(QtWidgets.QMainWindow):
         # a cluster of hot pixels, so the maps go next to the calibration as
         # a diagnostic image.
         plot_path = scmos.plot_path(out_path)
+        plot_error = None
         try:
             scmos.save_calibration_plot(calibration, plot_path)
         except Exception as error:
             plot_path = None
             plot_error = str(error)
 
-        lines = [
-            f"Frames used: {calibration['Frames']}",
-            "Offset: median " f"{calibration['Offset median (ADU)']:.2f} ADU",
-            "Readout variance: median "
-            f"{calibration['Variance median (ADU^2)']:.2f}, max "
-            f"{calibration['Variance max (ADU^2)']:.1f} ADU^2",
-            f"Hot pixels: {calibration['Hot pixels']}",
-        ]
-        if calibration.get("gain") is not None:
-            lines.append(
-                "Gain: median "
-                f"{calibration['Gain median (ADU/e-)']:.3f} ADU/e- from "
-                f"{calibration['Gain levels']} illumination levels"
-            )
-        else:
-            lines.append(
-                "No gain map (no light movies given); the scalar "
-                "Sensitivity is still used."
-            )
-        for warning in caught:
-            lines.append("")
-            lines.append(str(warning.message))
-        lines.append("")
-        lines.append(f"Saved to {out_path}.")
-        if plot_path is None:
-            lines.append(
-                "The diagnostic plot could not be saved: " + plot_error
-            )
-        else:
-            lines.append(f"Maps and histograms: {plot_path}")
+        lines = self._camera_calibration_summary_lines(
+            calibration, out_path, caught, plot_path, plot_error
+        )
         QtWidgets.QMessageBox.information(
             self, "Camera calibration", "\n".join(lines)
         )
@@ -8380,6 +8449,83 @@ class Window(QtWidgets.QMainWindow):
         finally:
             self._drawing_frame = False
 
+    def _draw_rois(self, split_fov: bool, region_mngs: list) -> None:
+        """Draw the ROI rectangles (in scene/pixel coordinates) and, in
+        split-FOV mode, label each with its channel index and threshold."""
+        for i, ((y_min, x_min), (y_max, x_max)) in enumerate(self.view.rois):
+            if i == self.view.selected_roi:
+                color = QtGui.QColor("cyan")
+            elif split_fov:
+                # split-FOV: highlight the reference channel (index 0)
+                color = (
+                    QtGui.QColor("lime") if i == 0 else QtGui.QColor("orange")
+                )
+            else:
+                color = QtGui.QColor("blue")
+            pen = QtGui.QPen(color)
+            pen.setCosmetic(True)  # constant width regardless of zoom
+            self.scene.addRect(
+                QtCore.QRectF(x_min, y_min, x_max - x_min, y_max - y_min),
+                pen,
+            )
+            if split_fov:
+                # label each region by its channel index (0 = reference)
+                # and the threshold it is identified with
+                label = localize.region_label(i)
+                if i < len(region_mngs):
+                    label += f" ({region_mngs[i]:,})"
+                text = self.scene.addSimpleText(label)
+                text.setBrush(QtGui.QBrush(color))
+                text.setPos(float(x_min), float(y_min))
+                item_flag = (
+                    QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations  # noqa: E501
+                )
+                text.setFlag(item_flag)
+
+    def _draw_frame_spots(self) -> None:
+        """Draw identification boxes, or a live preview, for the current
+        frame; a no-op if the bead-calibration pairing overlay drew
+        instead."""
+        if self.draw_affine_pairing():
+            return
+        if self.ready_for_fit:
+            box = (self.last_identification_info or {}).get(
+                "Box Size", self.parameters["Box Size"]
+            )
+            if not self._draw_linked_identifications(
+                self.curr_frame_number, box
+            ):
+                identifications_frame = self.identifications[
+                    self.identifications.frame == self.curr_frame_number
+                ]
+                self.draw_identifications(
+                    identifications_frame, box, QtGui.QColor("yellow")
+                )
+        elif self.parameters_dialog.preview_checkbox.isChecked():
+            # scrubbing into a new temporal window costs one median
+            # (~0.1 s at 512x512, more for larger frames), and the
+            # link colors identify the other channels' frames on top
+            QtWidgets.QApplication.setOverrideCursor(
+                QtCore.Qt.CursorShape.WaitCursor
+            )
+            try:
+                identifications_frame = localize.identify_by_frame_number(
+                    self.identification_movie(),
+                    self.parameters["Min. Net Gradient"],
+                    self.parameters["Box Size"],
+                    self.curr_frame_number,
+                    roi=self.identification_rois(),
+                    frame_bounds=self.frame_range,
+                )
+                self.draw_preview_identifications(
+                    identifications_frame,
+                    self.parameters["Box Size"],
+                )
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+        else:
+            self.status_bar.showMessage("")
+
     def _draw_frame(self) -> None:
         """Actual frame-drawing implementation, wrapped by ``draw_frame``
         with a re-entrancy guard."""
@@ -8405,83 +8551,8 @@ class Window(QtWidgets.QMainWindow):
             # not enlarge the scene and shift/re-center the view
             self.scene.setSceneRect(QtCore.QRectF(pixmap.rect()))
             self.view.setScene(self.scene)
-            # draw the ROI rectangles (in scene/pixel coordinates)
-            split_fov = self.view.split_fov_mode
-            region_mngs = self.region_mngs()
-            for i, ((y_min, x_min), (y_max, x_max)) in enumerate(
-                self.view.rois
-            ):
-                if i == self.view.selected_roi:
-                    color = QtGui.QColor("cyan")
-                elif split_fov:
-                    # split-FOV: highlight the reference channel (index 0)
-                    color = (
-                        QtGui.QColor("lime")
-                        if i == 0
-                        else QtGui.QColor("orange")
-                    )
-                else:
-                    color = QtGui.QColor("blue")
-                pen = QtGui.QPen(color)
-                pen.setCosmetic(True)  # constant width regardless of zoom
-                self.scene.addRect(
-                    QtCore.QRectF(x_min, y_min, x_max - x_min, y_max - y_min),
-                    pen,
-                )
-                if split_fov:
-                    # label each region by its channel index (0 = reference)
-                    # and the threshold it is identified with
-                    label = localize.region_label(i)
-                    if i < len(region_mngs):
-                        label += f" ({region_mngs[i]:,})"
-                    text = self.scene.addSimpleText(label)
-                    text.setBrush(QtGui.QBrush(color))
-                    text.setPos(float(x_min), float(y_min))
-                    text.setFlag(
-                        QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
-                    )
-            if self.draw_affine_pairing():
-                pass
-            elif self.ready_for_fit:
-                box = (self.last_identification_info or {}).get(
-                    "Box Size", self.parameters["Box Size"]
-                )
-                if not self._draw_linked_identifications(
-                    self.curr_frame_number, box
-                ):
-                    identifications_frame = self.identifications[
-                        self.identifications.frame == self.curr_frame_number
-                    ]
-                    self.draw_identifications(
-                        identifications_frame, box, QtGui.QColor("yellow")
-                    )
-            else:
-                if self.parameters_dialog.preview_checkbox.isChecked():
-                    # scrubbing into a new temporal window costs one median
-                    # (~0.1 s at 512x512, more for larger frames), and the
-                    # link colors identify the other channels' frames on top
-                    QtWidgets.QApplication.setOverrideCursor(
-                        QtCore.Qt.CursorShape.WaitCursor
-                    )
-                    try:
-                        identifications_frame = (
-                            localize.identify_by_frame_number(
-                                self.identification_movie(),
-                                self.parameters["Min. Net Gradient"],
-                                self.parameters["Box Size"],
-                                self.curr_frame_number,
-                                roi=self.identification_rois(),
-                                frame_bounds=self.frame_range,
-                            )
-                        )
-                        self.draw_preview_identifications(
-                            identifications_frame,
-                            self.parameters["Box Size"],
-                        )
-                    finally:
-                        QtWidgets.QApplication.restoreOverrideCursor()
-                else:
-                    self.status_bar.showMessage("")
+            self._draw_rois(self.view.split_fov_mode, self.region_mngs())
+            self._draw_frame_spots()
             locs_frame = self._current_frame_locs()
             if locs_frame is not None:
                 for _, loc in locs_frame.iterrows():
@@ -8868,20 +8939,38 @@ class Window(QtWidgets.QMainWindow):
             return False
         n_channels = int(cal["n_channels"])
         tol = 1.5 * float(box)
-        try:
-            if cal.get("split_fov"):
-                boxes = self._linked_boxes_split_fov(
-                    cal, n_channels, frame_number, tol
-                )
-            else:
-                boxes = self._linked_boxes_multichannel(
-                    cal, n_channels, frame_number, tol
-                )
-        except Exception:
-            # a malformed calibration must never break the viewer; fall back
-            return False
+        boxes = self._compute_link_boxes(cal, n_channels, frame_number, tol)
         if boxes is None:
             return False
+        self._draw_link_boxes(boxes, box)
+        return True
+
+    def _compute_link_boxes(
+        self, cal: dict, n_channels: int, frame_number: int, tol: float
+    ) -> list | None:
+        """Dispatch to the split-FOV or multichannel box builder for
+        ``cal``'s layout.
+
+        Returns
+        -------
+        list or None
+            ``(x, y, color)`` triples, or None on a malformed calibration
+            (never lets that break the viewer).
+        """
+        try:
+            if cal.get("split_fov"):
+                return self._linked_boxes_split_fov(
+                    cal, n_channels, frame_number, tol
+                )
+            return self._linked_boxes_multichannel(
+                cal, n_channels, frame_number, tol
+            )
+        except Exception:
+            return None
+
+    def _draw_link_boxes(self, boxes: list, box: int) -> None:
+        """Paint the cross-channel-link boxes and record the matched
+        count in ``self._link_box_counts``."""
         self._link_box_counts = (
             sum(1 for *_, color in boxes if color != LINK_UNMATCHED_COLOR),
             len(boxes),
@@ -8897,7 +8986,6 @@ class Window(QtWidgets.QMainWindow):
                 item.setToolTip(format_hover_tooltip(loc))
             else:
                 item.setToolTip(f"x: {x:.6g}\ny: {y:.6g}")
-        return True
 
     def _link_calibration_for_mode(
         self, cal: dict, n_channels: int
@@ -8905,11 +8993,12 @@ class Window(QtWidgets.QMainWindow):
         """The loaded calibration's registration, adapted to how the data are
         currently laid out (split-FOV regions vs. separate channels).
 
-        The calibration is *always* the source of the inter-channel transform
-        when one is loaded - the link colors then show exactly the pairing the
-        fit will use, so a stale registration shows up as gray boxes and can be
-        re-registered on purpose rather than being silently papered over. Only
-        the placement is adapted when the layout differs from the calibration's:
+        The calibration is *always* the source of the inter-channel
+        transform when one is loaded - the link colors then show exactly
+        the pairing the fit will use, so a stale registration shows up as
+        gray boxes and can be re-registered on purpose rather than being
+        silently papered over. Only the placement is adapted when the
+        layout differs from the calibration's:
 
         * split-FOV mode with a separate-movie calibration: both its channels
           start at the frame origin, so its transforms already *are* the
@@ -9028,10 +9117,11 @@ class Window(QtWidgets.QMainWindow):
         without a loaded spline calibration.
 
         The transforms come from
-        :func:`spline.estimate_transforms_from_identifications`, which searches
-        the mirror orientations - so a flipped channel (image splitter, mirrored
-        quadrant) links just as it does with a calibration. Channels that cannot
-        be registered fall back to the identity, i.e. the plain overlay.
+        :func:`spline.estimate_transforms_from_identifications`, which
+        searches the mirror orientations - so a flipped channel (image
+        splitter, mirrored quadrant) links just as it does with a
+        calibration. Channels that cannot be registered fall back to the
+        identity, i.e. the plain overlay.
         Estimating is not free, so the result is cached until the detections,
         the box size or the ROIs change. Returns None if there is nothing to
         link.
@@ -9130,20 +9220,23 @@ class Window(QtWidgets.QMainWindow):
         y = np.asarray(ids["y"], dtype=float)
         return ids[(x >= x0) & (x < x1) & (y >= y0) & (y < y1)]
 
-    def _linked_boxes_split_fov(
-        self, cal: dict, n_channels: int, frame_number: int, tol: float
-    ) -> list | None:
-        """Color-coded boxes for a split-FOV calibration: every region lives in
-        one frame, so paired boxes across regions get the same color. Returns a
-        list of ``(x, y, QColor)`` for all this-frame spots, or None to fall
-        back."""
-        ids = self.link_identifications()
-        if ids is None or len(ids) == 0:
-            return None
+    @staticmethod
+    def _split_fov_link_setup(
+        cal: dict, n_channels: int, view
+    ) -> tuple | None:
+        """Region rectangles and per-region inter-channel transforms for
+        split-FOV link boxes.
+
+        Returns
+        -------
+        tuple or None
+            ``(region_rects, transforms)``, or None if the region count
+            does not match ``n_channels``.
+        """
         # place the channels at the drawn ROIs when they match the channel
         # count (reference first), else the calibration's stored regions
-        if self.view.split_fov_mode and len(self.view.rois) == n_channels:
-            regions = [list(map(list, r)) for r in self.view.rois]
+        if view.split_fov_mode and len(view.rois) == n_channels:
+            regions = [list(map(list, r)) for r in view.rois]
         else:
             regions = cal.get("regions")
         if not regions or len(regions) != n_channels:
@@ -9158,13 +9251,14 @@ class Window(QtWidgets.QMainWindow):
                 )
             ]
         transforms = localize.compose_region_transforms(region_rects, affines)
-        m = np.asarray(ids["frame"]) == frame_number
-        xy = np.column_stack(
-            [np.asarray(ids["x"])[m], np.asarray(ids["y"])[m]]
-        ).astype(float)
-        if len(xy) == 0:
-            return []
-        # assign each spot to the region that contains it (first match wins)
+        return region_rects, transforms
+
+    @staticmethod
+    def _assign_spots_to_regions(
+        xy: np.ndarray, region_rects: list
+    ) -> np.ndarray:
+        """Index of the region containing each spot (first match wins),
+        -1 if none."""
         region_of = np.full(len(xy), -1, dtype=int)
         for ci, ((y0, x0), (y1, x1)) in enumerate(region_rects):
             inside = (
@@ -9174,13 +9268,29 @@ class Window(QtWidgets.QMainWindow):
                 & (xy[:, 1] < y1)
             )
             region_of[(region_of < 0) & inside] = ci
-        ref_local = np.where(region_of == 0)[0]
-        ref_xy = xy[ref_local]
-        colors = [LINK_UNMATCHED_COLOR] * len(xy)
-        # A reference spot links only if matched in EVERY other region/channel
-        # (the bead is found in all channels). Count per reference spot, then
-        # color; spots missing from any channel stay gray.
-        n_ref = len(ref_local)
+        return region_of
+
+    @staticmethod
+    def _link_match_complete(
+        ref_xy: np.ndarray,
+        xy: np.ndarray,
+        region_of: np.ndarray,
+        transforms: list,
+        n_channels: int,
+        tol: float,
+    ) -> tuple:
+        """Which reference spots match in every other region/channel (the
+        bead is found in all channels; spots missing from any channel stay
+        unmatched).
+
+        Returns
+        -------
+        tuple
+            ``(complete, per_channel)``: a bool array over reference spots,
+            and a list of ``(channel_local_indices, matches)`` per channel
+            for coloring the matched non-reference spots.
+        """
+        n_ref = len(ref_xy)
         match_count = np.zeros(n_ref, dtype=int)
         per_channel: list = []
         n_checked = 0
@@ -9200,6 +9310,35 @@ class Window(QtWidgets.QMainWindow):
             if n_checked
             else np.zeros(n_ref, dtype=bool)
         )
+        return complete, per_channel
+
+    def _linked_boxes_split_fov(
+        self, cal: dict, n_channels: int, frame_number: int, tol: float
+    ) -> list | None:
+        """Color-coded boxes for a split-FOV calibration: every region lives in
+        one frame, so paired boxes across regions get the same color. Returns a
+        list of ``(x, y, QColor)`` for all this-frame spots, or None to fall
+        back."""
+        ids = self.link_identifications()
+        if ids is None or len(ids) == 0:
+            return None
+        setup = self._split_fov_link_setup(cal, n_channels, self.view)
+        if setup is None:
+            return None
+        region_rects, transforms = setup
+        m = np.asarray(ids["frame"]) == frame_number
+        xy = np.column_stack(
+            [np.asarray(ids["x"])[m], np.asarray(ids["y"])[m]]
+        ).astype(float)
+        if len(xy) == 0:
+            return []
+        region_of = self._assign_spots_to_regions(xy, region_rects)
+        ref_local = np.where(region_of == 0)[0]
+        ref_xy = xy[ref_local]
+        colors = [LINK_UNMATCHED_COLOR] * len(xy)
+        complete, per_channel = self._link_match_complete(
+            ref_xy, xy, region_of, transforms, n_channels, tol
+        )
         # color non-reference spots that pair with a fully-linked ref spot
         for chan_local, matches in per_channel:
             for tj, rk in matches.items():
@@ -9211,14 +9350,64 @@ class Window(QtWidgets.QMainWindow):
                 colors[gi] = LINK_COLORS[rk % len(LINK_COLORS)]
         return [(xy[i, 0], xy[i, 1], colors[i]) for i in range(len(xy))]
 
+    @staticmethod
+    def _frame_xy(ids, frame_number: int) -> np.ndarray:
+        """XY coordinates of ``ids``' spots in ``frame_number``, empty if
+        ``ids`` is None or has none."""
+        if ids is None or len(ids) == 0:
+            return np.empty((0, 2), dtype=float)
+        m = np.asarray(ids["frame"]) == frame_number
+        return np.column_stack(
+            [np.asarray(ids["x"])[m], np.asarray(ids["y"])[m]]
+        ).astype(float)
+
+    def _multichannel_link_complete(
+        self,
+        ref_xy: np.ndarray,
+        transforms: list,
+        n_channels: int,
+        tol: float,
+        frame_number: int,
+    ) -> np.ndarray:
+        """Which reference spots of a multichannel calibration are matched
+        in EVERY other channel (i.e. the bead is found in all channels);
+        spots missing from any channel stay gray.
+
+        Returns
+        -------
+        numpy.ndarray
+            Bool array over reference spots.
+        """
+        n_ref = len(ref_xy)
+        match_count = np.zeros(n_ref, dtype=int)
+        n_checked = 0
+        for c2 in range(1, n_channels):
+            if c2 >= len(self.channels):
+                continue
+            n_checked += 1
+            chan_xy = self._frame_xy(
+                self.link_identifications(c2), frame_number
+            )
+            if n_ref == 0 or len(chan_xy) == 0:
+                continue
+            pred = transforms_mod.from_dict(transforms[c2]).apply(ref_xy)
+            matched = _nearest_unique_match(pred, chan_xy, tol)
+            for rk in set(matched.values()):
+                match_count[rk] += 1
+        return (
+            match_count == n_checked
+            if n_checked
+            else np.zeros(n_ref, dtype=bool)
+        )
+
     def _linked_boxes_multichannel(
         self, cal: dict, n_channels: int, frame_number: int, tol: float
     ) -> list | None:
-        """Color-coded boxes for a multichannel calibration (separate movies /
-        one multichannel file): only the current channel is on screen, so a spot
-        keeps its group color as the user switches channels. Returns a list of
-        ``(x, y, QColor)`` for the current channel's this-frame spots, or None to
-        fall back."""
+        """Color-coded boxes for a multichannel calibration (separate
+        movies / one multichannel file): only the current channel is on
+        screen, so a spot keeps its group color as the user switches
+        channels. Returns a list of ``(x, y, QColor)`` for the current
+        channel's this-frame spots, or None to fall back."""
         transforms = cal.get("channel_transforms")
         if not transforms or len(transforms) < n_channels:
             return None
@@ -9228,37 +9417,10 @@ class Window(QtWidgets.QMainWindow):
         if reference_ids is None:
             return None
 
-        def frame_xy(ids) -> np.ndarray:
-            if ids is None or len(ids) == 0:
-                return np.empty((0, 2), dtype=float)
-            m = np.asarray(ids["frame"]) == frame_number
-            return np.column_stack(
-                [np.asarray(ids["x"])[m], np.asarray(ids["y"])[m]]
-            ).astype(float)
-
-        ref_xy = frame_xy(reference_ids)
-
-        # A reference spot counts as linked only if it is matched in EVERY
-        # other channel (i.e. the bead is found in all channels). Count, per
-        # reference spot, the channels it matches; "complete" requires a match
-        # in each channel checked. Spots missing from any channel stay gray.
+        ref_xy = self._frame_xy(reference_ids, frame_number)
         n_ref = len(ref_xy)
-        match_count = np.zeros(n_ref, dtype=int)
-        n_checked = 0
-        for c2 in range(1, n_channels):
-            if c2 >= len(self.channels):
-                continue
-            n_checked += 1
-            chan_xy = frame_xy(self.link_identifications(c2))
-            if n_ref == 0 or len(chan_xy) == 0:
-                continue
-            pred = transforms_mod.from_dict(transforms[c2]).apply(ref_xy)
-            for rk in set(_nearest_unique_match(pred, chan_xy, tol).values()):
-                match_count[rk] += 1
-        complete = (
-            match_count == n_checked
-            if n_checked
-            else np.zeros(n_ref, dtype=bool)
+        complete = self._multichannel_link_complete(
+            ref_xy, transforms, n_channels, tol, frame_number
         )
 
         c = self.current_channel
@@ -9279,7 +9441,7 @@ class Window(QtWidgets.QMainWindow):
         # a non-reference channel: color its detections by the reference spot
         # they pair with, but only when that reference spot links across ALL
         # channels; otherwise gray (matches that spot's box in channel 0)
-        cur_xy = frame_xy(self.link_identifications(c))
+        cur_xy = self._frame_xy(self.link_identifications(c), frame_number)
         if len(cur_xy) == 0:
             return []
         matches = {}
@@ -9948,6 +10110,48 @@ class Window(QtWidgets.QMainWindow):
         )
         self.status_bar.showMessage(message)
 
+    def _linked_count_split_fov(self, cal: dict, box: int) -> tuple | None:
+        """``(n_kept, n_channels, "regions")`` for a split-FOV calibration,
+        or None if there is nothing to link."""
+        ids = self.identifications
+        if ids is None or len(ids) == 0:
+            return None
+        n_channels = int(
+            cal.get("n_channels") or len(cal.get("regions") or [])
+        )
+        regions = None
+        if self.view.split_fov_mode and len(self.view.rois) == n_channels:
+            regions = [list(map(list, r)) for r in self.view.rois]
+        _, n_kept, _ = localize.filter_linked_identifications_split_fov(
+            ids, cal, box, regions=regions
+        )
+        return n_kept, n_channels, "regions"
+
+    def _linked_count_multichannel(self, cal: dict, box: int) -> tuple | None:
+        """``(n_kept, n_channels, "channels")`` for a multichannel
+        calibration, or None if there is nothing to link."""
+        transforms = cal.get("channel_transforms")
+        n_channels = min(
+            int(cal.get("n_channels", len(self.channels))),
+            len(self.channels),
+        )
+        if n_channels < 2 or not transforms or len(transforms) < n_channels:
+            return None
+        # the flat state holds the active channel's detections
+        self._snapshot_current_channel()
+        ids_per_channel = [
+            c.identifications for c in self.channels[:n_channels]
+        ]
+        reference = ids_per_channel[0]
+        if reference is None or len(reference) == 0:
+            return None
+        if all(i is None or len(i) == 0 for i in ids_per_channel[1:]):
+            return None
+        _, n_kept, _ = localize.filter_linked_identifications(
+            ids_per_channel, transforms, box
+        )
+        return n_kept, n_channels, "channels"
+
     def _linked_count_phrase(self, n_detections: int) -> str | None:
         """How many identified spots a joint fit would actually fit.
 
@@ -9976,53 +10180,16 @@ class Window(QtWidgets.QMainWindow):
         )
         self.status_bar.repaint()  # not processEvents: no re-entrant slots
         try:
-            if split_fov:
-                ids = self.identifications
-                if ids is None or len(ids) == 0:
-                    return None
-                n_channels = int(
-                    cal.get("n_channels") or len(cal.get("regions") or [])
-                )
-                regions = None
-                if (
-                    self.view.split_fov_mode
-                    and len(self.view.rois) == n_channels
-                ):
-                    regions = [list(map(list, r)) for r in self.view.rois]
-                _, n_kept, _ = (
-                    localize.filter_linked_identifications_split_fov(
-                        ids, cal, box, regions=regions
-                    )
-                )
-                where = "regions"
-            else:
-                transforms = cal.get("channel_transforms")
-                n_channels = min(
-                    int(cal.get("n_channels", len(self.channels))),
-                    len(self.channels),
-                )
-                if (
-                    n_channels < 2
-                    or not transforms
-                    or len(transforms) < n_channels
-                ):
-                    return None
-                # the flat state holds the active channel's detections
-                self._snapshot_current_channel()
-                ids_per_channel = [
-                    c.identifications for c in self.channels[:n_channels]
-                ]
-                reference = ids_per_channel[0]
-                if reference is None or len(reference) == 0:
-                    return None
-                if all(i is None or len(i) == 0 for i in ids_per_channel[1:]):
-                    return None
-                _, n_kept, _ = localize.filter_linked_identifications(
-                    ids_per_channel, transforms, box
-                )
-                where = "channels"
+            result = (
+                self._linked_count_split_fov(cal, box)
+                if split_fov
+                else self._linked_count_multichannel(cal, box)
+            )
         except (ValueError, KeyError, IndexError):
             return None
+        if result is None:
+            return None
+        n_kept, n_channels, where = result
         return (
             f"{n_kept:,} spots linked across {n_channels} {where} "
             f"({n_detections:,} in total)"
@@ -10242,11 +10409,12 @@ class Window(QtWidgets.QMainWindow):
         """A loaded calibration's reference->channel transforms, placed at the
         regions in use, and a phrase naming where they came from.
 
-        Either kind of loaded registration serves: the multichannel spline PSF
-        calibration, or the standalone channel registration the multichannel 2D
-        Gaussian fit uses. Whichever describes this data is the one the fit will
-        use, so the sum is built with exactly those transforms. ``(None, "")``
-        if neither describes the data's layout."""
+        Either kind of loaded registration serves: the multichannel spline
+        PSF calibration, or the standalone channel registration the
+        multichannel 2D Gaussian fit uses. Whichever describes this data
+        is the one the fit will use, so the sum is built with exactly
+        those transforms. ``(None, "")`` if neither describes the data's
+        layout."""
         pdialog = self.parameters_dialog
         cal = pdialog.link_calibration()
         source = (
@@ -11302,9 +11470,10 @@ class Window(QtWidgets.QMainWindow):
                 "Split-FOV Gaussian fit",
                 f"{len(self.identifications)} spots were identified but none "
                 "fall inside the reference region, so there is nothing to "
-                "fit. The reference region is probably in the wrong place for "
-                "this data: enable 'Regions = channels' and drag the ROIs onto "
-                "the channels (reference first), or re-register the channels.",
+                "fit. The reference region is probably in the wrong place "
+                "for this data: enable 'Regions = channels' and drag the "
+                "ROIs onto the channels (reference first), or re-register "
+                "the channels.",
             )
             self.status_bar.showMessage("")
             return
@@ -11411,10 +11580,10 @@ class Window(QtWidgets.QMainWindow):
                 "Multichannel spline fit",
                 f"{n_missing} of the {n_channels - 1} non-reference channels "
                 "have no identifications, so localizations cannot be linked "
-                "across all channels. Run 'Analyze > Identify' (Ctrl+I) first - "
-                "with several channels loaded it identifies every channel - for "
-                "a fully linked fit; continuing with the channels that are "
-                "identified.",
+                "across all channels. Run 'Analyze > Identify' (Ctrl+I) "
+                "first - with several channels loaded it identifies every "
+                "channel - for a fully linked fit; continuing with the "
+                "channels that are identified.",
             )
         self.fit_worker = MultichannelSplineFitWorker(
             movies,
@@ -11449,12 +11618,13 @@ class Window(QtWidgets.QMainWindow):
         eps: float | None = None,
         max_it: int | None = None,
     ) -> None:
-        """Fit a split-FOV multichannel spline PSF from the single loaded movie.
-        The channels are placed at the drawn ROIs when they match the
-        calibration's channel count (so a moved split can be re-registered by
-        re-drawing), otherwise at the calibration's stored regions. The
-        reference region's identifications are mapped into every region via the
-        stored inter-channel affine (see ``localize.fit_spline_split_fov``)."""
+        """Fit a split-FOV multichannel spline PSF from the single loaded
+        movie. The channels are placed at the drawn ROIs when they match
+        the calibration's channel count (so a moved split can be
+        re-registered by re-drawing), otherwise at the calibration's
+        stored regions. The reference region's identifications are mapped
+        into every region via the stored inter-channel affine (see
+        ``localize.fit_spline_split_fov``)."""
         if self.identifications is None or len(self.identifications) == 0:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -11491,11 +11661,11 @@ class Window(QtWidgets.QMainWindow):
                 self,
                 "Split-FOV spline fit",
                 f"{len(self.identifications)} spots were identified but none "
-                "fall inside the reference region, so there is nothing to fit. "
-                "The reference region is probably in the wrong place for this "
-                "data: enable 'Regions = channels' and drag the ROIs onto the "
-                "channels (reference first), or run Calibration > Refine "
-                "split-FOV registration.",
+                "fall inside the reference region, so there is nothing to "
+                "fit. The reference region is probably in the wrong place "
+                "for this data: enable 'Regions = channels' and drag the "
+                "ROIs onto the channels (reference first), or run "
+                "Calibration > Refine split-FOV registration.",
             )
             self.status_bar.showMessage("")
             return
@@ -11525,6 +11695,169 @@ class Window(QtWidgets.QMainWindow):
         self._active_worker = self.fit_worker
         self.abort_action.setEnabled(True)
         self.fit_worker.start()
+
+    def _reregister_split_fov_inputs(
+        self, calibration: dict, title: str
+    ) -> tuple | None:
+        """Regions, movie frame count and per-region min. net gradient for
+        a split-FOV signal re-registration.
+
+        Shows a warning dialog and returns None if no movie is loaded or
+        the drawn/stored regions do not match the calibration's channel
+        count.
+        """
+        if self.movie is None:
+            QtWidgets.QMessageBox.information(self, title, "No movie loaded.")
+            return None
+        n_channels = int(calibration.get("n_channels", 0))
+        if self.view.split_fov_mode and len(self.view.rois) == n_channels:
+            regions = [list(map(list, r)) for r in self.view.rois]
+        else:
+            regions = calibration.get("regions")
+        if not regions or len(regions) != n_channels:
+            QtWidgets.QMessageBox.warning(
+                self,
+                title,
+                f"Draw one ROI per channel (reference first): "
+                f"{n_channels} regions are needed for this calibration.",
+            )
+            return None
+
+        n_movie_frames = len(self.movie)
+        # per-region thresholds only apply when the regions being refined
+        # are the drawn ones; the calibration's own regions get the
+        # single slider value
+        minimum_ng = self.parameters["Min. Net Gradient"]
+        if not (
+            isinstance(minimum_ng, list) and len(minimum_ng) == n_channels
+        ):
+            minimum_ng = self.parameters_dialog.mng_slider.value()
+        return regions, n_movie_frames, minimum_ng
+
+    def _refine_split_fov_from_signal(
+        self,
+        calibration: dict,
+        regions: list,
+        minimum_ng,
+        frame_bounds,
+        max_frames: int,
+        model: str,
+    ):
+        """Re-fit a split-FOV calibration's inter-channel affines from the
+        current movie's signal."""
+        return spline.refine_split_fov_transforms_from_signal(
+            self.movie,
+            calibration,
+            regions,
+            minimum_ng=minimum_ng,
+            box=self.parameters["Box Size"],
+            frame_bounds=frame_bounds,
+            max_frames=max_frames,
+            model=model,
+        )
+
+    def _reregister_multichannel_inputs(
+        self, calibration: dict, title: str
+    ) -> tuple | None:
+        """Per-channel movies and the shared frame count for a
+        multichannel signal re-registration.
+
+        Shows a warning dialog and returns None if fewer channel movies
+        are loaded than the calibration expects.
+        """
+        n_channels = int(calibration.get("n_channels", len(self.channels)))
+        if len(self.channels) < n_channels:
+            QtWidgets.QMessageBox.warning(
+                self,
+                title,
+                f"This calibration has {n_channels} channels, but "
+                f"{len(self.channels)} movies are loaded. Load them with "
+                "'File > Open channels from several movies' in the same "
+                "order as the calibration (reference first).",
+            )
+            return None
+        # persist the active channel so every channel's movie is current
+        self._snapshot_current_channel()
+        movies = [self.channels[c].movie for c in range(n_channels)]
+        # the channels are frame-synchronized, so only frames present in
+        # every movie can be paired
+        n_movie_frames = min(len(m) for m in movies)
+        return movies, n_movie_frames
+
+    def _refine_multichannel_from_signal(
+        self,
+        movies: list,
+        calibration: dict,
+        frame_bounds,
+        max_frames: int,
+        model: str,
+    ):
+        """Re-fit a multichannel calibration's inter-channel affines from
+        the loaded channel movies' signal."""
+        return spline.refine_multichannel_transforms_from_signal(
+            movies,
+            calibration,
+            minimum_ng=self.parameters["Min. Net Gradient"],
+            box=self.parameters["Box Size"],
+            frame_bounds=frame_bounds,
+            max_frames=max_frames,
+            model=model,
+        )
+
+    def _run_signal_refine(
+        self, refine, frame_bounds, max_frames: int, model: str, title: str
+    ):
+        """Run a channel-registration refiner with the busy cursor and
+        status message, reporting a failure as a dialog.
+
+        Returns
+        -------
+        list or None
+            The refiner's ``reg_info``, or None if it raised.
+        """
+        self.status_bar.showMessage("Re-aligning channels from signal ...")
+        QtWidgets.QApplication.setOverrideCursor(
+            QtCore.Qt.CursorShape.WaitCursor
+        )
+        try:
+            _, reg_info = refine(frame_bounds, max_frames, model)
+        except Exception as e:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.status_bar.showMessage("")
+            QtWidgets.QMessageBox.critical(
+                self, title, f"Re-alignment failed: {e}"
+            )
+            return None
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.status_bar.showMessage("")
+        return reg_info
+
+    def _apply_reregistered_rois(self, calibration: dict) -> None:
+        """Reflect a split-FOV calibration's (possibly re-ordered) regions
+        in the drawn ROIs after a signal re-registration."""
+        self.view.rois = [
+            [[int(r[0][0]), int(r[0][1])], [int(r[1][0]), int(r[1][1])]]
+            for r in (calibration.get("regions") or [])
+        ]
+        self.parameters_dialog.update_roi_display()
+        self.draw_frame()
+
+    @staticmethod
+    def _reregister_result_rows(reg_info: list) -> list:
+        """One summary line per channel from a signal re-registration
+        result, noting when the requested model fell back to a simpler
+        one."""
+        rows = []
+        for r in reg_info:
+            row = (
+                f"ch{r['channel']}: {r['n_matches']} paired signals, "
+                f"RMS {r['rms']:.2f} px, {r.get('model', 'affine')}"
+            )
+            requested = r.get("model_requested")
+            if requested and requested != r.get("model"):
+                row += f" (fell back from {requested})"
+            rows.append(row)
+        return rows
 
     def reregister_channels_from_signal(self) -> None:
         """Re-estimate the inter-channel registration of the loaded spline
@@ -11559,79 +11892,33 @@ class Window(QtWidgets.QMainWindow):
             )
             return
         split_fov = bool(calibration.get("split_fov"))
-        parameters = self.parameters
 
         # gather the layout-specific inputs and pick the refiner
         if split_fov:
-            if self.movie is None:
-                QtWidgets.QMessageBox.information(
-                    self, title, "No movie loaded."
-                )
+            setup = self._reregister_split_fov_inputs(calibration, title)
+            if setup is None:
                 return
-            n_channels = int(calibration.get("n_channels", 0))
-            if self.view.split_fov_mode and len(self.view.rois) == n_channels:
-                regions = [list(map(list, r)) for r in self.view.rois]
-            else:
-                regions = calibration.get("regions")
-            if not regions or len(regions) != n_channels:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    title,
-                    f"Draw one ROI per channel (reference first): {n_channels} "
-                    "regions are needed for this calibration.",
-                )
-                return
-
-            n_movie_frames = len(self.movie)
-            # per-region thresholds only apply when the regions being refined
-            # are the drawn ones; the calibration's own regions get the
-            # single slider value
-            minimum_ng = parameters["Min. Net Gradient"]
-            if not (
-                isinstance(minimum_ng, list) and len(minimum_ng) == n_channels
-            ):
-                minimum_ng = self.parameters_dialog.mng_slider.value()
+            regions, n_movie_frames, minimum_ng = setup
 
             def _refine(frame_bounds, max_frames, model):
-                return spline.refine_split_fov_transforms_from_signal(
-                    self.movie,
+                return self._refine_split_fov_from_signal(
                     calibration,
                     regions,
-                    minimum_ng=minimum_ng,
-                    box=parameters["Box Size"],
-                    frame_bounds=frame_bounds,
-                    max_frames=max_frames,
-                    model=model,
+                    minimum_ng,
+                    frame_bounds,
+                    max_frames,
+                    model,
                 )
 
         else:
-            n_channels = int(calibration.get("n_channels", len(self.channels)))
-            if len(self.channels) < n_channels:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    title,
-                    f"This calibration has {n_channels} channels, but "
-                    f"{len(self.channels)} movies are loaded. Load them with "
-                    "'File > Open channels from several movies' in the same "
-                    "order as the calibration (reference first).",
-                )
+            setup = self._reregister_multichannel_inputs(calibration, title)
+            if setup is None:
                 return
-            # persist the active channel so every channel's movie is current
-            self._snapshot_current_channel()
-            movies = [self.channels[c].movie for c in range(n_channels)]
-            # the channels are frame-synchronized, so only frames present in
-            # every movie can be paired
-            n_movie_frames = min(len(m) for m in movies)
+            movies, n_movie_frames = setup
 
             def _refine(frame_bounds, max_frames, model):
-                return spline.refine_multichannel_transforms_from_signal(
-                    movies,
-                    calibration,
-                    minimum_ng=parameters["Min. Net Gradient"],
-                    box=parameters["Box Size"],
-                    frame_bounds=frame_bounds,
-                    max_frames=max_frames,
-                    model=model,
+                return self._refine_multichannel_from_signal(
+                    movies, calibration, frame_bounds, max_frames, model
                 )
 
         # let the user pick the frames considered: the first frames of a movie
@@ -11650,21 +11937,11 @@ class Window(QtWidgets.QMainWindow):
         if not ok:
             return
 
-        self.status_bar.showMessage("Re-aligning channels from signal ...")
-        QtWidgets.QApplication.setOverrideCursor(
-            QtCore.Qt.CursorShape.WaitCursor
+        reg_info = self._run_signal_refine(
+            _refine, frame_bounds, max_frames, model, title
         )
-        try:
-            _, reg_info = _refine(frame_bounds, max_frames, model)
-        except Exception as e:
-            QtWidgets.QApplication.restoreOverrideCursor()
-            self.status_bar.showMessage("")
-            QtWidgets.QMessageBox.critical(
-                self, title, f"Re-alignment failed: {e}"
-            )
+        if reg_info is None:
             return
-        QtWidgets.QApplication.restoreOverrideCursor()
-        self.status_bar.showMessage("")
 
         # A channel sum was built with the registration that has just been
         # replaced
@@ -11673,25 +11950,9 @@ class Window(QtWidgets.QMainWindow):
 
         # split-FOV: reflect the (possibly re-ordered) regions in the view
         if split_fov:
-            self.view.rois = [
-                [[int(r[0][0]), int(r[0][1])], [int(r[1][0]), int(r[1][1])]]
-                for r in (calibration.get("regions") or [])
-            ]
-            self.parameters_dialog.update_roi_display()
-            self.draw_frame()
+            self._apply_reregistered_rois(calibration)
 
-        rows = []
-        for r in reg_info:
-            row = (
-                f"ch{r['channel']}: {r['n_matches']} paired signals, "
-                f"RMS {r['rms']:.2f} px, {r.get('model', 'affine')}"
-            )
-            # say so when too few pairs survived for the chosen model, rather
-            # than silently registering with something simpler
-            requested = r.get("model_requested")
-            if requested and requested != r.get("model"):
-                row += f" (fell back from {requested})"
-            rows.append(row)
+        rows = self._reregister_result_rows(reg_info)
         QtWidgets.QMessageBox.information(
             self,
             title,
@@ -12656,13 +12917,13 @@ class MultichannelSplineFitWorker(QtCore.QThread):
         self.use_gpu = use_gpu
         self.eps = eps
         self.max_it = max_it
-        # Link photons across channels (shared amplitude, model 11). When False
-        # and the calibration has 2 to 6 channels, fit the photon-decoupled
-        # link-XYZ model: per-channel
-        # free photons/background
+        # Link photons across channels (shared amplitude, model 11). When
+        # False and the calibration has 2 to 6 channels, fit the
+        # photon-decoupled link-XYZ model: per-channel free
+        # photons/background
         self.link_photons = link_photons
-        # Split-FOV: ``movies``/``camera_infos`` hold a single entry (one loaded
-        # movie); the channels are regions of that movie, handled by
+        # Split-FOV: ``movies``/``camera_infos`` hold a single entry (one
+        # loaded movie); the channels are regions of that movie, handled by
         # ``fit_spline_split_fov`` (which confines to the reference region).
         # ``regions`` (optional) places the channels at the current ROIs.
         self.split_fov = split_fov
@@ -12779,8 +13040,9 @@ class MultichannelSplineFitWorker(QtCore.QThread):
             elif not self.link_photons and (
                 2 <= n_channels <= precision._LINK_XYZ_MAX_CHANNELS
             ):
-                # Photon decoupling (globLoc link-XYZ): free per-channel photons
-                # and background, shared x/y/z. Supersedes the ratiometric scan.
+                # Photon decoupling (globLoc link-XYZ): free per-channel
+                # photons and background, shared x/y/z. Supersedes the
+                # ratiometric scan.
                 locs = localize.fit_spline_multichannel(
                     self.movies,
                     self.camera_infos,

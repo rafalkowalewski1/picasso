@@ -1028,7 +1028,7 @@ def _monomials(u: np.ndarray, degree: int) -> np.ndarray:
 def _monomial_gradients(
     u: np.ndarray, degree: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``(d/du, d/dv)`` of the monomial design matrix, each ``(n, n_terms)``."""
+    """``(d/du, d/dv)`` of the monomial matrix, each ``(n, n_terms)``."""
     x, y = u[:, 0], u[:, 1]
     du, dv = [], []
     for p, q in _monomial_powers(degree):

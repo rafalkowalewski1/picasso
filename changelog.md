@@ -6,6 +6,7 @@ Last change: 24-SEP-2026 CEST
 
 ### Others
 - Removed support for Python 3.10 (Python 3.11–3.14 are supported).
+- Code readability clean ups (flake8).
 
 ### Rendering engine
 - **Multi-threaded CPU rendering**: the render kernels release the GIL and channels are rendered in parallel by a thread pool; a single large channel is split into row chunks rendered in parallel and summed in a fixed order.

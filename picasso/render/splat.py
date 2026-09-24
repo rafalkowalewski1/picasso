@@ -1482,6 +1482,19 @@ class CpuBackend(SplatBackend):
         if n_channels == 1 and (not chunkable or total < 2 * _MIN_CHUNK_LOCS):
             return [render_rows(0, 0, total)]
 
+        tasks, n_workers = self._plan_render_tasks(
+            sizes, n_channels, chunkable, info, disp_px_size, viewport
+        )
+        return self._run_render_tasks(
+            tasks, render_rows, n_channels, n_workers
+        )
+
+    @staticmethod
+    def _plan_render_tasks(
+        sizes, n_channels, chunkable, info, disp_px_size, viewport
+    ):
+        """Build the ``(channel, start, stop)`` task list and worker
+        count for ``render_channels``'s thread pool."""
         budget = _render_worker_budget()
         if chunkable and budget > 1:
             tasks = _chunk_tasks(sizes, budget)
@@ -1495,15 +1508,22 @@ class CpuBackend(SplatBackend):
                 _image_bytes(info, disp_px_size, viewport),
                 max(stop - start for _, start, stop in tasks),
             )
+        return tasks, n_workers
 
-        # every chunk renders a full-size image; they are summed into
-        # the channel's image in submission order (biggest tasks first,
-        # so none serializes the tail of the pool; a fixed order, so a
-        # given worker budget always produces the same float rounding)
-        # with at most two per worker plus one alive -- never one per
-        # task, which exhausted the memory of workstations with many
-        # cores and large windows (Windows does not overcommit); the
-        # worker count itself is bounded by the memory available.
+    @staticmethod
+    def _run_render_tasks(tasks, render_rows, n_channels, n_workers):
+        """Run ``tasks`` on the calling thread (``n_workers == 1``) or a
+        bounded thread pool, summing chunk results per channel.
+
+        Every chunk renders a full-size image; they are summed into
+        the channel's image in submission order (biggest tasks first,
+        so none serializes the tail of the pool; a fixed order, so a
+        given worker budget always produces the same float rounding)
+        with at most two per worker plus one alive -- never one per
+        task, which exhausted the memory of workstations with many
+        cores and large windows (Windows does not overcommit); the
+        worker count itself is bounded by the memory available.
+        """
         accumulated: list[tuple[int, lib.FloatArray2D] | None] = [None] * (
             n_channels
         )

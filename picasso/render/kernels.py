@@ -343,6 +343,41 @@ def _fill3d(
 
 
 @numba.njit(cache=True, nogil=True)
+def _gaussian_bbox(
+    x_: float,
+    y_: float,
+    sx_: float,
+    sy_: float,
+    n_pixel_x: int,
+    n_pixel_y: int,
+) -> tuple[int, int, int, int]:
+    """Clamp the +/- ``_DRAW_MAX_SIGMA`` box of a Gaussian to the image
+    bounds.
+
+    Returns
+    -------
+    i_min, i_max, j_min, j_max : int
+        Row and column bounds of the box (``i_max``/``j_max``
+        exclusive).
+    """
+    max_y_off = _DRAW_MAX_SIGMA * sy_
+    i_min = np.int32(y_ - max_y_off)
+    if i_min < 0:
+        i_min = 0
+    i_max = np.int32(y_ + max_y_off + 1)
+    if i_max > n_pixel_y:
+        i_max = n_pixel_y
+    max_x_off = _DRAW_MAX_SIGMA * sx_
+    j_min = np.int32(x_ - max_x_off)
+    if j_min < 0:
+        j_min = 0
+    j_max = np.int32(x_ + max_x_off) + 1
+    if j_max > n_pixel_x:
+        j_max = n_pixel_x
+    return i_min, i_max, j_min, j_max
+
+
+@numba.njit(cache=True, nogil=True)
 def _draw_gaussian_loc(
     image: lib.FloatArray2D,
     x_: float,
@@ -358,20 +393,9 @@ def _draw_gaussian_loc(
         # singular CRLB fit); also catches NaN. Skip instead of
         # dividing by zero.
         return
-    max_y_off = _DRAW_MAX_SIGMA * sy_
-    i_min = np.int32(y_ - max_y_off)
-    if i_min < 0:
-        i_min = 0
-    i_max = np.int32(y_ + max_y_off + 1)
-    if i_max > n_pixel_y:
-        i_max = n_pixel_y
-    max_x_off = _DRAW_MAX_SIGMA * sx_
-    j_min = np.int32(x_ - max_x_off)
-    if j_min < 0:
-        j_min = 0
-    j_max = np.int32(x_ + max_x_off) + 1
-    if j_max > n_pixel_x:
-        j_max = n_pixel_x
+    i_min, i_max, j_min, j_max = _gaussian_bbox(
+        x_, y_, sx_, sy_, n_pixel_x, n_pixel_y
+    )
     nx = j_max - j_min
     ny = i_max - i_min
     if nx <= 0 or ny <= 0:
@@ -836,6 +860,81 @@ def render_hist_numba(
 
 
 @numba.njit(cache=True, nogil=True)
+def _lut_pixel_rgb(
+    raw: lib.FloatArray3D,
+    luts: lib.FloatArray3D,
+    i: int,
+    j: int,
+    n_channels: int,
+    vmin32: np.float32,
+    rng32: np.float32,
+    rel: lib.FloatArray1D,
+) -> tuple[np.float32, np.float32, np.float32, np.float32]:
+    """Additive RGB (and total coverage) of pixel ``(i, j)`` over all
+    channels: contrast scale, clip, LUT gather, blend."""
+    one = np.float32(1.0)
+    zero = np.float32(0.0)
+    r = zero
+    g = zero
+    b = zero
+    coverage = zero
+    for c in range(n_channels):
+        v = (raw[c, i, j] - vmin32) / rng32
+        if not np.isfinite(v):
+            v = zero
+        if v < zero:
+            v = zero
+        elif v > one:
+            v = one
+        v = v * rel[c]
+        idx = np.int32(v * np.float32(255.0))
+        if idx < 0:
+            idx = 0
+        elif idx > 255:
+            idx = 255
+        r += luts[c, idx, 0]
+        g += luts[c, idx, 1]
+        b += luts[c, idx, 2]
+        coverage += v
+    if r > one:
+        r = one
+    if g > one:
+        g = one
+    if b > one:
+        b = one
+    return r, g, b, coverage
+
+
+@numba.njit(cache=True, nogil=True)
+def _composite_bg(
+    r: np.float32,
+    g: np.float32,
+    b: np.float32,
+    coverage: np.float32,
+    bg: lib.FloatArray1D,
+) -> tuple[np.float32, np.float32, np.float32]:
+    """Blend the background color into the uncovered fraction of a
+    pixel, then clip back to [0, 1]."""
+    one = np.float32(1.0)
+    zero = np.float32(0.0)
+    if coverage < zero:
+        coverage = zero
+    elif coverage > one:
+        coverage = one
+    remainder = one - coverage
+    r += bg[0] * remainder
+    g += bg[1] * remainder
+    b += bg[2] * remainder
+    if r > one:
+        r = one
+    if g > one:
+        g = one
+    if b > one:
+        b = one
+    return r, g, b
+
+
+@numba.njit(cache=True, nogil=True)
 def _compose_multi_lut(
     raw: lib.FloatArray3D,
     luts: lib.FloatArray3D,
@@ -858,55 +957,16 @@ def _compose_multi_lut(
     n_channels, n_y, n_x = raw.shape
     vmin32 = np.float32(vmin)
     rng32 = np.float32(vmax - vmin)
-    one = np.float32(1.0)
     zero = np.float32(0.0)
     rgb = np.empty((n_y, n_x, 3), dtype=np.float32)
     max_value = zero
     for i in range(n_y):
         for j in range(n_x):
-            r = zero
-            g = zero
-            b = zero
-            coverage = zero
-            for c in range(n_channels):
-                v = (raw[c, i, j] - vmin32) / rng32
-                if not np.isfinite(v):
-                    v = zero
-                if v < zero:
-                    v = zero
-                elif v > one:
-                    v = one
-                v = v * rel[c]
-                idx = np.int32(v * np.float32(255.0))
-                if idx < 0:
-                    idx = 0
-                elif idx > 255:
-                    idx = 255
-                r += luts[c, idx, 0]
-                g += luts[c, idx, 1]
-                b += luts[c, idx, 2]
-                coverage += v
-            if r > one:
-                r = one
-            if g > one:
-                g = one
-            if b > one:
-                b = one
+            r, g, b, coverage = _lut_pixel_rgb(
+                raw, luts, i, j, n_channels, vmin32, rng32, rel
+            )
             if has_bg:
-                if coverage < zero:
-                    coverage = zero
-                elif coverage > one:
-                    coverage = one
-                remainder = one - coverage
-                r += bg[0] * remainder
-                g += bg[1] * remainder
-                b += bg[2] * remainder
-                if r > one:
-                    r = one
-                if g > one:
-                    g = one
-                if b > one:
-                    b = one
+                r, g, b = _composite_bg(r, g, b, coverage, bg)
             rgb[i, j, 0] = r
             rgb[i, j, 1] = g
             rgb[i, j, 2] = b
@@ -979,6 +1039,115 @@ def _compose_single(
 
 
 @numba.njit(cache=True, nogil=True)
+def _quadtree_spread_leaf(
+    image: lib.FloatArray2D,
+    count: int,
+    side: float,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    x_min: float,
+    y_min: float,
+    oversampling: float,
+    px: float,
+    n_px: int,
+    n_py: int,
+) -> None:
+    """Spread a leaf's count over the display pixels its cell overlaps,
+    in proportion to the pixel/cell overlap area."""
+    rho = count / (side * side)
+    j0 = max(int(np.floor((x0 - x_min) * oversampling)), 0)
+    j1 = min(int(np.floor((x1 - x_min) * oversampling)), n_px - 1)
+    i0 = max(int(np.floor((y0 - y_min) * oversampling)), 0)
+    i1 = min(int(np.floor((y1 - y_min) * oversampling)), n_py - 1)
+    for i in range(i0, i1 + 1):
+        py0 = y_min + i * px
+        oy = min(py0 + px, y1) - max(py0, y0)
+        if oy <= 0:
+            continue
+        for j in range(j0, j1 + 1):
+            qx0 = x_min + j * px
+            ox = min(qx0 + px, x1) - max(qx0, x0)
+            if ox > 0:
+                image[i, j] += rho * ox * oy
+
+
+@numba.njit(cache=True, nogil=True)
+def _quadtree_bin_rows(
+    image: lib.FloatArray2D,
+    perm: lib.IntArray1D,
+    x: lib.FloatArray1D,
+    y: lib.FloatArray1D,
+    s: int,
+    e: int,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    oversampling: float,
+    n_px: int,
+    n_py: int,
+) -> None:
+    """Bin rows ``perm[s:e]`` one by one, as ``_fill`` does."""
+    for k in range(s, e):
+        p = perm[k]
+        xx = x[p]
+        yy = y[p]
+        if xx > x_min and xx < x_max and yy > y_min and yy < y_max:
+            j = int(oversampling * (xx - x_min))
+            i = int(oversampling * (yy - y_min))
+            if i < n_py and j < n_px:
+                image[i, j] += 1.0
+
+
+@numba.njit(cache=True, nogil=True)
+def _quadtree_push_children(
+    sorted_keys: lib.IntArray1D,
+    st_d: lib.IntArray1D,
+    st_ix: lib.IntArray1D,
+    st_iy: lib.IntArray1D,
+    st_pre: np.ndarray,
+    st_s: lib.IntArray1D,
+    st_e: lib.IntArray1D,
+    top: int,
+    d: int,
+    ix: int,
+    iy: int,
+    pre: np.uint64,
+    s: int,
+    e: int,
+    total_bits: int,
+) -> int:
+    """Push a node's four children onto the traversal stack (their
+    permutation ranges found by binary search on the sorted keys).
+
+    Returns
+    -------
+    int
+        The updated stack top.
+    """
+    shift = np.uint64(2 * (total_bits - d - 1))
+    base_pre = pre << np.uint64(2)
+    lo = s
+    for c in range(4):
+        if c < 3:
+            hi_key = (base_pre + np.uint64(c + 1)) << shift
+            hi = s + np.searchsorted(sorted_keys[s:e], hi_key)
+        else:
+            hi = e
+        st_d[top] = d + 1
+        st_ix[top] = 2 * ix + (c & 1)
+        st_iy[top] = 2 * iy + (c >> 1)
+        st_pre[top] = base_pre + np.uint64(c)
+        st_s[top] = lo
+        st_e[top] = hi
+        top += 1
+        lo = hi
+    return top
+
+
+@numba.njit(cache=True, nogil=True)
 def _quadtree_fill(
     image: lib.FloatArray2D,
     sorted_keys: lib.IntArray1D,
@@ -1047,51 +1216,87 @@ def _quadtree_fill(
         if x1 <= x_min or x0 >= x_max or y1 <= y_min or y0 >= y_max:
             continue
         if count > capacity and side > px and d < total_bits:
-            shift = np.uint64(2 * (total_bits - d - 1))
-            base_pre = pre << np.uint64(2)
-            lo = s
-            for c in range(4):
-                if c < 3:
-                    hi_key = (base_pre + np.uint64(c + 1)) << shift
-                    hi = s + np.searchsorted(sorted_keys[s:e], hi_key)
-                else:
-                    hi = e
-                st_d[top] = d + 1
-                st_ix[top] = 2 * ix + (c & 1)
-                st_iy[top] = 2 * iy + (c >> 1)
-                st_pre[top] = base_pre + np.uint64(c)
-                st_s[top] = lo
-                st_e[top] = hi
-                top += 1
-                lo = hi
+            top = _quadtree_push_children(
+                sorted_keys,
+                st_d,
+                st_ix,
+                st_iy,
+                st_pre,
+                st_s,
+                st_e,
+                top,
+                d,
+                ix,
+                iy,
+                pre,
+                s,
+                e,
+                total_bits,
+            )
         elif side > px:
             # a leaf wider than a pixel: its density over its area
-            rho = count / (side * side)
-            j0 = max(int(np.floor((x0 - x_min) * oversampling)), 0)
-            j1 = min(int(np.floor((x1 - x_min) * oversampling)), n_px - 1)
-            i0 = max(int(np.floor((y0 - y_min) * oversampling)), 0)
-            i1 = min(int(np.floor((y1 - y_min) * oversampling)), n_py - 1)
-            for i in range(i0, i1 + 1):
-                py0 = y_min + i * px
-                oy = min(py0 + px, y1) - max(py0, y0)
-                if oy <= 0:
-                    continue
-                for j in range(j0, j1 + 1):
-                    qx0 = x_min + j * px
-                    ox = min(qx0 + px, x1) - max(qx0, x0)
-                    if ox > 0:
-                        image[i, j] += rho * ox * oy
+            _quadtree_spread_leaf(
+                image,
+                count,
+                side,
+                x0,
+                y0,
+                x1,
+                y1,
+                x_min,
+                y_min,
+                oversampling,
+                px,
+                n_px,
+                n_py,
+            )
         else:
             # within a pixel (or the finest cell): bin the rows exactly
-            for k in range(s, e):
-                p = perm[k]
-                xx = x[p]
-                yy = y[p]
-                if xx > x_min and xx < x_max and yy > y_min and yy < y_max:
-                    j = int(oversampling * (xx - x_min))
-                    i = int(oversampling * (yy - y_min))
-                    if i < n_py and j < n_px:
-                        image[i, j] += 1.0
+            _quadtree_bin_rows(
+                image,
+                perm,
+                x,
+                y,
+                s,
+                e,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                oversampling,
+                n_px,
+                n_py,
+            )
+
+
+@numba.njit(cache=True, nogil=True)
+def _triangle_row_span(
+    xa: float,
+    ya: float,
+    xb: float,
+    yb: float,
+    xc: float,
+    yc: float,
+    yc_row: float,
+) -> tuple[float, float]:
+    """Intersections of the row ``y == yc_row`` with the triangle's
+    three edges, as the row's (left, right) x-span."""
+    x_left = 1e300
+    x_right = -1e300
+    for k in range(3):
+        if k == 0:
+            x0, y0, x1, y1 = xa, ya, xb, yb
+        elif k == 1:
+            x0, y0, x1, y1 = xb, yb, xc, yc
+        else:
+            x0, y0, x1, y1 = xc, yc, xa, ya
+        if (y0 <= yc_row < y1) or (y1 <= yc_row < y0):
+            xi = x0 + (yc_row - y0) * (x1 - x0) / (y1 - y0)
+            if xi < x_left:
+                x_left = xi
+            if xi > x_right:
+                x_right = xi
+    return x_left, x_right
 
 
 @numba.njit(cache=True, nogil=True)
@@ -1140,23 +1345,9 @@ def _fill_triangles(
         i1 = min(int(np.ceil(y_hi - 0.5)), n_py - 1)
         for i in range(i0, i1 + 1):
             yc_row = i + 0.5  # the row's pixel centers
-            # the span of the triangle on this row: intersections of
-            # the horizontal line with its three edges
-            x_left = 1e300
-            x_right = -1e300
-            for k in range(3):
-                if k == 0:
-                    x0, y0, x1, y1 = xa, ya, xb, yb
-                elif k == 1:
-                    x0, y0, x1, y1 = xb, yb, xc, yc
-                else:
-                    x0, y0, x1, y1 = xc, yc, xa, ya
-                if (y0 <= yc_row < y1) or (y1 <= yc_row < y0):
-                    xi = x0 + (yc_row - y0) * (x1 - x0) / (y1 - y0)
-                    if xi < x_left:
-                        x_left = xi
-                    if xi > x_right:
-                        x_right = xi
+            x_left, x_right = _triangle_row_span(
+                xa, ya, xb, yb, xc, yc, yc_row
+            )
             if x_right < x_left:
                 continue
             j0 = max(int(np.ceil(x_left - 0.5)), 0)

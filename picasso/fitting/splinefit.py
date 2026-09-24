@@ -425,6 +425,30 @@ def _eval_spline_3d(
 
 
 @numba.njit(nogil=True, cache=True)
+def _find_pivot(a: np.ndarray, n: int, ipiv: np.ndarray) -> tuple:
+    """Largest-magnitude unused entry of ``a[:n, :n]``, full pivoting.
+
+    Returns
+    -------
+    irow, icol
+        Location of the pivot among the rows/columns not yet used
+        (``ipiv[.] != 1``/``!= 0``).
+    """
+    big = 0.0
+    irow = 0
+    icol = 0
+    for j in range(n):
+        if ipiv[j] != 1:
+            for k in range(n):
+                if ipiv[k] == 0:
+                    if abs(a[j, k]) >= big:
+                        big = abs(a[j, k])
+                        irow = j
+                        icol = k
+    return irow, icol
+
+
+@numba.njit(nogil=True, cache=True)
 def _solve_gj(
     a: np.ndarray,
     b: np.ndarray,
@@ -447,17 +471,7 @@ def _solve_gj(
     for i in range(n):
         ipiv[i] = 0
     for i in range(n):
-        big = 0.0
-        irow = 0
-        icol = 0
-        for j in range(n):
-            if ipiv[j] != 1:
-                for k in range(n):
-                    if ipiv[k] == 0:
-                        if abs(a[j, k]) >= big:
-                            big = abs(a[j, k])
-                            irow = j
-                            icol = k
+        irow, icol = _find_pivot(a, n, ipiv)
         ipiv[icol] += 1
         if irow != icol:
             for lx in range(n):
@@ -776,6 +790,35 @@ def _accumulate_2d(
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _reset_decoupled_scratch(
+    theta: np.ndarray, n_params: int, grad: np.ndarray, hess: np.ndarray
+) -> bool:
+    """Zero ``grad``/``hess`` for the photon-decoupled link-xyz accumulator.
+
+    Returns
+    -------
+    bool
+        False if any parameter is non-finite, in which case ``grad``/
+        ``hess`` are left as found.
+    """
+    for p in range(n_params):
+        if not np.isfinite(theta[p]):
+            return False
+        grad[p] = 0.0
+        for q in range(n_params):
+            hess[p, q] = 0.0
+    return True
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _mirror_upper_triangle(hess: np.ndarray, n_params: int) -> None:
+    """Mirror the upper triangle of ``hess`` into the lower triangle."""
+    for p in range(n_params):
+        for q in range(p):
+            hess[p, q] = hess[q, p]
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
 def _accumulate_link_xyz(
     spots: np.ndarray,
     index: int,
@@ -805,12 +848,8 @@ def _accumulate_link_xyz(
     x_shift = theta[0]
     y_shift = theta[1]
     z_shift = theta[2]
-    for p in range(n_params):
-        if not np.isfinite(theta[p]):
-            return np.inf, False
-        grad[p] = 0.0
-        for q in range(n_params):
-            hess[p, q] = 0.0
+    if not _reset_decoupled_scratch(theta, n_params, grad, hess):
+        return np.inf, False
     pos_z = -z_shift
     chi_square = 0.0
     for ch in range(n_channels):
@@ -875,14 +914,12 @@ def _accumulate_link_xyz(
                 hess[ib, ib] += weight
     # Only the upper triangle was filled (0 < 1 < 2 < ia < ib always holds);
     # mirror it once at the end rather than per pixel.
-    for p in range(n_params):
-        for q in range(p):
-            hess[p, q] = hess[q, p]
+    _mirror_upper_triangle(hess, n_params)
     return chi_square, True
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
-def _fit_spline_spot(
+def _fit_spline_spot(  # noqa: C901
     spots: np.ndarray,
     index: int,
     variance: np.ndarray,
@@ -1306,23 +1343,17 @@ def allocate_outputs(n_spots: int, n_params: int) -> tuple:
     return thetas, chi_squares, states, iterations
 
 
-def _check_inputs(
-    kind: int,
-    spots: np.ndarray,
-    coefficients: np.ndarray,
-    jacobians: np.ndarray,
-    residuals: np.ndarray,
-    initial_parameters: np.ndarray,
-) -> None:
-    """Validate the array shapes the kernels rely on but cannot check."""
-    if spots.ndim != 4:
-        raise ValueError(
-            "spots must be channel-major (n_spots, n_channels, box, box), got "
-            f"shape {spots.shape}."
-        )
-    n_spots, n_channels, box, box_y = spots.shape
-    if box != box_y:
-        raise ValueError(f"spots must have a square box, got {box}x{box_y}.")
+def _resolve_n_params(
+    kind: int, coefficients: np.ndarray, n_channels: int
+) -> int:
+    """Validate ``coefficients`` against ``kind``/``n_channels``.
+
+    Returns
+    -------
+    n_params : int
+        4, 5 or ``3 + 2 * n_channels`` for :data:`KIND_2D`, :data:`KIND_3D`
+        or the link-xyz model respectively.
+    """
     expected_ndim = 5 if kind == KIND_2D else 7
     if coefficients.ndim != expected_ndim:
         raise ValueError(
@@ -1341,30 +1372,51 @@ def _check_inputs(
                 "There is no multichannel 2D spline model; got "
                 f"{n_channels} channels."
             )
-        n_params = 4
-    elif kind == KIND_3D:
-        n_params = 5
-    else:
-        n_params = 3 + 2 * n_channels
+        return 4
+    if kind == KIND_3D:
+        return 5
+    return 3 + 2 * n_channels
+
+
+def _check_array_shape(
+    name: str, array: np.ndarray, n_spots: int, expected: tuple
+) -> None:
+    """Raise unless ``array`` has ``expected[1:]`` shape and enough rows."""
+    if array.shape[1:] != expected[1:] or len(array) < max(n_spots, 1):
+        raise ValueError(
+            f"{name} must have shape {expected}, got {array.shape}."
+        )
+
+
+def _check_inputs(
+    kind: int,
+    spots: np.ndarray,
+    coefficients: np.ndarray,
+    jacobians: np.ndarray,
+    residuals: np.ndarray,
+    initial_parameters: np.ndarray,
+) -> None:
+    """Validate the array shapes the kernels rely on but cannot check."""
+    if spots.ndim != 4:
+        raise ValueError(
+            "spots must be channel-major (n_spots, n_channels, box, box), got "
+            f"shape {spots.shape}."
+        )
+    n_spots, n_channels, box, box_y = spots.shape
+    if box != box_y:
+        raise ValueError(f"spots must have a square box, got {box}x{box_y}.")
+    n_params = _resolve_n_params(kind, coefficients, n_channels)
     if initial_parameters.shape != (n_spots, n_params):
         raise ValueError(
             f"initial_parameters must have shape {(n_spots, n_params)}, got "
             f"{initial_parameters.shape}."
         )
-    if jacobians.shape[1:] != (n_channels, 4) or len(jacobians) < max(
-        n_spots, 1
-    ):
-        raise ValueError(
-            f"jacobians must have shape {(n_spots, n_channels, 4)}, got "
-            f"{jacobians.shape}."
-        )
-    if residuals.shape[1:] != (n_channels, 2) or len(residuals) < max(
-        n_spots, 1
-    ):
-        raise ValueError(
-            "residuals must have shape (n_spots, n_channels, 2) = "
-            f"{(n_spots, n_channels, 2)}, got {residuals.shape}."
-        )
+    _check_array_shape(
+        "jacobians", jacobians, n_spots, (n_spots, n_channels, 4)
+    )
+    _check_array_shape(
+        "residuals", residuals, n_spots, (n_spots, n_channels, 2)
+    )
 
 
 def _worker(

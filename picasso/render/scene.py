@@ -211,7 +211,7 @@ def render_scene(
         lib.FloatArray2D | lib.FloatArray3D,
     ]
 ):
-    """Render localizations into a colored image (either QImage or a 
+    """Render localizations into a colored image (either QImage or a
     numpy array).
 
     For single channel images without group info, the colormap is

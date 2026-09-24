@@ -1043,7 +1043,7 @@ class RotateByAngleDialog(lib.Dialog):
     def __init__(self, window: QtWidgets.QMainWindow) -> None:
         super().__init__(window)
         self.window = window
-        self.setWindowTitle(f"Enter rotation angles")
+        self.setWindowTitle("Enter rotation angles")
         layout = QtWidgets.QFormLayout(self)
         self.angx = QtWidgets.QDoubleSpinBox()
         self.angx.setValue(0)
@@ -3239,6 +3239,32 @@ class RotationWindow(QtWidgets.QMainWindow):
 
         self.window.view.update_scene()  # update scene in main window
 
+    def _resolve_picks(self) -> tuple:
+        """Obtain pick coordiantes for saving given their shape."""
+        pixelsize = self.window.window.view.pixelsize
+        if self.view_rot.pick_shape is None:
+            # the field of view: its bounds, like a box pick
+            (y0, x0), (y1, x1) = self.view_rot.viewport
+            pick = [[float(x0), float(y0)], [float(x1), float(y1)]]
+        elif self.view_rot.pick_shape in ["Circle", "Square"]:
+            x, y = self.view_rot.pick
+            pick = [float(x), float(y)]
+        elif self.view_rot.pick_shape in ["Rectangle", "Box"]:
+            (x0, y0), (x1, y1) = self.view_rot.pick
+            pick = [[float(x0), float(y0)], [float(x1), float(y1)]]
+        elif self.view_rot.pick_shape == "Brush":
+            # same stroke form as the picks file, widths in nm
+            pick = [
+                {
+                    "Width (nm)": float(stroke[0] * pixelsize),
+                    "Path": [[float(x), float(y)] for x, y in stroke[1]],
+                }
+                for stroke in self.view_rot.pick
+            ]
+        else:  # polygon - an arbitrary number of vertices
+            pick = [[float(x), float(y)] for x, y in self.view_rot.pick]
+        return pick
+
     def save_locs_rotated(self) -> None:
         """Save locs from the main window and provides rotation info for
         later loading."""
@@ -3251,27 +3277,7 @@ class RotationWindow(QtWidgets.QMainWindow):
             angy = int(self.view_rot.angy * 180 / np.pi)
             angz = int(self.view_rot.angz * 180 / np.pi)
             pixelsize = self.window.window.view.pixelsize
-            if self.view_rot.pick_shape is None:
-                # the field of view: its bounds, like a box pick
-                (y0, x0), (y1, x1) = self.view_rot.viewport
-                pick = [[float(x0), float(y0)], [float(x1), float(y1)]]
-            elif self.view_rot.pick_shape in ["Circle", "Square"]:
-                x, y = self.view_rot.pick
-                pick = [float(x), float(y)]
-            elif self.view_rot.pick_shape in ["Rectangle", "Box"]:
-                (x0, y0), (x1, y1) = self.view_rot.pick
-                pick = [[float(x0), float(y0)], [float(x1), float(y1)]]
-            elif self.view_rot.pick_shape == "Brush":
-                # same stroke form as the picks file, widths in nm
-                pick = [
-                    {
-                        "Width (nm)": float(stroke[0] * pixelsize),
-                        "Path": [[float(x), float(y)] for x, y in stroke[1]],
-                    }
-                    for stroke in self.view_rot.pick
-                ]
-            else:  # polygon - an arbitrary number of vertices
-                pick = [[float(x), float(y)] for x, y in self.view_rot.pick]
+            pick = self._resolve_picks()
             size = self.view_rot.pick_size
             new_info = [
                 {

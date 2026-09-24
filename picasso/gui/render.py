@@ -847,12 +847,12 @@ class DatasetDialog(lib.Dialog):
                     self._fit_scroll_width()
                 break
 
-    def _close_one_channel(self, i: int, render_=True) -> None:
-        """Close the channel with the given index and delete all
-        corresponding attributes."""
-        # remove widgets from the Dataset Dialog; they must be
-        # reparented and scheduled for deletion, otherwise they stay
-        # visible in the scroll area and overlap the rows that move up
+    def _remove_channel_widgets(self, i: int) -> None:
+        """Remove and delete the Dataset Dialog widgets of channel
+        ``i``, and drop them from the per-channel widget lists."""
+        # they must be reparented and scheduled for deletion,
+        # otherwise they stay visible in the scroll area and overlap
+        # the rows that move up
         for widget in (
             self.checks[i],
             self.title[i],
@@ -865,7 +865,6 @@ class DatasetDialog(lib.Dialog):
             widget.setParent(None)
             widget.deleteLater()
 
-        # delete the widgets from the lists
         del self.checks[i]
         del self.title[i]
         del self.colorselection[i]
@@ -876,21 +875,13 @@ class DatasetDialog(lib.Dialog):
         del self.closebuttons[i]
         del self._channel_luts[i]
 
-        # delete all the View attributes
-        del self.window.view.locs[i]
-        del self.window.view.locs_paths[i]
-        del self.window.view.infos[i]
-        del self.window.view.index_blocks[i]
-        del self.window.view.render_index[i]
-        render.backend.release_uploads()  # GPU memory of the dataset
-
-        # delete zcoord from slicer dialog
+    def _update_after_channel_deleted(self, i: int) -> None:
+        """Update the state that depends on the remaining channels
+        once channel ``i``'s View-side attributes have been deleted."""
         try:
             self.window.slicer_dialog.zcoord[i]
         except Exception:
             pass
-
-        # remove z slicing attribute
         self.window.slicer_dialog.zcoord.pop(i)
 
         # hide the 3D-only actions if no remaining channel has z data
@@ -898,20 +889,51 @@ class DatasetDialog(lib.Dialog):
             for action in self.window.actions_3d:
                 action.setVisible(False)
 
-        # adjust group color if needed
         if len(self.window.view.locs) == 1:
             if "group" in self.window.view.locs[0].columns:
                 self.window.view.group_color = render.get_group_color(
                     self.window.view.locs[0]
                 )
 
-        # delete drift data if provided
+    def _delete_channel_drift_data(self, i: int) -> None:
+        """Delete the drift-correction data of channel ``i``, if
+        any was provided."""
         try:
             del self._drift[i]
             del self._driftfiles[i]
             del self.currentdrift[i]
         except Exception:
             pass
+
+    def _update_render_by_property_dialog(self) -> None:
+        """Enable render-by-property only when a single channel is
+        left, and refresh its parameter list for that channel."""
+        disp_sett_dlg = self.window.display_settings_dlg
+        disp_sett_dlg.render_check.setChecked(False)
+        if len(self.checks) == 1:
+            disp_sett_dlg.render_groupbox.setEnabled(True)
+            disp_sett_dlg.parameter.clear()
+            disp_sett_dlg.parameter.addItems(
+                self.window.view.locs[0].columns.to_list()
+            )
+        else:
+            disp_sett_dlg.render_groupbox.setEnabled(False)
+
+    def _close_one_channel(self, i: int, render_=True) -> None:
+        """Close the channel with the given index and delete all
+        corresponding attributes."""
+        self._remove_channel_widgets(i)
+
+        # delete all the View attributes
+        del self.window.view.locs[i]
+        del self.window.view.locs_paths[i]
+        del self.window.view.infos[i]
+        del self.window.view.index_blocks[i]
+        del self.window.view.render_index[i]
+        render.backend.release_uploads()  # GPU memory of the dataset
+        self._update_after_channel_deleted(i)
+
+        self._delete_channel_drift_data(i)
 
         # update the window and adjust the size of the
         # Dataset Dialog
@@ -925,16 +947,7 @@ class DatasetDialog(lib.Dialog):
         )
 
         # if only one channel left, allow render by property
-        disp_sett_dlg = self.window.display_settings_dlg
-        disp_sett_dlg.render_check.setChecked(False)
-        if len(self.checks) == 1:
-            disp_sett_dlg.render_groupbox.setEnabled(True)
-            disp_sett_dlg.parameter.clear()
-            disp_sett_dlg.parameter.addItems(
-                self.window.view.locs[0].columns.to_list()
-            )
-        else:
-            disp_sett_dlg.render_groupbox.setEnabled(False)
+        self._update_render_by_property_dialog()
 
         # remove the channel from test clustering dialog
         self.window.test_clusterer_dialog.channels.removeItem(i)
@@ -7667,6 +7680,52 @@ class LocsLoadWorker(QtCore.QObject):
             raise _LoadCanceledError
         self.subprogress.emit(done, total)
 
+    def _try_load_file(self, path: str, pixelsize):
+        """Load one file's locs and info.
+
+        Returns
+        -------
+        tuple or None
+            ``(locs, info)``, or None if a handled error was emitted
+            to ``self.failed`` and the caller should skip this file.
+
+        Raises
+        ------
+        _LoadCanceledError
+            Propagated so the caller can stop the whole run.
+        """
+        try:
+            return _read_locs_file(path, pixelsize, progress=self._report)
+        except _LoadCanceledError:
+            raise
+        except io.NoMetadataFileError:
+            self.failed.emit(
+                path,
+                "Could not find metadata. Neither the .yaml metadata "
+                "file nor metadata embedded in the file itself could "
+                "be read.",
+            )
+            return None
+        except KeyError:
+            self.failed.emit(path, "File does not contain localizations.")
+            return None
+        except Exception as e:  # noqa: BLE001 - reported to the GUI
+            self.failed.emit(path, str(e))
+            return None
+
+    @staticmethod
+    def _load_render_index(path: str, locs, info):
+        """Render index for ``locs``, loaded from ``path`` if it
+        still describes them, else built from scratch; None on any
+        failure to load or build one."""
+        try:
+            render_index = spatial_index.load_render_index(path, locs, info)
+            if render_index is None:
+                render_index = spatial_index.build_render_index(locs, info)
+        except Exception:
+            render_index = None
+        return render_index
+
     def run(self) -> None:
         """Load each file in turn, emitting ``loaded`` for each one."""
         for i, (path, pixelsize) in enumerate(self.jobs):
@@ -7674,37 +7733,15 @@ class LocsLoadWorker(QtCore.QObject):
                 break
             self.progress.emit(i, os.path.basename(path))
             try:
-                locs, info = _read_locs_file(
-                    path, pixelsize, progress=self._report
-                )
+                result = self._try_load_file(path, pixelsize)
             except _LoadCanceledError:
                 break
-            except io.NoMetadataFileError:
-                self.failed.emit(
-                    path,
-                    "Could not find metadata. Neither the .yaml metadata "
-                    "file nor metadata embedded in the file itself could "
-                    "be read.",
-                )
+            if result is None:
                 continue
-            except KeyError:
-                self.failed.emit(path, "File does not contain localizations.")
-                continue
-            except Exception as e:  # noqa: BLE001 - reported to the GUI
-                self.failed.emit(path, str(e))
-                continue
+            locs, info = result
             if self._canceled:
                 break
-            try:
-                # the index stored in the file by io.save_locs, if it
-                # still describes the localizations; else built here
-                render_index = spatial_index.load_render_index(
-                    path, locs, info
-                )
-                if render_index is None:
-                    render_index = spatial_index.build_render_index(locs, info)
-            except Exception:
-                render_index = None
+            render_index = self._load_render_index(path, locs, info)
             if self._canceled:
                 break
             self.loaded.emit(path, locs, info, render_index)
@@ -9839,7 +9876,9 @@ class View(QtWidgets.QLabel):
                 ),
                 **kwargs,
                 contrast=contrast,
-                invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
+                invert_colors=(
+                    self.window.dataset_dialog.wbackground.isChecked()
+                ),
                 background_color=self.window.dataset_dialog.background_color,
                 single_channel_colormap=cmap,
                 colors=self.read_colors(),
@@ -10794,6 +10833,23 @@ class View(QtWidgets.QLabel):
         """Return maximum width of all loaded images."""
         return max([info[0]["Width"] for info in self.infos])
 
+    def _mouse_move_pick(self, event: QtCore.QEvent) -> None:
+        """Update the in-progress rectangular, box or brush pick
+        shape while the mouse is dragged."""
+        if self._pick_shape == "Rectangle":
+            if self._rectangle_pick_ongoing:
+                self.rectangle_pick_current_x = event.pos().x()
+                self.rectangle_pick_current_y = event.pos().y()
+                self.update_scene(picks_only=True)
+        elif self._pick_shape == "Box":
+            if self._box_pick_ongoing:
+                self.box_pick_current_x = event.pos().x()
+                self.box_pick_current_y = event.pos().y()
+                self.update_scene(picks_only=True)
+        elif self._pick_shape == "Brush":
+            if self._brush_stroke_ongoing:
+                self.extend_brush_stroke(event.pos())
+
     def mouseMoveEvent(self, event: QtCore.QEvent) -> None:
         """Drawing zoom-in rectangle, panning or drawing a rectangular
         pick."""
@@ -10817,19 +10873,7 @@ class View(QtWidgets.QLabel):
 
         # if drawing a rectangular or box pick
         if self._mode == "Pick":
-            if self._pick_shape == "Rectangle":
-                if self._rectangle_pick_ongoing:
-                    self.rectangle_pick_current_x = event.pos().x()
-                    self.rectangle_pick_current_y = event.pos().y()
-                    self.update_scene(picks_only=True)
-            elif self._pick_shape == "Box":
-                if self._box_pick_ongoing:
-                    self.box_pick_current_x = event.pos().x()
-                    self.box_pick_current_y = event.pos().y()
-                    self.update_scene(picks_only=True)
-            elif self._pick_shape == "Brush":
-                if self._brush_stroke_ongoing:
-                    self.extend_brush_stroke(event.pos())
+            self._mouse_move_pick(event)
         # live update of the measuring cross and distance
         elif self._mode == "Measure" and self._measure_following:
             self._measure_cursor = self.map_to_movie(event.pos())
@@ -10861,6 +10905,58 @@ class View(QtWidgets.QLabel):
         self.update_cursor()
         self.update_scene()
 
+    @staticmethod
+    def _is_pan_shortcut(button, left: bool, modifiers) -> bool:
+        """True for the middle button, or left + Ctrl (Cmd on macOS)
+        or Alt (Option), the pan shortcuts available in every tool
+        (the same bindings as the 3D window)."""
+        return button == QtCore.Qt.MouseButton.MiddleButton or (
+            left
+            and modifiers
+            & (
+                QtCore.Qt.KeyboardModifier.ControlModifier
+                | QtCore.Qt.KeyboardModifier.AltModifier
+            )
+        )
+
+    @staticmethod
+    def _is_zoom_rectangle_shortcut(left: bool, modifiers) -> bool:
+        """True for left + Shift, the zoom-rectangle shortcut
+        available in every tool."""
+        shift = QtCore.Qt.KeyboardModifier.ShiftModifier
+        return bool(left and modifiers & shift)
+
+    def _mouse_press_zoom(self, event: QtCore.QEvent, left: bool) -> None:
+        """Start a zoom-in rectangle (left click) or panning (right
+        click) in the Zoom tool."""
+        if left:
+            self._start_zoom_rectangle(event)
+        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            self._start_pan(event)
+        else:
+            event.ignore()
+
+    def _mouse_press_pick(self, event: QtCore.QEvent) -> None:
+        """Start drawing a rectangular, box or brush pick shape on
+        left click."""
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if self._pick_shape == "Rectangle":
+                self._rectangle_pick_ongoing = True
+                self.rectangle_pick_start_x = event.pos().x()
+                self.rectangle_pick_start_y = event.pos().y()
+                self.rectangle_pick_start = self.map_to_movie(event.pos())
+            elif self._pick_shape == "Box":
+                self._box_pick_ongoing = True
+                self.box_pick_start_x = event.pos().x()
+                self.box_pick_start_y = event.pos().y()
+                self.box_pick_current_x = event.pos().x()
+                self.box_pick_current_y = event.pos().y()
+                self.box_pick_start = self.map_to_movie(event.pos())
+            elif self._pick_shape == "Brush":
+                self._brush_stroke_ongoing = True
+                self._brush_stroke = [self.map_to_movie(event.pos())]
+                self._brush_last_pos = event.pos()
+
     def mousePressEvent(self, event: QtCore.QEvent) -> None:
         """Start panning, drawing a zoom-in rectangle or drawing a pick
         shape."""
@@ -10880,49 +10976,19 @@ class View(QtWidgets.QLabel):
         # the middle button, Ctrl (Cmd on macOS) + left and Alt (Option)
         # + left pan in every tool, so the view can be moved without
         # leaving Pick or Measure (the same bindings as the 3D window)
-        if button == QtCore.Qt.MouseButton.MiddleButton or (
-            left
-            and modifiers
-            & (
-                QtCore.Qt.KeyboardModifier.ControlModifier
-                | QtCore.Qt.KeyboardModifier.AltModifier
-            )
-        ):
+        if self._is_pan_shortcut(button, left, modifiers):
             self._start_pan(event)
             return
         # Shift + left drags a zoom-in rectangle in every tool
-        if left and modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+        if self._is_zoom_rectangle_shortcut(left, modifiers):
             self._start_zoom_rectangle(event)
             return
 
         if self._mode == "Zoom":
-            # start drawing a zoom-in rectangle
-            if left:
-                self._start_zoom_rectangle(event)
-            # start panning
-            elif button == QtCore.Qt.MouseButton.RightButton:
-                self._start_pan(event)
-            else:
-                event.ignore()
+            self._mouse_press_zoom(event, left)
         # start drawing rectangular or box pick
         elif self._mode == "Pick":
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                if self._pick_shape == "Rectangle":
-                    self._rectangle_pick_ongoing = True
-                    self.rectangle_pick_start_x = event.pos().x()
-                    self.rectangle_pick_start_y = event.pos().y()
-                    self.rectangle_pick_start = self.map_to_movie(event.pos())
-                elif self._pick_shape == "Box":
-                    self._box_pick_ongoing = True
-                    self.box_pick_start_x = event.pos().x()
-                    self.box_pick_start_y = event.pos().y()
-                    self.box_pick_current_x = event.pos().x()
-                    self.box_pick_current_y = event.pos().y()
-                    self.box_pick_start = self.map_to_movie(event.pos())
-                elif self._pick_shape == "Brush":
-                    self._brush_stroke_ongoing = True
-                    self._brush_stroke = [self.map_to_movie(event.pos())]
-                    self._brush_last_pos = event.pos()
+            self._mouse_press_pick(event)
 
     def _start_zoom_rectangle(self, event: QtCore.QEvent) -> None:
         """Begin dragging the zoom-in rectangle (rubber band) from the
@@ -10961,67 +11027,92 @@ class View(QtWidgets.QLabel):
         else:
             event.ignore()
 
+    def _mouse_release_pick_circle_square(self, event: QtCore.QEvent) -> None:
+        """Add (left click) or remove (right click) a circle or
+        square pick."""
+        # add pick
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            x, y = self.map_to_movie(event.pos())
+            self.add_pick((x, y))
+            event.accept()
+        # remove pick
+        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            x, y = self.map_to_movie(event.pos())
+            self.remove_picks((x, y))
+            event.accept()
+        else:
+            event.ignore()
+
+    def _mouse_release_pick_rectangle(self, event: QtCore.QEvent) -> None:
+        """Finish and add a rectangular pick (left click), or remove a
+        pick (right click)."""
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # finish drawing rectangular pick and add it
+            rectangle_pick_end = self.map_to_movie(event.pos())
+            self._rectangle_pick_ongoing = False
+            self.add_pick((self.rectangle_pick_start, rectangle_pick_end))
+            event.accept()
+        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            # remove pick
+            x, y = self.map_to_movie(event.pos())
+            self.remove_picks((x, y))
+            event.accept()
+        else:
+            event.ignore()
+
+    def _mouse_release_pick_polygon(self, event: QtCore.QEvent) -> None:
+        """Add (left click) or remove the last vertex of (right
+        click) the in-progress polygon pick."""
+        # add a point to the polygon
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            point_movie = self.map_to_movie(event.pos())
+            self.add_polygon_point(point_movie, event.pos())
+        # remove the last point from the polygon
+        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            self.remove_polygon_point()
+
+    def _mouse_release_pick_box(self, event: QtCore.QEvent) -> None:
+        """Finish and add a box pick (left click), or remove a pick
+        (right click)."""
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # finish dragging the box and add it
+            self._box_pick_ongoing = False
+            self.add_box_pick(event.pos())
+            event.accept()
+        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            # remove pick
+            x, y = self.map_to_movie(event.pos())
+            self.remove_picks((x, y))
+            event.accept()
+        else:
+            event.ignore()
+
+    def _mouse_release_pick_brush(self, event: QtCore.QEvent) -> None:
+        """Finish and merge the in-progress brush stroke (left
+        click), or undo the last stroke (right click)."""
+        # finish painting the stroke and merge it into the picks
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.add_brush_stroke(event.pos())
+            event.accept()
+        # undo the last stroke, like the polygon's last vertex
+        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+            self.remove_last_brush_stroke()
+            event.accept()
+        else:
+            event.ignore()
+
     def _mouse_release_pick(self, event: QtCore.QEvent) -> None:
         """Adds and removes picks on left and right click, respectively."""
         if self._pick_shape in ["Circle", "Square"]:
-            # add pick
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                x, y = self.map_to_movie(event.pos())
-                self.add_pick((x, y))
-                event.accept()
-            # remove pick
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                x, y = self.map_to_movie(event.pos())
-                self.remove_picks((x, y))
-                event.accept()
-            else:
-                event.ignore()
+            self._mouse_release_pick_circle_square(event)
         elif self._pick_shape == "Rectangle":
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                # finish drawing rectangular pick and add it
-                rectangle_pick_end = self.map_to_movie(event.pos())
-                self._rectangle_pick_ongoing = False
-                self.add_pick((self.rectangle_pick_start, rectangle_pick_end))
-                event.accept()
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                # remove pick
-                x, y = self.map_to_movie(event.pos())
-                self.remove_picks((x, y))
-                event.accept()
-            else:
-                event.ignore()
+            self._mouse_release_pick_rectangle(event)
         elif self._pick_shape == "Polygon":
-            # add a point to the polygon
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                point_movie = self.map_to_movie(event.pos())
-                self.add_polygon_point(point_movie, event.pos())
-            # remove the last point from the polygon
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                self.remove_polygon_point()
+            self._mouse_release_pick_polygon(event)
         elif self._pick_shape == "Box":
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                # finish dragging the box and add it
-                self._box_pick_ongoing = False
-                self.add_box_pick(event.pos())
-                event.accept()
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                # remove pick
-                x, y = self.map_to_movie(event.pos())
-                self.remove_picks((x, y))
-                event.accept()
-            else:
-                event.ignore()
+            self._mouse_release_pick_box(event)
         elif self._pick_shape == "Brush":
-            # finish painting the stroke and merge it into the picks
-            if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                self.add_brush_stroke(event.pos())
-                event.accept()
-            # undo the last stroke, like the polygon's last vertex
-            elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                self.remove_last_brush_stroke()
-                event.accept()
-            else:
-                event.ignore()
+            self._mouse_release_pick_brush(event)
 
     def _mouse_release_measure(self, event: QtCore.QEvent) -> None:
         """Add a measure point on left click. The first right click
@@ -12632,6 +12723,78 @@ class View(QtWidgets.QLabel):
             relative_intensities = [1.0] * N_GROUP_COLORS
         return relative_intensities
 
+    def _render_by_property_locs(
+        self,
+    ) -> tuple[list[pd.DataFrame], list[dict]]:
+        """locs/infos for the render-by-property branch.
+
+        x_locs was already built from the fast-render subset in
+        ``activate_render_property``, so it is reused as-is. It is
+        precomputed and shares an index that depends on the property
+        binning; the renderer's own brute-force in-view filter handles
+        this case, since the pyramid pre-filter is only applied to the
+        multichannel path below, the common redraw cost driver.
+        """
+        locs = self.x_locs.copy()
+        infos = [self.infos[0]] * len(locs)
+        return locs, infos
+
+    def _grouped_or_multichannel_locs(
+        self, viewport
+    ) -> tuple[list[pd.DataFrame], list[dict]]:
+        """locs/infos for the ordinary (non render-by-property) path:
+        the fast-render subset (or full set when no subsampling) of
+        each channel, restricted to ``viewport`` if given, split by
+        group when a single grouped channel is loaded."""
+        locs = [
+            self._display_locs(i, viewport=viewport)
+            for i in range(len(self.locs))
+        ]
+        infos = self.infos
+        if "group" in locs[0].columns and len(locs) == 1:
+            idx = self._display_indices(0, viewport)
+            group_color = (
+                self.group_color if idx is None else self.group_color[idx]
+            )
+            locs = render.split_locs_by_group(locs[0], group_color=group_color)
+            infos = [self.infos[0]] * len(locs)
+        return locs, infos
+
+    def _clip_locs_to_z_slice(self, locs: list[pd.DataFrame]) -> None:
+        """Clip each channel's locs to the active z-slice range, in
+        place, if the slicer is enabled."""
+        slicer = self.window.slicer_dialog.slicer_radio_button
+        for i in range(len(locs)):
+            if "z" in locs[i].columns:
+                if slicer.isChecked():
+                    z_min = self.window.slicer_dialog.slicermin
+                    z_max = self.window.slicer_dialog.slicermax
+                    in_view = (locs[i]["z"] > z_min) & (locs[i]["z"] <= z_max)
+                    locs[i] = locs[i][in_view]
+
+    def _filter_checked_channels(self, locs, infos):
+        """Restrict multichannel locs to channels checked in the
+        Dataset Dialog; collapse to a single DataFrame/info when
+        there is exactly one plain (non render-by-property, ungrouped)
+        channel."""
+        if len(self.locs) > 1:
+            locs_ = []
+            info_ = []
+            for i in range(len(locs)):
+                if self.window.dataset_dialog.checks[i].isChecked():
+                    locs_.append(locs[i])
+                    info_.append(infos[i])
+            locs = locs_
+            infos = info_
+        elif (
+            len(self.locs) == 1
+            and "group" not in self.locs[0].columns
+            and not self.window.display_settings_dlg.render_check.isChecked()
+        ):
+            locs = locs[0]
+            infos = infos[0]
+        return locs, infos
+
     def _prepare_locs_for_rendering(
         self,
         viewport: (
@@ -12651,69 +12814,22 @@ class View(QtWidgets.QLabel):
         is additionally restricted to the viewport via the render-index
         pyramid for efficient rendering of zoomed-in FOVs.
         """
-        slicer = self.window.slicer_dialog.slicer_radio_button
         # a backend with resident uploads (GPU) gets whole channels so
         # its buffers are reused; it culls to the viewport itself
         if viewport is not None and self._persistent_uploads():
             viewport = None
         # render by property - use x_locs like multichannel rendering
         if self.window.display_settings_dlg.render_check.isChecked():
-            # we assume one channel is loaded; x_locs was built from the
-            # fast-render subset in activate_render_property so does
-            # not need to be rerun
-            locs = self.x_locs.copy()
-            infos = [self.infos[0]] * len(locs)
-            # Render-by-property: x_locs is precomputed and shares an
-            # index that depends on the property binning. The renderer's
-            # own brute-force in-view filter handles this case; the
-            # pyramid pre-filter is only applied to the multichannel
-            # path, which is the common redraw cost driver.
+            locs, infos = self._render_by_property_locs()
         # if group column is present, split locs by group for rendering
         else:
-            # project fast-render subset (or full set when no
-            # subsampling), restricted to the viewport if given
-            locs = [
-                self._display_locs(i, viewport=viewport)
-                for i in range(len(self.locs))
-            ]
-            infos = self.infos
-            if "group" in locs[0].columns and len(locs) == 1:
-                idx = self._display_indices(0, viewport)
-                group_color = (
-                    self.group_color if idx is None else self.group_color[idx]
-                )
-                locs = render.split_locs_by_group(
-                    locs[0], group_color=group_color
-                )
-                infos = [self.infos[0]] * len(locs)
+            locs, infos = self._grouped_or_multichannel_locs(viewport)
 
-        # clip to z-slice if slicer is enabled
-        for i in range(len(locs)):
-            if "z" in locs[i].columns:
-                if slicer.isChecked():
-                    z_min = self.window.slicer_dialog.slicermin
-                    z_max = self.window.slicer_dialog.slicermax
-                    in_view = (locs[i]["z"] > z_min) & (locs[i]["z"] <= z_max)
-                    locs[i] = locs[i][in_view]
+        self._clip_locs_to_z_slice(locs)
 
         # if multiple channels are loaded, selected only the ones which
         # are checked in the Dataset Dialog
-        if len(self.locs) > 1:
-            locs_ = []
-            info_ = []
-            for i in range(len(locs)):
-                if self.window.dataset_dialog.checks[i].isChecked():
-                    locs_.append(locs[i])
-                    info_.append(infos[i])
-            locs = locs_
-            infos = info_
-        elif (
-            len(self.locs) == 1
-            and "group" not in self.locs[0].columns
-            and not self.window.display_settings_dlg.render_check.isChecked()
-        ):
-            locs = locs[0]
-            infos = infos[0]
+        locs, infos = self._filter_checked_channels(locs, infos)
         return locs, infos
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
@@ -13643,6 +13759,27 @@ class View(QtWidgets.QLabel):
         else:
             self.unsetCursor()
 
+    def _update_cursor_pick(self) -> None:
+        """Set the cursor for the currently active pick shape."""
+        if self._pick_shape == "Circle":  # circle
+            self._update_cursor_circle(self._pick_size)
+        elif self._pick_shape == "Rectangle":
+            self.unsetCursor()
+        elif self._pick_shape == "Polygon":
+            self._update_cursor_polygon()
+        elif self._pick_shape == "Square":
+            self._update_cursor_square()
+        elif self._pick_shape == "Box":
+            # the box has no size until it is dragged out, so the
+            # cursor marks the corner rather than the pick
+            self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        elif self._pick_shape == "Brush":
+            # the cursor is the brush tip, i.e., the width the next
+            # stroke will be painted with
+            self._update_cursor_circle(self._brush_width)
+        else:
+            self.unsetCursor()
+
     def update_cursor(self) -> None:
         """Change cursor according to self._mode."""
         if self._mode == "Zoom":
@@ -13655,24 +13792,7 @@ class View(QtWidgets.QLabel):
                 # selection frozen, show the normal cursor again
                 self.unsetCursor()
         elif self._mode == "Pick":
-            if self._pick_shape == "Circle":  # circle
-                self._update_cursor_circle(self._pick_size)
-            elif self._pick_shape == "Rectangle":
-                self.unsetCursor()
-            elif self._pick_shape == "Polygon":
-                self._update_cursor_polygon()
-            elif self._pick_shape == "Square":
-                self._update_cursor_square()
-            elif self._pick_shape == "Box":
-                # the box has no size until it is dragged out, so the
-                # cursor marks the corner rather than the pick
-                self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
-            elif self._pick_shape == "Brush":
-                # the cursor is the brush tip, i.e., the width the next
-                # stroke will be painted with
-                self._update_cursor_circle(self._brush_width)
-            else:
-                self.unsetCursor()
+            self._update_cursor_pick()
 
     @check_pick
     def update_pick_info_long(self) -> None:

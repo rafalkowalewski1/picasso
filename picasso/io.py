@@ -1970,6 +1970,32 @@ class ND2Movie(AbstractPicassoMovie):
         self.dask = self.nd2file.to_dask()
         self.sizes = self.nd2file.sizes
 
+        self._validate_nd2_dimensions()
+        self._resolve_nd2_channels(channel)
+
+        # Pixel access only needs the dimensions checked above; parsing
+        # the (often vendor-specific) metadata may still fail. Keep that
+        # failure recoverable so the movie can be loaded with manually
+        # entered metadata (info() then returns None).
+        try:
+            self.meta = self.get_metadata(self.nd2file)
+        except Exception:
+            self.meta = None
+        self._shape = [
+            self.nd2file.sizes[self.frame_axis],
+            self.nd2file.sizes["X"],
+            self.nd2file.sizes["Y"],
+        ]
+
+    def _validate_nd2_dimensions(self):
+        """Check required dimensions and set self.frame_axis.
+
+        Raises
+        ------
+        KeyError
+            If a required dimension is missing or an unsupported extra
+            dimension is present.
+        """
         for dim in ["Y", "X"]:  # always required
             if dim not in self.nd2file.sizes.keys():
                 raise KeyError(
@@ -2000,8 +2026,12 @@ class ND2Movie(AbstractPicassoMovie):
                 )
             )
 
-        # Channel selection. Single-channel files default to channel 0, so
-        # their behavior is unchanged.
+    def _resolve_nd2_channels(self, channel: int):
+        """Set n_channels, the selected channel and channel names.
+
+        Single-channel files default to channel 0, so their behavior
+        is unchanged.
+        """
         self.n_channels = int(self.nd2file.sizes.get("C", 1))
         self._channel = channel if 0 <= channel < self.n_channels else 0
         self.channels = [f"Channel {i}" for i in range(self.n_channels)]
@@ -2011,20 +2041,6 @@ class ND2Movie(AbstractPicassoMovie):
                 self.channels = [str(n) for n in names]
         except Exception:
             pass
-
-        # Pixel access only needs the dimensions checked above; parsing
-        # the (often vendor-specific) metadata may still fail. Keep that
-        # failure recoverable so the movie can be loaded with manually
-        # entered metadata (info() then returns None).
-        try:
-            self.meta = self.get_metadata(self.nd2file)
-        except Exception:
-            self.meta = None
-        self._shape = [
-            self.nd2file.sizes[self.frame_axis],
-            self.nd2file.sizes["X"],
-            self.nd2file.sizes["Y"],
-        ]
 
     def info(self) -> dict:
         if self.meta is None:
@@ -2755,8 +2771,21 @@ def _mm_metadata_from_tifffile(tif: "tifffile.TiffFile") -> dict:
     a non-MicroManager TIFF). All parsing is wrapped defensively so that a
     malformed or absent block never raises."""
     out = {}
+    out.update(_mm_per_image_metadata_from_tifffile(tif))
+    out.update(_mm_acquisition_comments_from_tifffile(tif))
+    return out
 
-    # Per-image MicroManager metadata lives in tag 51123 on the first IFD.
+
+def _mm_per_image_metadata_from_tifffile(tif: "tifffile.TiffFile") -> dict:
+    """Extract per-image MicroManager metadata (tag 51123 on the first
+    IFD) into ``"Micro-Manager Metadata"`` and ``"Camera"``.
+
+    Returns
+    -------
+    dict
+        Empty if the tag is absent or malformed.
+    """
+    out = {}
     try:
         raw = None
         tag = tif.pages[0].tags.get(51123)
@@ -2782,9 +2811,22 @@ def _mm_metadata_from_tifffile(tif: "tifffile.TiffFile") -> dict:
             out["Camera"] = mm_info.get("Camera", "None")
     except Exception:
         pass
+    return out
 
-    # Acquisition comments live in the file-level Comments/Summary block,
-    # which tifffile parses into ``micromanager_metadata``.
+
+def _mm_acquisition_comments_from_tifffile(tif: "tifffile.TiffFile") -> dict:
+    """Extract the file-level acquisition comments into
+    ``"Micro-Manager Acquisition Comments"``.
+
+    Comments live in the Comments/Summary block, which tifffile parses
+    into ``micromanager_metadata``.
+
+    Returns
+    -------
+    dict
+        Empty if the block is absent, malformed or empty.
+    """
+    out = {}
     try:
         mm_file = tif.micromanager_metadata or {}
         comments_block = mm_file.get("Comments")
@@ -2795,7 +2837,6 @@ def _mm_metadata_from_tifffile(tif: "tifffile.TiffFile") -> dict:
                 out["Micro-Manager Acquisition Comments"] = summary.split("\n")
     except Exception:
         pass
-
     return out
 
 
@@ -3122,49 +3163,70 @@ class TiffMap(_PerThreadFileHandles):
                 progress(done, n_pages)
 
         if self._imagej_planes is not None:
-            # ImageJ contiguous stack: one IFD, then every plane's data
-            # laid out back-to-back from the first plane's offset. Derive
-            # each frame's offset arithmetically instead of from
-            # (non-existent) per-page IFDs. Guard against a truncated file
-            # by keeping only the planes that physically fit.
-            base = int(self._pages[0].dataoffsets[0])
-            n = self._imagej_planes
-            try:
-                file_size = os.path.getsize(self.path)
-                fit = (file_size - base) // self._frame_nbytes
-                if fit < n:
-                    n = max(fit, 0)
-            except OSError:
-                pass
-            offsets = [base + i * self._frame_nbytes for i in range(n)]
-            if progress is not None:
-                progress(n, n)
-            return offsets, n
+            return self._build_offsets_imagej(progress)
 
         if not self._uncompressed:
-            # Compressed / tiled: no fast offset path. In the lightweight
-            # frame mode every frame reports page 0's shape, so a stray
-            # IFD cannot be told apart without reading every IFD (costly
-            # on network storage). Probe the first and last extra pages
-            # so an incompatible one triggers the full-page fallback;
-            # with full pages (after that fallback, or for LSM) the
-            # shapes are real, so drop trailing mismatched IFDs.
-            if (not self._tif.is_lsm) and self._tif.pages.useframes:
-                if n_pages > 1:
-                    _ = self._pages[1].dataoffsets
-                    _ = self._pages[n_pages - 1].dataoffsets
-                report(n_pages)
-                return None, n_pages
-            n_frames = 0
-            for i, page in enumerate(self._pages):
-                if tuple(page.shape) != self._page_shape:
-                    break
-                n_frames += 1
-                report(i + 1)
-            return None, n_frames
+            return self._build_offsets_compressed(n_pages, report)
 
-        # Uncompressed: one pass collects each frame's byte offset and
-        # stops at the first IFD whose shape differs from page 0.
+        return self._build_offsets_uncompressed(report)
+
+    def _build_offsets_imagej(self, progress=None) -> tuple[list[int], int]:
+        """Derive offsets for an ImageJ contiguous stack.
+
+        ImageJ writes one IFD, then every plane's data laid out
+        back-to-back from the first plane's offset, so each frame's
+        offset is computed arithmetically instead of from (non-existent)
+        per-page IFDs. Guards against a truncated file by keeping only
+        the planes that physically fit.
+        """
+        base = int(self._pages[0].dataoffsets[0])
+        n = self._imagej_planes
+        try:
+            file_size = os.path.getsize(self.path)
+            fit = (file_size - base) // self._frame_nbytes
+            if fit < n:
+                n = max(fit, 0)
+        except OSError:
+            pass
+        offsets = [base + i * self._frame_nbytes for i in range(n)]
+        if progress is not None:
+            progress(n, n)
+        return offsets, n
+
+    def _build_offsets_compressed(
+        self, n_pages: int, report
+    ) -> tuple[None, int]:
+        """Return ``(None, n_frames)`` for a compressed / tiled movie.
+
+        In the lightweight frame mode every frame reports page 0's shape,
+        so a stray IFD cannot be told apart without reading every IFD
+        (costly on network storage). Probe the first and last extra
+        pages so an incompatible one triggers the full-page fallback;
+        with full pages (after that fallback, or for LSM) the shapes
+        are real, so drop trailing mismatched IFDs.
+        """
+        if (not self._tif.is_lsm) and self._tif.pages.useframes:
+            if n_pages > 1:
+                _ = self._pages[1].dataoffsets
+                _ = self._pages[n_pages - 1].dataoffsets
+            report(n_pages)
+            return None, n_pages
+        n_frames = 0
+        for i, page in enumerate(self._pages):
+            if tuple(page.shape) != self._page_shape:
+                break
+            n_frames += 1
+            report(i + 1)
+        return None, n_frames
+
+    def _build_offsets_uncompressed(
+        self, report
+    ) -> tuple[list[int] | None, int]:
+        """One pass collecting each frame's byte offset for an
+        uncompressed movie.
+
+        Stops at the first IFD whose shape differs from page 0.
+        """
         offsets = []
         n_frames = 0
         fast = True
@@ -5214,6 +5276,71 @@ def _read_smap_loc(path: str) -> dict:
     return loc
 
 
+def _smap_psf_widths(loc: dict, n: int, pixelsize: float):
+    """Return ``(sx, sy)`` PSF widths in px, converted from SMAP's nm.
+
+    A neutral 1 px default is used when the corresponding field is
+    absent.
+    """
+    if "PSFxnm" in loc:
+        sx = loc["PSFxnm"] / pixelsize
+    else:
+        sx = np.ones(n)
+    if "PSFynm" in loc:
+        sy = loc["PSFynm"] / pixelsize
+    elif "PSFxnm" in loc:
+        sy = sx
+    else:
+        sy = np.ones(n)
+    return sx, sy
+
+
+def _smap_locprec(loc: dict, n: int, pixelsize: float):
+    """Return ``(lpx, lpy)`` localization precision in px.
+
+    SMAP stores a single combined value (``locprecnm``); some files use
+    separate ``locprecxnm``/``locprecynm`` instead.
+    """
+    if "locprecnm" in loc:
+        lpx = loc["locprecnm"] / pixelsize
+        lpy = loc["locprecnm"] / pixelsize
+    elif "locprecxnm" in loc:
+        lpx = loc["locprecxnm"] / pixelsize
+        lpy = loc.get("locprecynm", loc["locprecxnm"]) / pixelsize
+    else:
+        lpx = np.zeros(n)
+        lpy = np.zeros(n)
+    return lpx, lpy
+
+
+def _add_smap_extra_columns(loc: dict, n: int, data: dict) -> None:
+    """Add any additional (non-predefined) fields from the SMAP file to
+    ``data`` in place, with their names sanitized to valid identifiers."""
+    used_fields = {
+        "frame",
+        "xnm",
+        "ynm",
+        "znm",
+        "phot",
+        "PSFxnm",
+        "PSFynm",
+        "bg",
+        "locprecnm",
+        "locprecxnm",
+        "locprecynm",
+        "locprecznm",
+    }
+    for field, values in loc.items():
+        if field in used_fields or len(values) != n:
+            continue
+        name = _sanitize_column_name(field)
+        if name in data:
+            continue
+        if values.dtype.kind == "f":
+            values = values.astype(np.float32)
+        data[name] = values
+
+
 def import_smap(
     path: str, pixelsize: float
 ) -> tuple[pd.DataFrame, list[dict]]:
@@ -5266,64 +5393,21 @@ def import_smap(
     photons = loc["phot"] if "phot" in loc else np.ones(n)
     data["photons"] = np.broadcast_to(photons, (n,)).astype(np.float32)
 
-    # PSF widths (nm -> px); use a neutral 1 px default when absent.
-    if "PSFxnm" in loc:
-        sx = loc["PSFxnm"] / pixelsize
-    else:
-        sx = np.ones(n)
-    if "PSFynm" in loc:
-        sy = loc["PSFynm"] / pixelsize
-    elif "PSFxnm" in loc:
-        sy = sx
-    else:
-        sy = np.ones(n)
+    sx, sy = _smap_psf_widths(loc, n, pixelsize)
     data["sx"] = np.asarray(sx, dtype=np.float32)
     data["sy"] = np.asarray(sy, dtype=np.float32)
 
     bg = loc["bg"] if "bg" in loc else np.zeros(n)
     data["bg"] = np.broadcast_to(bg, (n,)).astype(np.float32)
 
-    # Localization precision (nm -> px). SMAP stores a single combined
-    # value (locprecnm); some files use separate locprecxnm/locprecynm.
-    if "locprecnm" in loc:
-        lpx = loc["locprecnm"] / pixelsize
-        lpy = loc["locprecnm"] / pixelsize
-    elif "locprecxnm" in loc:
-        lpx = loc["locprecxnm"] / pixelsize
-        lpy = loc.get("locprecynm", loc["locprecxnm"]) / pixelsize
-    else:
-        lpx = np.zeros(n)
-        lpy = np.zeros(n)
+    lpx, lpy = _smap_locprec(loc, n, pixelsize)
     data["lpx"] = np.asarray(lpx, dtype=np.float32)
     data["lpy"] = np.asarray(lpy, dtype=np.float32)
 
     if "znm" in loc and "locprecznm" in loc:
         data["lpz"] = loc["locprecznm"].astype(np.float32)
 
-    # Keep any additional (non-predefined) fields from the SMAP file.
-    used_fields = {
-        "frame",
-        "xnm",
-        "ynm",
-        "znm",
-        "phot",
-        "PSFxnm",
-        "PSFynm",
-        "bg",
-        "locprecnm",
-        "locprecxnm",
-        "locprecynm",
-        "locprecznm",
-    }
-    for field, values in loc.items():
-        if field in used_fields or len(values) != n:
-            continue
-        name = _sanitize_column_name(field)
-        if name in data:
-            continue
-        if values.dtype.kind == "f":
-            values = values.astype(np.float32)
-        data[name] = values
+    _add_smap_extra_columns(loc, n, data)
 
     locs = pd.DataFrame(data)
     locs.sort_values(kind="quicksort", by="frame", inplace=True)

@@ -207,8 +207,8 @@ def initial_parameters_gauss_multichannel(
 
     ``spots`` is channel-major ``(n_spots, n_channels, box, box)``. The shared
     position and width are seeded from the **reference channel**, which is
-    exactly right: its Jacobian is the identity and its ROI residual is zero, so
-    the position that describes its spot *is* the shared position the fit
+    exactly right: its Jacobian is the identity and its ROI residual is zero,
+    so the position that describes its spot *is* the shared position the fit
     solves for.
 
     With ``link_photons`` the layout is the single-channel one
@@ -286,7 +286,8 @@ def initial_parameters_spline(
     spot_min = np.amin(spots, axis=reduce_axes)
     initial = np.zeros((len(spots), n_parameters), dtype=np.float32)
     initial[:, 0] = spot_max - spot_min  # amplitude
-    # x_shift (col 1) and y_shift (col 2) start at 0 (spot centered in the ROI).
+    # x_shift (col 1) and y_shift (col 2) start at 0 (spot centered in the
+    # ROI).
     if model == "spline-2d":
         initial[:, 3] = spot_min  # offset
     else:

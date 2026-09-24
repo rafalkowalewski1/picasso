@@ -98,8 +98,8 @@ def _estimator_terms(
 ) -> tuple:
     """Per-pixel ``(chi_square, weight, factor, ok)``.
 
-    ``weight`` multiplies the Hessian outer product and ``factor`` the gradient,
-    so a caller accumulates ``grad_k += d_k * factor`` and
+    ``weight`` multiplies the Hessian outer product and ``factor`` the
+    gradient, so a caller accumulates ``grad_k += d_k * factor`` and
     ``hess_kl += weight * d_k * d_l``.
 
     ``var`` is the pixel's sCMOS readout variance in photoelectrons squared,
@@ -568,6 +568,261 @@ def _accumulate(
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_seed(
+    model: int,
+    spots: np.ndarray,
+    index: int,
+    variance: np.ndarray,
+    use_variance: bool,
+    theta: np.ndarray,
+    mle: bool,
+    hess: np.ndarray,
+    grad: np.ndarray,
+    hess_ok: np.ndarray,
+    grad_ok: np.ndarray,
+    n_params: int,
+) -> tuple:
+    """Evaluate chi-square and curvature at the seed parameters.
+
+    Returns
+    -------
+    chi_square, state
+        ``state`` is :data:`FIT_STATE_CONVERGED`, unless the seed model is
+        non-finite or non-positive, in which case it is
+        :data:`FIT_STATE_NEG_CURVATURE_MLE` and the fit never enters the
+        iteration loop.
+    """
+    chi_square, ok = _accumulate(
+        model, spots, index, variance, use_variance, theta, mle, hess, grad
+    )
+    if not ok:
+        return chi_square, FIT_STATE_NEG_CURVATURE_MLE
+    for p in range(n_params):
+        grad_ok[p] = grad[p]
+        for q in range(n_params):
+            hess_ok[p, q] = hess[p, q]
+    return chi_square, FIT_STATE_CONVERGED
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_reject_step(
+    theta: np.ndarray,
+    theta_previous: np.ndarray,
+    previous_chi_square: float,
+    lam: float,
+    state: int,
+    iteration: int,
+    max_iterations: int,
+    n_params: int,
+) -> tuple:
+    """Undo a trial step whose model went non-positive or non-finite.
+
+    That is a property of the *step*, not of the fit: undo it, damp harder
+    and try again, exactly as for a step that merely worsened chi-square.
+    Aborting here would return the seed unchanged, which for a wide box
+    shows up as sigma pinned to the seed width and integer coordinates.
+
+    Returns
+    -------
+    chi_square, lam, state
+    """
+    for p in range(n_params):
+        theta[p] = theta_previous[p]
+    lam *= _LAMBDA_UP
+    if iteration == max_iterations - 1:
+        state = FIT_STATE_NEG_CURVATURE_MLE
+    return previous_chi_square, lam, state
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_accept_or_reject(
+    theta: np.ndarray,
+    theta_previous: np.ndarray,
+    grad: np.ndarray,
+    grad_ok: np.ndarray,
+    hess: np.ndarray,
+    hess_ok: np.ndarray,
+    n_params: int,
+    chi_square: float,
+    previous_chi_square: float,
+    lam: float,
+    tolerance: float,
+    iteration: int,
+    max_iterations: int,
+    state: int,
+) -> tuple:
+    """Update curvature, damping and convergence after a valid trial step.
+
+    Returns
+    -------
+    chi_square, previous_chi_square, lam, state, converged
+    """
+    if chi_square < previous_chi_square or previous_chi_square == 0.0:
+        # Only an improving iteration refreshes the curvature the next step
+        # is damped from (Gpufit skips the gradient/Hessian kernels
+        # entirely on a failed iteration).
+        for p in range(n_params):
+            grad_ok[p] = grad[p]
+            for q in range(n_params):
+                hess_ok[p, q] = hess[p, q]
+    converged = abs(chi_square - previous_chi_square) < max(
+        tolerance, tolerance * abs(chi_square)
+    )
+    if not converged and iteration == max_iterations - 1:
+        state = FIT_STATE_MAX_ITERATION
+    if chi_square < previous_chi_square:
+        lam *= _LAMBDA_DOWN
+        previous_chi_square = chi_square
+    else:
+        lam *= _LAMBDA_UP
+        chi_square = previous_chi_square
+        for p in range(n_params):
+            theta[p] = theta_previous[p]
+    return chi_square, previous_chi_square, lam, state, converged
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_iterate(
+    model: int,
+    spots: np.ndarray,
+    index: int,
+    variance: np.ndarray,
+    use_variance: bool,
+    mle: bool,
+    tolerance: float,
+    max_iterations: int,
+    theta: np.ndarray,
+    theta_previous: np.ndarray,
+    grad: np.ndarray,
+    grad_ok: np.ndarray,
+    delta: np.ndarray,
+    scaling: np.ndarray,
+    hess: np.ndarray,
+    hess_ok: np.ndarray,
+    hess_damped: np.ndarray,
+    indxc: np.ndarray,
+    indxr: np.ndarray,
+    ipiv: np.ndarray,
+    n_params: int,
+    chi_square: float,
+) -> tuple:
+    """Run the Levenberg-Marquardt loop from the seeded curvature.
+
+    ``theta`` is updated in place with the best parameters found.
+
+    Returns
+    -------
+    chi_square, state, n_iterations
+    """
+    state = FIT_STATE_CONVERGED
+    lam = _LAMBDA_INITIAL
+    previous_chi_square = chi_square
+    n_iterations = 0
+
+    for iteration in range(max_iterations):
+        if not _lm_solve_step(
+            hess_ok,
+            grad_ok,
+            scaling,
+            lam,
+            hess_damped,
+            delta,
+            n_params,
+            indxc,
+            indxr,
+            ipiv,
+        ):
+            # The step is garbage, so it is not applied; the parameters of the
+            # last accepted iteration stand.
+            state = FIT_STATE_SINGULAR_HESSIAN
+            break
+        for p in range(n_params):
+            theta_previous[p] = theta[p]
+            theta[p] += delta[p]
+        new_chi_square, ok = _accumulate(
+            model, spots, index, variance, use_variance, theta, mle, hess, grad
+        )
+        n_iterations = iteration + 1
+        if not ok:
+            chi_square, lam, state = _lm_reject_step(
+                theta,
+                theta_previous,
+                previous_chi_square,
+                lam,
+                state,
+                iteration,
+                max_iterations,
+                n_params,
+            )
+            continue
+        chi_square, previous_chi_square, lam, state, converged = (
+            _lm_accept_or_reject(
+                theta,
+                theta_previous,
+                grad,
+                grad_ok,
+                hess,
+                hess_ok,
+                n_params,
+                new_chi_square,
+                previous_chi_square,
+                lam,
+                tolerance,
+                iteration,
+                max_iterations,
+                state,
+            )
+        )
+        if converged:
+            break
+
+    return chi_square, state, n_iterations
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_finalize(
+    theta: np.ndarray,
+    chi_square: float,
+    state: int,
+    n_iterations: int,
+    mle: bool,
+    n_params: int,
+    thetas: np.ndarray,
+    chi_squares: np.ndarray,
+    states: np.ndarray,
+    iterations: np.ndarray,
+    index: int,
+) -> None:
+    """Write the fit outcome for one spot into the preallocated outputs.
+
+    A diverged fit (non-finite chi-square or parameters) is reported as NaN
+    parameters with an infinite chi-square;
+    ``localize.locs_from_fits_gauss`` turns those into NaN precisions.
+    """
+    finite = np.isfinite(chi_square)
+    if finite:
+        for p in range(n_params):
+            if not np.isfinite(theta[p]):
+                finite = False
+                break
+    if finite:
+        for p in range(n_params):
+            thetas[index, p] = theta[p]
+        chi_squares[index] = chi_square
+        states[index] = state
+        iterations[index] = n_iterations
+    else:
+        for p in range(n_params):
+            thetas[index, p] = np.nan
+        chi_squares[index] = np.inf
+        if mle:
+            states[index] = FIT_STATE_NEG_CURVATURE_MLE
+        else:
+            states[index] = FIT_STATE_SINGULAR_HESSIAN
+        iterations[index] = n_iterations
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
 def _fit_gauss_spot(
     spots: np.ndarray,
     index: int,
@@ -612,111 +867,60 @@ def _fit_gauss_spot(
         theta[p] = init[index, p]
         scaling[p] = 0.0
 
-    state = FIT_STATE_CONVERGED
-    lam = _LAMBDA_INITIAL
-    n_iterations = 0
-
-    chi_square, ok = _accumulate(
-        model, spots, index, variance, use_variance, theta, mle, hess, grad
+    chi_square, state = _lm_seed(
+        model,
+        spots,
+        index,
+        variance,
+        use_variance,
+        theta,
+        mle,
+        hess,
+        grad,
+        hess_ok,
+        grad_ok,
+        n_params,
     )
-    if not ok:
-        # The seed itself is unusable (non-finite or non-positive model).
-        state = FIT_STATE_NEG_CURVATURE_MLE
-    else:
-        for p in range(n_params):
-            grad_ok[p] = grad[p]
-            for q in range(n_params):
-                hess_ok[p, q] = hess[p, q]
-    previous_chi_square = chi_square
-
-    for iteration in range(max_iterations):
-        if state != FIT_STATE_CONVERGED:
-            break
-        if not _lm_solve_step(
-            hess_ok,
+    n_iterations = 0
+    if state == FIT_STATE_CONVERGED:
+        chi_square, state, n_iterations = _lm_iterate(
+            model,
+            spots,
+            index,
+            variance,
+            use_variance,
+            mle,
+            tolerance,
+            max_iterations,
+            theta,
+            theta_previous,
+            grad,
             grad_ok,
-            scaling,
-            lam,
-            hess_damped,
             delta,
-            n_params,
+            scaling,
+            hess,
+            hess_ok,
+            hess_damped,
             indxc,
             indxr,
             ipiv,
-        ):
-            # The step is garbage, so it is not applied; the parameters of the
-            # last accepted iteration stand.
-            state = FIT_STATE_SINGULAR_HESSIAN
-            break
-        for p in range(n_params):
-            theta_previous[p] = theta[p]
-            theta[p] += delta[p]
-        new_chi_square, ok = _accumulate(
-            model, spots, index, variance, use_variance, theta, mle, hess, grad
+            n_params,
+            chi_square,
         )
-        n_iterations = iteration + 1
-        if not ok:
-            # The trial step left the model non-positive or non-finite. That is
-            # a property of the *step*, not of the fit: undo it, damp harder and
-            # try again, exactly as for a step that merely worsened chi-square.
-            # Aborting here would return the seed unchanged, which for a wide
-            # box shows up as sigma pinned to the seed width and integer
-            # coordinates.
-            chi_square = previous_chi_square
-            for p in range(n_params):
-                theta[p] = theta_previous[p]
-            lam *= _LAMBDA_UP
-            if iteration == max_iterations - 1:
-                state = FIT_STATE_NEG_CURVATURE_MLE
-            continue
-        chi_square = new_chi_square
-        if chi_square < previous_chi_square or previous_chi_square == 0.0:
-            # Only an improving iteration refreshes the curvature the next step
-            # is damped from (Gpufit skips the gradient/Hessian kernels
-            # entirely on a failed iteration).
-            for p in range(n_params):
-                grad_ok[p] = grad[p]
-                for q in range(n_params):
-                    hess_ok[p, q] = hess[p, q]
-        converged = abs(chi_square - previous_chi_square) < max(
-            tolerance, tolerance * abs(chi_square)
-        )
-        if not converged and iteration == max_iterations - 1:
-            state = FIT_STATE_MAX_ITERATION
-        if chi_square < previous_chi_square:
-            lam *= _LAMBDA_DOWN
-            previous_chi_square = chi_square
-        else:
-            lam *= _LAMBDA_UP
-            chi_square = previous_chi_square
-            for p in range(n_params):
-                theta[p] = theta_previous[p]
-        if converged:
-            break
 
-    finite = np.isfinite(chi_square)
-    if finite:
-        for p in range(n_params):
-            if not np.isfinite(theta[p]):
-                finite = False
-                break
-    if finite:
-        for p in range(n_params):
-            thetas[index, p] = theta[p]
-        chi_squares[index] = chi_square
-        states[index] = state
-        iterations[index] = n_iterations
-    else:
-        # The fit diverged. Report NaN parameters with an infinite chi-square;
-        # ``localize.locs_from_fits_gauss`` turns those into NaN precisions.
-        for p in range(n_params):
-            thetas[index, p] = np.nan
-        chi_squares[index] = np.inf
-        if mle:
-            states[index] = FIT_STATE_NEG_CURVATURE_MLE
-        else:
-            states[index] = FIT_STATE_SINGULAR_HESSIAN
-        iterations[index] = n_iterations
+    _lm_finalize(
+        theta,
+        chi_square,
+        state,
+        n_iterations,
+        mle,
+        n_params,
+        thetas,
+        chi_squares,
+        states,
+        iterations,
+        index,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -1003,8 +1207,8 @@ def fit_spots_async(
 # ``jac`` is that channel's local Jacobian ``[a00, a01, a10, a11]`` and ``res``
 # its sub-pixel ROI offset, the fractional part the integer box origin cannot
 # express. Together they place channel ``c``'s model at ``T_c(x + theta)`` to
-# first order; see ``picasso.localize.channel_roi_geometry``. The single-channel
-# fit is the identity-Jacobian, zero-residual case.
+# first order; see ``picasso.localize.channel_roi_geometry``. The single-
+# channel fit is the identity-Jacobian, zero-residual case.
 # ----------------------------------------------------------------------
 
 #: One amplitude and one background shared by every channel;
@@ -1162,6 +1366,35 @@ def _accumulate_spherical_multichannel(
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _reset_decoupled_scratch(
+    theta: np.ndarray, n_params: int, grad: np.ndarray, hess: np.ndarray
+) -> bool:
+    """Zero ``grad``/``hess`` for the decoupled accumulator.
+
+    Returns
+    -------
+    bool
+        False if any parameter is non-finite, in which case ``grad``/
+        ``hess`` are left as found.
+    """
+    for p in range(n_params):
+        if not np.isfinite(theta[p]):
+            return False
+        grad[p] = 0.0
+        for q in range(n_params):
+            hess[p, q] = 0.0
+    return True
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _mirror_upper_triangle(hess: np.ndarray, n_params: int) -> None:
+    """Mirror the upper triangle of ``hess`` into the lower triangle."""
+    for p in range(n_params):
+        for q in range(p):
+            hess[p, q] = hess[q, p]
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
 def _accumulate_spherical_decoupled(
     spots: np.ndarray,
     index: int,
@@ -1191,12 +1424,8 @@ def _accumulate_spherical_decoupled(
     x_shift = theta[0]
     y_shift = theta[1]
     sigma = theta[2]
-    for p in range(n_params):
-        if not np.isfinite(theta[p]):
-            return np.inf, False
-        grad[p] = 0.0
-        for q in range(n_params):
-            hess[p, q] = 0.0
+    if not _reset_decoupled_scratch(theta, n_params, grad, hess):
+        return np.inf, False
     if not abs(sigma) > 0.0:
         return np.inf, False
     inv_s2 = 1.0 / (sigma * sigma)
@@ -1273,9 +1502,7 @@ def _accumulate_spherical_decoupled(
                 hess[ib, ib] += weight
     # Only the upper triangle was filled (0 < 1 < 2 < ia < ib always holds);
     # mirror it once at the end rather than per pixel.
-    for p in range(n_params):
-        for q in range(p):
-            hess[p, q] = hess[q, p]
+    _mirror_upper_triangle(hess, n_params)
     return chi_square, True
 
 
@@ -1310,6 +1537,149 @@ def _accumulate_multichannel(
     return _accumulate_spherical_decoupled(
         spots, index, variance, use_variance, jac, res, theta, mle, hess, grad
     )
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_seed_multichannel(
+    kind: int,
+    spots: np.ndarray,
+    index: int,
+    variance: np.ndarray,
+    use_variance: bool,
+    jac: np.ndarray,
+    res: np.ndarray,
+    theta: np.ndarray,
+    mle: bool,
+    hess: np.ndarray,
+    grad: np.ndarray,
+    hess_ok: np.ndarray,
+    grad_ok: np.ndarray,
+    n_params: int,
+) -> tuple:
+    """The multichannel twin of :func:`_lm_seed`, over
+    :func:`_accumulate_multichannel`."""
+    chi_square, ok = _accumulate_multichannel(
+        kind,
+        spots,
+        index,
+        variance,
+        use_variance,
+        jac,
+        res,
+        theta,
+        mle,
+        hess,
+        grad,
+    )
+    if not ok:
+        return chi_square, FIT_STATE_NEG_CURVATURE_MLE
+    for p in range(n_params):
+        grad_ok[p] = grad[p]
+        for q in range(n_params):
+            hess_ok[p, q] = hess[p, q]
+    return chi_square, FIT_STATE_CONVERGED
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _lm_iterate_multichannel(
+    kind: int,
+    spots: np.ndarray,
+    index: int,
+    variance: np.ndarray,
+    use_variance: bool,
+    jac: np.ndarray,
+    res: np.ndarray,
+    mle: bool,
+    tolerance: float,
+    max_iterations: int,
+    theta: np.ndarray,
+    theta_previous: np.ndarray,
+    grad: np.ndarray,
+    grad_ok: np.ndarray,
+    delta: np.ndarray,
+    scaling: np.ndarray,
+    hess: np.ndarray,
+    hess_ok: np.ndarray,
+    hess_damped: np.ndarray,
+    indxc: np.ndarray,
+    indxr: np.ndarray,
+    ipiv: np.ndarray,
+    n_params: int,
+    chi_square: float,
+) -> tuple:
+    """The multichannel twin of :func:`_lm_iterate`, over
+    :func:`_accumulate_multichannel`."""
+    state = FIT_STATE_CONVERGED
+    lam = _LAMBDA_INITIAL
+    previous_chi_square = chi_square
+    n_iterations = 0
+
+    for iteration in range(max_iterations):
+        if not _lm_solve_step(
+            hess_ok,
+            grad_ok,
+            scaling,
+            lam,
+            hess_damped,
+            delta,
+            n_params,
+            indxc,
+            indxr,
+            ipiv,
+        ):
+            state = FIT_STATE_SINGULAR_HESSIAN
+            break
+        for p in range(n_params):
+            theta_previous[p] = theta[p]
+            theta[p] += delta[p]
+        new_chi_square, ok = _accumulate_multichannel(
+            kind,
+            spots,
+            index,
+            variance,
+            use_variance,
+            jac,
+            res,
+            theta,
+            mle,
+            hess,
+            grad,
+        )
+        n_iterations = iteration + 1
+        if not ok:
+            chi_square, lam, state = _lm_reject_step(
+                theta,
+                theta_previous,
+                previous_chi_square,
+                lam,
+                state,
+                iteration,
+                max_iterations,
+                n_params,
+            )
+            continue
+        chi_square, previous_chi_square, lam, state, converged = (
+            _lm_accept_or_reject(
+                theta,
+                theta_previous,
+                grad,
+                grad_ok,
+                hess,
+                hess_ok,
+                n_params,
+                new_chi_square,
+                previous_chi_square,
+                lam,
+                tolerance,
+                iteration,
+                max_iterations,
+                state,
+            )
+        )
+        if converged:
+            break
+
+    return chi_square, state, n_iterations
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
@@ -1350,11 +1720,7 @@ def _fit_gauss_spot_multichannel(
         theta[p] = init[index, p]
         scaling[p] = 0.0
 
-    state = FIT_STATE_CONVERGED
-    lam = _LAMBDA_INITIAL
-    n_iterations = 0
-
-    chi_square, ok = _accumulate_multichannel(
+    chi_square, state = _lm_seed_multichannel(
         kind,
         spots,
         index,
@@ -1366,37 +1732,13 @@ def _fit_gauss_spot_multichannel(
         mle,
         hess,
         grad,
+        hess_ok,
+        grad_ok,
+        n_params,
     )
-    if not ok:
-        state = FIT_STATE_NEG_CURVATURE_MLE
-    else:
-        for p in range(n_params):
-            grad_ok[p] = grad[p]
-            for q in range(n_params):
-                hess_ok[p, q] = hess[p, q]
-    previous_chi_square = chi_square
-
-    for iteration in range(max_iterations):
-        if state != FIT_STATE_CONVERGED:
-            break
-        if not _lm_solve_step(
-            hess_ok,
-            grad_ok,
-            scaling,
-            lam,
-            hess_damped,
-            delta,
-            n_params,
-            indxc,
-            indxr,
-            ipiv,
-        ):
-            state = FIT_STATE_SINGULAR_HESSIAN
-            break
-        for p in range(n_params):
-            theta_previous[p] = theta[p]
-            theta[p] += delta[p]
-        new_chi_square, ok = _accumulate_multichannel(
+    n_iterations = 0
+    if state == FIT_STATE_CONVERGED:
+        chi_square, state, n_iterations = _lm_iterate_multichannel(
             kind,
             spots,
             index,
@@ -1404,63 +1746,38 @@ def _fit_gauss_spot_multichannel(
             use_variance,
             jac,
             res,
-            theta,
             mle,
-            hess,
+            tolerance,
+            max_iterations,
+            theta,
+            theta_previous,
             grad,
+            grad_ok,
+            delta,
+            scaling,
+            hess,
+            hess_ok,
+            hess_damped,
+            indxc,
+            indxr,
+            ipiv,
+            n_params,
+            chi_square,
         )
-        n_iterations = iteration + 1
-        if not ok:
-            chi_square = previous_chi_square
-            for p in range(n_params):
-                theta[p] = theta_previous[p]
-            lam *= _LAMBDA_UP
-            if iteration == max_iterations - 1:
-                state = FIT_STATE_NEG_CURVATURE_MLE
-            continue
-        chi_square = new_chi_square
-        if chi_square < previous_chi_square or previous_chi_square == 0.0:
-            for p in range(n_params):
-                grad_ok[p] = grad[p]
-                for q in range(n_params):
-                    hess_ok[p, q] = hess[p, q]
-        converged = abs(chi_square - previous_chi_square) < max(
-            tolerance, tolerance * abs(chi_square)
-        )
-        if not converged and iteration == max_iterations - 1:
-            state = FIT_STATE_MAX_ITERATION
-        if chi_square < previous_chi_square:
-            lam *= _LAMBDA_DOWN
-            previous_chi_square = chi_square
-        else:
-            lam *= _LAMBDA_UP
-            chi_square = previous_chi_square
-            for p in range(n_params):
-                theta[p] = theta_previous[p]
-        if converged:
-            break
 
-    finite = np.isfinite(chi_square)
-    if finite:
-        for p in range(n_params):
-            if not np.isfinite(theta[p]):
-                finite = False
-                break
-    if finite:
-        for p in range(n_params):
-            thetas[index, p] = theta[p]
-        chi_squares[index] = chi_square
-        states[index] = state
-        iterations[index] = n_iterations
-    else:
-        for p in range(n_params):
-            thetas[index, p] = np.nan
-        chi_squares[index] = np.inf
-        if mle:
-            states[index] = FIT_STATE_NEG_CURVATURE_MLE
-        else:
-            states[index] = FIT_STATE_SINGULAR_HESSIAN
-        iterations[index] = n_iterations
+    _lm_finalize(
+        theta,
+        chi_square,
+        state,
+        n_iterations,
+        mle,
+        n_params,
+        thetas,
+        chi_squares,
+        states,
+        iterations,
+        index,
+    )
 
 
 def n_parameters_multichannel(kind: int, n_channels: int) -> int:

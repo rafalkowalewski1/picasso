@@ -420,6 +420,80 @@ def _interpolate_drift(
     return interpolated
 
 
+def _check_exclude_self_reference(x, y, l0, width_units, intersect_d):
+    """Verify that the reference matches the target for ``exclude_self``.
+
+    Raises
+    ------
+    ValueError
+        If the reference is not the same localizations as ``x``/``y``,
+        in which case each segment's own bins cannot be identified in
+        the reference.
+    """
+    l1 = np.int32(
+        np.round(np.asarray(x) / intersect_d)
+        + np.round(np.asarray(y) / intersect_d) * width_units
+    )
+    if not np.array_equal(l0, l1):
+        raise ValueError(
+            "exclude_self requires the reference to be the target"
+            " itself, but ref_x/ref_y differ from x/y."
+        )
+
+
+def _align_segment(
+    lo,
+    hi,
+    x_sorted,
+    y_sorted,
+    rel_drift_x,
+    rel_drift_y,
+    exclude_self,
+    l0_sorted,
+    l0_coords,
+    l0_counts,
+    intersect_d,
+    width_units,
+    shifts_xy,
+    box,
+):
+    """Estimate the sub-pixel shift of one segment against the reference.
+
+    Returns
+    -------
+    tuple of float or None
+        ``(px, py)`` shift, or None if there is nothing to align (an
+        empty segment, or, with ``exclude_self``, a reference left with
+        no localizations once the segment is taken out of it).
+    """
+    if hi == lo:  # no target localizations in this segment
+        return None
+
+    x1 = x_sorted[lo:hi] + rel_drift_x
+    y1 = y_sorted[lo:hi] + rel_drift_y
+
+    # take this segment out of the reference counts (restored below).
+    # Counts that drop to zero are left in place: a zero count
+    # contributes min(0, target count) == 0 to every shift.
+    if exclude_self:
+        own, own_counts = np.unique(l0_sorted[lo:hi], return_counts=True)
+        own_pos = np.searchsorted(l0_coords, own)
+        l0_counts[own_pos] -= own_counts
+
+    # count the number of intersected localizations
+    roi_cc = _point_intersect_2d(
+        l0_coords, l0_counts, x1, y1, intersect_d, width_units, shifts_xy, box
+    )
+
+    if exclude_self:
+        l0_counts[own_pos] += own_counts
+        if not roi_cc.any():  # nothing left to align against
+            return None
+
+    # estimate the precise sub-pixel position of the peak of roi_cc with FFT
+    return _get_fft_peak(roi_cc, intersect_d)
+
+
 def intersection_max(
     x: lib.SeriesOrFloatArray1D,
     y: lib.SeriesOrFloatArray1D,
@@ -515,15 +589,7 @@ def intersection_max(
     if exclude_self:
         # a segment's own bins are subtracted from the reference counts,
         # which is only defined if the reference holds the same bins
-        l1 = np.int32(
-            np.round(np.asarray(x) / intersect_d)
-            + np.round(np.asarray(y) / intersect_d) * width_units
-        )
-        if not np.array_equal(l0, l1):
-            raise ValueError(
-                "exclude_self requires the reference to be the target"
-                " itself, but ref_x/ref_y differ from x/y."
-            )
+        _check_exclude_self_reference(x, y, l0, width_units, intersect_d)
 
     # sort the target localizations by frame so that each segment is a
     # contiguous slice (located with searchsorted). This avoids
@@ -550,50 +616,32 @@ def intersection_max(
         # get the target localizations within the current segment
         lo, hi = seg_idx[s], seg_idx[s + 1]
 
-        # skip if no target localizations
-        if hi == lo:
-            drift_x[s] = drift_x[s - 1]
-            drift_y[s] = drift_y[s - 1]
-            continue
-
-        # undrifting from the previous round (new array, not a view)
-        x1 = x_sorted[lo:hi] + rel_drift_x
-        y1 = y_sorted[lo:hi] + rel_drift_y
-
-        # take this segment out of the reference counts (restored below).
-        # Counts that drop to zero are left in place: a zero count
-        # contributes min(0, target count) == 0 to every shift.
-        if exclude_self:
-            own, own_counts = np.unique(l0_sorted[lo:hi], return_counts=True)
-            own_pos = np.searchsorted(l0_coords, own)
-            l0_counts[own_pos] -= own_counts
-
-        # count the number of intersected localizations
-        roi_cc = _point_intersect_2d(
+        shift = _align_segment(
+            lo,
+            hi,
+            x_sorted,
+            y_sorted,
+            rel_drift_x,
+            rel_drift_y,
+            exclude_self,
+            l0_sorted,
             l0_coords,
             l0_counts,
-            x1,
-            y1,
             intersect_d,
             width_units,
             shifts_xy,
             box,
         )
-
-        if exclude_self:
-            l0_counts[own_pos] += own_counts
-            # nothing left to align against (e.g. a single segment)
-            if not roi_cc.any():
-                drift_x[s] = drift_x[s - 1]
-                drift_y[s] = drift_y[s - 1]
-                continue
-
-        # estimate the precise sub-pixel position of the peak of roi_cc
-        # with FFT
-        px, py = _get_fft_peak(roi_cc, intersect_d)
+        if shift is None:
+            # no target localizations, or (with exclude_self) nothing
+            # left to align against, e.g. a single segment
+            drift_x[s] = drift_x[s - 1]
+            drift_y[s] = drift_y[s - 1]
+            continue
 
         # update the relative drift reference for the subsequent
         # segmented subset (interval) and save the drifts
+        px, py = shift
         rel_drift_x += px
         rel_drift_y += py
         drift_x[s] = -rel_drift_x

@@ -8,16 +8,16 @@ Fit spots (single-molecule images) with 2D Gaussian least squares.
     **This whole module will be removed in Picasso 1.0.** Every public
     name in it now warns. All fitting lives in :mod:`picasso.fitting`:
 
-    ==============================  ===============================
-    this module                     replacement
-    ==============================  ===============================
-    ``fit_spot`` / ``fit_spots``    ``fitting.gaussfit.fit_spots``
-    ``fit_spots_parallel``          ``fitting.gaussfit.fit_spots_async``
-    ``fit_spots_gauss_gpu``         ``fitting.gaussfit_cuda.fit_spots``
-    ``locs_from_fits``              ``localize.locs_from_fits_gauss``
-    ``localization_precision``      ``fitting.precision.localization_precision``
-    ``sigma_uncertainty``           ``fitting.precision.sigma_uncertainty_lsq``
-    ==============================  ===============================
+    ============================  ============================================
+    this module                   replacement
+    ============================  ============================================
+    ``fit_spot`` / ``fit_spots``  ``fitting.gaussfit.fit_spots``
+    ``fit_spots_parallel``        ``fitting.gaussfit.fit_spots_async``
+    ``fit_spots_gauss_gpu``       ``fitting.gaussfit_cuda.fit_spots``
+    ``locs_from_fits``            ``localize.locs_from_fits_gauss``
+    ``localization_precision``    ``fitting.precision.localization_precision``
+    ``sigma_uncertainty``         ``fitting.precision.sigma_uncertainty_lsq``
+    ============================  ============================================
 
 The optimizer here is SciPy's ``leastsq`` (MINPACK) and is *not* derived from
 Gpufit. Its GPU counterpart is: ``fit_spots_gauss_gpu`` below is a thin shim
@@ -777,8 +777,9 @@ def fits_from_futures(futures: list[futures.Future]) -> lib.FloatArray2D:
 
     .. deprecated:: 0.11
         This whole module is removed in Picasso 1.0. Plumbing for
-        ``fit_spots_parallel``; :func:`picasso.fitting.gaussfit.fit_spots_async`
-        needs no equivalent, since its threads write into shared arrays.
+        ``fit_spots_parallel``;
+        :func:`picasso.fitting.gaussfit.fit_spots_async` needs no
+        equivalent, since its threads write into shared arrays.
     """
     lib.deprecation_warning(_DEPRECATION_MESSAGE)
     return _fits_from_futures(futures)

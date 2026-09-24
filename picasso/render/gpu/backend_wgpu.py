@@ -251,7 +251,8 @@ const WHALE_MAX_TILES: u32 = {_WHALE_MAX_TILES}u;
 // 256 + local, ntiles*256 entries), the pixel tier's per-tile global
 // base (ntiles entries), then the tile tier's offsets persisted per
 // channel (ntiles per channel, sliced by u.tile_base)
-@group(0) @binding(3) var<storage, read_write> tile_atomics: array<atomic<u32>>;
+@group(0) @binding(3)
+var<storage, read_write> tile_atomics: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> offsets: array<u32>;
 @group(0) @binding(5) var<storage, read_write> bins: array<u32>;
 // pixel tier: px_atomics[2q] = count, px_atomics[2q + 1] = cursor;
@@ -434,8 +435,10 @@ fn cs_bin_count(
         if (s.tier != 1u) {
             continue;
         }
-        for (var ty = s.i_min / i32(TILE); ty <= (s.i_max - 1) / i32(TILE); ty++) {
-            for (var tx = s.j_min / i32(TILE); tx <= (s.j_max - 1) / i32(TILE); tx++) {
+        let ty_max = (s.i_max - 1) / i32(TILE);
+        let tx_max = (s.j_max - 1) / i32(TILE);
+        for (var ty = s.i_min / i32(TILE); ty <= ty_max; ty++) {
+            for (var tx = s.j_min / i32(TILE); tx <= tx_max; tx++) {
                 atomicAdd(&tile_atomics[2u * (u32(ty) * u.ntx + u32(tx))], 1u);
             }
         }
@@ -538,8 +541,10 @@ fn cs_bin_scatter(
                 }
             }
         } else if (s.tier == 1u) {
-            for (var ty = s.i_min / i32(TILE); ty <= (s.i_max - 1) / i32(TILE); ty++) {
-                for (var tx = s.j_min / i32(TILE); tx <= (s.j_max - 1) / i32(TILE); tx++) {
+            let ty_max = (s.i_max - 1) / i32(TILE);
+            let tx_max = (s.j_max - 1) / i32(TILE);
+            for (var ty = s.i_min / i32(TILE); ty <= ty_max; ty++) {
+                for (var tx = s.j_min / i32(TILE); tx <= tx_max; tx++) {
                     let tile = u32(ty) * u.ntx + u32(tx);
                     let slot = atomicAdd(&tile_atomics[2u * tile + 1u], 1u);
                     let idx = offsets[tile_offsets_at(tile)] + slot;
@@ -823,7 +828,35 @@ class WgpuBackend(SplatBackend):
     def describe(self) -> str:
         """E.g. ``"Apple M4 via Metal"``."""
         info = self._adapter_info
-        return f"{info.get('device', 'unknown GPU')} via {info.get('backend_type', '?')}"
+        device = info.get("device", "unknown GPU")
+        backend_type = info.get("backend_type", "?")
+        return f"{device} via {backend_type}"
+
+    def _validate_render_request(self, columns, blur_method, viewport, ang):
+        """Raise ``SplatBackendError`` for any request ``render_channels``
+        cannot honor."""
+        if blur_method not in (
+            None,
+            "gaussian",
+            "gaussian_iso",
+            "smooth",
+            "convolve",
+        ):
+            raise SplatBackendError(f"unknown blur_method '{blur_method}'")
+        if viewport is None:
+            raise SplatBackendError("GPU rendering needs an explicit viewport")
+        if ang is not None:
+            if any(c.z is None for c in columns):
+                raise SplatBackendError("3D rotation needs z")
+        if blur_method in ("gaussian", "gaussian_iso"):
+            if any(c.lpx is None or c.lpy is None for c in columns):
+                raise SplatBackendError("missing localization precision")
+            if ang is not None and any(c.lpz is None for c in columns):
+                raise SplatBackendError("3D rotation needs lpz")
+        if any(len(c) > self._max_channel_locs for c in columns):
+            raise SplatBackendError(
+                "channel exceeds the GPU storage-binding limit"
+            )
 
     # ------------------------------------------------------------------
     # public API
@@ -848,28 +881,7 @@ class WgpuBackend(SplatBackend):
         ``backend.SplatBackend.render_channels``). The ``quadtree``
         method is CPU-only (``scene._render_channels`` never sends it
         here; ``quadtree_capacity`` is accepted for the contract)."""
-        if blur_method not in (
-            None,
-            "gaussian",
-            "gaussian_iso",
-            "smooth",
-            "convolve",
-        ):
-            raise SplatBackendError(f"unknown blur_method '{blur_method}'")
-        if viewport is None:
-            raise SplatBackendError("GPU rendering needs an explicit viewport")
-        if ang is not None:
-            if any(c.z is None for c in columns):
-                raise SplatBackendError("3D rotation needs z")
-        if blur_method in ("gaussian", "gaussian_iso"):
-            if any(c.lpx is None or c.lpy is None for c in columns):
-                raise SplatBackendError("missing localization precision")
-            if ang is not None and any(c.lpz is None for c in columns):
-                raise SplatBackendError("3D rotation needs lpz")
-        if any(len(c) > self._max_channel_locs for c in columns):
-            raise SplatBackendError(
-                "channel exceeds the GPU storage-binding limit"
-            )
+        self._validate_render_request(columns, blur_method, viewport, ang)
         try:
             with self._lock:
                 return self._render(
@@ -1052,6 +1064,56 @@ class WgpuBackend(SplatBackend):
         unique = {WgpuBackend._array_key(a): a for a in arrays}
         return sum(len(a) * 4 for a in unique.values())
 
+    def _plan_channel_chunks(self, index, channel, budget):
+        """Plan for one channel: a single cacheable entry, or (when
+        larger than ``budget``) single-use row chunks.
+
+        Returns a list of ``(chunk_columns, channel_index, cacheable)``
+        entries."""
+        nbytes = self._channel_bytes(channel)
+        if (
+            channel.indices is not None
+            and budget is not None
+            and nbytes > budget
+        ):
+            # an index list needs its whole base resident; a base
+            # over the budget is gathered and chunked as rows
+            channel = channel.materialize()
+            nbytes = self._channel_bytes(channel)
+        if budget is not None and nbytes > budget and len(channel) > 1:
+            n_chunks = ceil(nbytes / budget)
+            rows = ceil(len(channel) / n_chunks)
+            entries = []
+            for start in range(0, len(channel), rows):
+                stop = min(start + rows, len(channel))
+                entries.append((channel.slice(start, stop), index, False))
+            return entries
+        return [(channel, index, True)]
+
+    def _reclaim_upload_budget(self, plan, budget):
+        """Evict least recently rendered resident uploads until the
+        cache fits ``plan``'s new uploads within ``budget``."""
+        needed = {}
+        for chunk, _, cache in plan:
+            if not cache:
+                continue
+            resolved = self._resolve_channel(chunk)
+            if resolved is not None:  # served by resident uploads
+                for key in resolved[0]:
+                    needed[key] = self._arrays[key][2]
+                continue
+            for array in self._column_arrays(chunk):
+                needed[self._array_key(array)] = len(array) * 4
+        new_bytes = sum(
+            nbytes for key, nbytes in needed.items() if key not in self._arrays
+        )
+        for key in list(self._arrays):
+            if self._cache_bytes + new_bytes <= budget:
+                break
+            if key in needed:
+                continue
+            self._evict(key)
+
     def _plan_uploads(self, columns):
         """Decide per channel whether it renders from a resident upload
         or, when larger than the VRAM budget, in single-use row chunks;
@@ -1062,47 +1124,9 @@ class WgpuBackend(SplatBackend):
         budget = vram_budget_bytes()
         plan = []
         for index, channel in enumerate(columns):
-            nbytes = self._channel_bytes(channel)
-            if (
-                channel.indices is not None
-                and budget is not None
-                and nbytes > budget
-            ):
-                # an index list needs its whole base resident; a base
-                # over the budget is gathered and chunked as rows
-                channel = channel.materialize()
-                nbytes = self._channel_bytes(channel)
-            if budget is not None and nbytes > budget and len(channel) > 1:
-                n_chunks = ceil(nbytes / budget)
-                rows = ceil(len(channel) / n_chunks)
-                for start in range(0, len(channel), rows):
-                    stop = min(start + rows, len(channel))
-                    plan.append((channel.slice(start, stop), index, False))
-            else:
-                plan.append((channel, index, True))
+            plan.extend(self._plan_channel_chunks(index, channel, budget))
         if budget is not None:
-            needed = {}
-            for chunk, _, cache in plan:
-                if not cache:
-                    continue
-                resolved = self._resolve_channel(chunk)
-                if resolved is not None:  # served by resident uploads
-                    for key in resolved[0]:
-                        needed[key] = self._arrays[key][2]
-                    continue
-                for array in self._column_arrays(chunk):
-                    needed[self._array_key(array)] = len(array) * 4
-            new_bytes = sum(
-                nbytes
-                for key, nbytes in needed.items()
-                if key not in self._arrays
-            )
-            for key in list(self._arrays):
-                if self._cache_bytes + new_bytes <= budget:
-                    break
-                if key in needed:
-                    continue
-                self._evict(key)
+            self._reclaim_upload_budget(plan, budget)
         return plan
 
     def _evict(self, key):

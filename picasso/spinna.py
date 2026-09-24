@@ -168,6 +168,119 @@ def _targets_from_structures(structures: list[Structure]) -> list[str]:
     return targets
 
 
+def _solve_unique_structure_counts(
+    structures: list[Structure],
+    targets: list[str],
+    t_counts: lib.FloatArray2D,
+    N_total: dict,
+    save: str,
+) -> dict:
+    """Solve for structure counts when the number of structures equals
+    the number of unique molecular targets, see ``generate_N_structures``.
+
+    In this special case, the linear system ``t_counts @ counts =
+    N_total`` has zero degrees of freedom, so the structure counts are
+    uniquely determined and no search space needs to be sampled.
+
+    Returns
+    -------
+    structure_counts : dict
+        Specifies the (single) structure counts to be simulated. Keys
+        are the names of the structures and values are one-element
+        arrays of integers.
+    """
+    N_total_arr = np.asarray(
+        [N_total[target] for target in targets], dtype=np.float64
+    )
+    try:
+        counts = np.linalg.solve(t_counts.astype(np.float64), N_total_arr)
+    except np.linalg.LinAlgError as err:
+        raise ValueError(
+            "Cannot generate a search space: t_counts is singular."
+        ) from err
+    counts = np.maximum(np.round(counts), 0).astype(np.int32)
+    structure_counts = {
+        s.title: np.array([counts[i]]) for i, s in enumerate(structures)
+    }
+    if save:
+        df = pd.DataFrame(structure_counts)
+        df.to_csv(save, index=False)
+    return structure_counts
+
+
+def _compute_dependent_structure_counts(
+    eqs: lib.FloatArray2D,
+    N_structures: lib.FloatArray2D,
+    n_t: int,
+) -> lib.FloatArray2D:
+    """Fill in the counts of the dependent structures in ``N_structures``,
+    see ``generate_N_structures``.
+
+    Based on the numbers of free structures, the numbers of dependent
+    structures are found using the set of linear equations found via
+    Gaussian elimination, see ``eqs``. By taking the last row of eqs,
+    the counts of the first of the dependent structures can be found,
+    see documentation. Once this is done, the next dependent structure
+    can be found by repeating the process with the second to last row
+    of eqs, and so on.
+
+    Returns
+    -------
+    N_structures : lib.FloatArray2D
+        The input array with the dependent structure counts filled in.
+    """
+    for i in range(n_t):  # iterate over each dependent structure
+        # take the coefficients from eqs; we start from the last row
+        # and take only the coefficients that are to the right side of
+        # the leading one
+        formula = eqs[n_t - i - 1][(n_t - i) :]
+        # the last element in the formula is the constant coefficient;
+        # to get the value of the dependent structure count, subtract
+        # the term taken from the dot product of the coefficients from the
+        # the constant coefficient (all taken from formula and the
+        # structure counts)
+        N_structures[:, n_t - i - 1] = formula[-1] - (
+            N_structures[:, (n_t - i) :] @ formula[:-1]
+        )
+    return N_structures
+
+
+def _save_structure_counts_csv(
+    structures: list[Structure],
+    N_structures: lib.FloatArray2D,
+    N_total: lib.FloatArray1D,
+    targets: list[str],
+    save: str,
+) -> None:
+    """Save the generated structure counts and their proportions to a
+    .csv file, see ``generate_N_structures``."""
+    # find proportions first, just like in
+    # StructureMixer.convert_counts_to_props
+    props = np.zeros(N_structures.shape, dtype=np.float32)
+    for i, structure in enumerate(structures):
+        N_str_total = np.zeros(N_structures.shape[0], dtype=np.float32)
+        N_per_target = structure.get_ind_target_count(targets)
+        for N_mol in N_per_target:
+            N_str_total = N_str_total + N_mol * N_structures[:, i]
+        prop = np.round(100 * N_str_total / N_total.sum(), 2)
+        props[:, i] = prop
+    # if rounding error occurs, delete from the first non-zero element
+    rows_to_correct = np.where(np.sum(props, axis=1) != 100)[0]
+    for row in rows_to_correct:
+        first_non_zero_idx = next(
+            i for i, prop in enumerate(props[row, :]) if prop > 0
+        )
+        props[row, first_non_zero_idx] -= np.sum(props[row, :]) - 100
+
+    # save as a .csv file
+    df = pd.DataFrame(
+        np.hstack((N_structures, props)),
+        columns=[f"N_{_.title}" for _ in structures]
+        + [f"Prop_{_.title}" for _ in structures],
+    )
+    df.to_csv(save, header=True, index=False)
+
+
 def generate_N_structures(
     structures: list[Structure],
     N_total: dict,
@@ -222,23 +335,9 @@ def generate_N_structures(
     # uniquely determined. Return a single-row search space without
     # invoking the sampler.
     if n_s == n_t:
-        N_total_arr = np.asarray(
-            [N_total[target] for target in targets], dtype=np.float64
+        return _solve_unique_structure_counts(
+            structures, targets, t_counts, N_total, save
         )
-        try:
-            counts = np.linalg.solve(t_counts.astype(np.float64), N_total_arr)
-        except np.linalg.LinAlgError as err:
-            raise ValueError(
-                "Cannot generate a search space: t_counts is singular."
-            ) from err
-        counts = np.maximum(np.round(counts), 0).astype(np.int32)
-        structure_counts = {
-            s.title: np.array([counts[i]]) for i, s in enumerate(structures)
-        }
-        if save:
-            df = pd.DataFrame(structure_counts)
-            df.to_csv(save, index=False)
-        return structure_counts
 
     # ensure that the order of structures is correct, i.e., the free
     # paramters in the system of linear equations are on the right side
@@ -305,19 +404,7 @@ def generate_N_structures(
     # this is done, the next dependent structure can be found by
     # repeating the process with the second to last row of eqs, and so
     # on.
-    for i in range(n_t):  # iterate over each dependent structure
-        # take the coefficients from eqs; we start from the last row
-        # and take only the coefficients that are to the right side of
-        # the leading one
-        formula = eqs[n_t - i - 1][(n_t - i) :]
-        # the last element in the formula is the constant coefficient;
-        # to get the value of the dependent structure count, subtract
-        # the term taken from the dot product of the coefficients from the
-        # the constant coefficient (all taken from formula and the
-        # structure counts)
-        N_structures[:, n_t - i - 1] = formula[-1] - (
-            N_structures[:, (n_t - i) :] @ formula[:-1]
-        )
+    N_structures = _compute_dependent_structure_counts(eqs, N_structures, n_t)
 
     # the last step is to delete the unphysical values, i.e., the
     # rows where the structure counts are negative; rows with repeating
@@ -333,31 +420,9 @@ def generate_N_structures(
         structure_counts[structure.title] = N_structures[:, i]
 
     if save:  # if path for saving was provided
-        # find proportions first, just like in
-        # StructureMixer.convert_counts_to_props
-        props = np.zeros(N_structures.shape, dtype=np.float32)
-        for i, structure in enumerate(structures):
-            N_str_total = np.zeros(N_structures.shape[0], dtype=np.float32)
-            N_per_target = structure.get_ind_target_count(targets)
-            for N_mol in N_per_target:
-                N_str_total = N_str_total + N_mol * N_structures[:, i]
-            prop = np.round(100 * N_str_total / N_total.sum(), 2)
-            props[:, i] = prop
-        # if rounding error occurs, delete from the first non-zero element
-        rows_to_correct = np.where(np.sum(props, axis=1) != 100)[0]
-        for row in rows_to_correct:
-            first_non_zero_idx = next(
-                i for i, prop in enumerate(props[row, :]) if prop > 0
-            )
-            props[row, first_non_zero_idx] -= np.sum(props[row, :]) - 100
-
-        # save as a .csv file
-        df = pd.DataFrame(
-            np.hstack((N_structures, props)),
-            columns=[f"N_{_.title}" for _ in structures]
-            + [f"Prop_{_.title}" for _ in structures],
+        _save_structure_counts_csv(
+            structures, N_structures, N_total, targets, save
         )
-        df.to_csv(save, header=True, index=False)
 
     return structure_counts
 
