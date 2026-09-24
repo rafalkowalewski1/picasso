@@ -31,6 +31,7 @@ Last change: 24-SEP-2026 CEST
 - The rotation window renders in the background like the main window: rotating and panning never block the GUI, a burst of mouse moves renders only the newest orientation, large picks are previewed with a subset of localizations while dragging (sized by the localizations in view, not by the loaded total) and sharpened as soon as the drag pauses, and the renders use the GPU when it is enabled.
 - The rotation window rotates about the structure at the center of the view.
 - 3D animations are built in the background at a resolution of your choice (`Resolution (px)` in the animation dialog, independent of the window's size, e.g. 1920 x 1080), with a cancel button; failures are reported instead of silently producing nothing; the frames use the GPU when it is enabled.
+- Availability of the 3D window is evaluated when channels are closed.
 
 ### Picks
 - Circular picks no longer index the localizations first: they query the spatial index built when a channel is loaded, which serves any pick diameter, so the *Indexing localizations...* wait (about a second per million localizations, for every channel, again after each pick-size change) is gone from picking, pick similar, counting, combining, removing, aligning and undrifting from picks. The old method can still be used via API.

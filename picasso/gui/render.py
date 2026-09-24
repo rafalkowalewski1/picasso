@@ -893,6 +893,11 @@ class DatasetDialog(lib.Dialog):
         # remove z slicing attribute
         self.window.slicer_dialog.zcoord.pop(i)
 
+        # hide the 3D-only actions if no remaining channel has z data
+        if not any("z" in locs.columns for locs in self.window.view.locs):
+            for action in self.window.actions_3d:
+                action.setVisible(False)
+
         # adjust group color if needed
         if len(self.window.view.locs) == 1:
             if "group" in self.window.view.locs[0].columns:
