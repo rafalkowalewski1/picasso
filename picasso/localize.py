@@ -162,6 +162,7 @@ LOCALIZATION_COLUMNS = {
     "Picked spots only": ["n_id"],
     "MLE only": ["log_likelihood", "iterations"],
     "Least squares only": ["chi_square"],
+    "Goodness of fit": ["reduced_chi_square"],
     "Uncertainty": ["photons_unc", "bg_unc", "sx_unc", "sy_unc"],
     "Multichannel only": (
         [f"photons_ch{c}" for c in range(precision._LINK_XYZ_MAX_CHANNELS)]
@@ -2900,6 +2901,143 @@ def _mean_readout_variance(
     return variance.reshape(len(variance), -1).mean(axis=1)
 
 
+def reduced_chi_square(
+    spots: np.ndarray,
+    n_parameters: int,
+    em: bool,
+    log_likelihood: lib.FloatArray1D | None = None,
+    chi_square: lib.FloatArray1D | None = None,
+    variance: np.ndarray | None = None,
+) -> lib.FloatArray1D:
+    """Goodness of fit normalized for the box size and the spot brightness.
+
+    ``log_likelihood`` and ``chi_square`` grow with the number of fitted
+    pixels and, for least squares, with the photon counts, so neither can be
+    compared between spots of different brightness or fits with different
+    box sizes. Dividing each by the value a correct model is expected to
+    reach under the noise alone gives a statistic that is about 1 for a good
+    fit whatever the spot, and larger where the model does not describe the
+    data (overlapping emitters, a wrong PSF model, a failed fit).
+
+    - **Maximum likelihood.** Picasso's ``log_likelihood`` is minus half the
+      Poisson deviance, the likelihood-ratio chi-square against the saturated
+      model, which is asymptotically chi-square distributed with ``n_pixels -
+      n_parameters`` degrees of freedom. The deviance divided by that is
+      returned. The asymptotics need a few photons per pixel: on a background
+      well below one photon per pixel the expected deviance falls short of the
+      degrees of freedom and a good fit scores below 1.
+    - **Least squares.** ``chi_square`` is the unweighted residual sum of
+      squares. Its expectation is the summed per-pixel variance, scaled by
+      ``(n_pixels - n_parameters) / n_pixels`` for the fitted degrees of
+      freedom. The Poisson variance of a pixel is its model mean, and since
+      the fitted background makes the residuals sum to zero, the summed model
+      is the summed data, so no model has to be re-evaluated. The sCMOS
+      readout variance adds to it pixel by pixel.
+
+    In both cases an EMCCD's excess noise doubles the variance of the photon
+    counts, which the data in photons carries but the Poisson model does not
+    know about, so it is divided out as well.
+
+    Parameters
+    ----------
+    spots : np.ndarray
+        The fitted spots in photons, ``(n_spots, ...)`` with any pixel layout
+        after the first axis (e.g. ``(n_spots, n_channels, box, box)`` for a
+        multichannel fit). Only the least-squares normalization reads the
+        values; maximum likelihood needs only the pixel count.
+    n_parameters : int
+        Number of free parameters the fit optimized per spot.
+    em : bool
+        Whether the data came from an EMCCD.
+    log_likelihood : lib.FloatArray1D, optional
+        Per-spot log-likelihood of a maximum-likelihood fit. Exactly one of
+        ``log_likelihood`` and ``chi_square`` must be given.
+    chi_square : lib.FloatArray1D, optional
+        Per-spot residual sum of squares of a least-squares fit.
+    variance : np.ndarray, optional
+        Per-pixel sCMOS readout variance in photoelectrons squared, with as
+        many pixels per spot as ``spots``. Only used for least squares: the
+        maximum-likelihood fit already absorbs it into the likelihood (see
+        Huang et al., Nat. Methods 10, 653-658, 2013).
+
+    Returns
+    -------
+    reduced_chi_square : lib.FloatArray1D
+        Per-spot reduced chi-square, ``float32``.
+
+    Raises
+    ------
+    ValueError
+        If not exactly one of ``log_likelihood`` and ``chi_square`` is given.
+    """
+    if (log_likelihood is None) == (chi_square is None):
+        raise ValueError(
+            "Give exactly one of 'log_likelihood' and 'chi_square'."
+        )
+    n_spots = len(spots)
+    n_pixels = int(np.prod(np.shape(spots)[1:]))
+    degrees_of_freedom = max(n_pixels - n_parameters, 1)
+    excess_noise = 2.0 if em else 1.0
+    if log_likelihood is not None:
+        deviance = -2.0 * np.asarray(log_likelihood, dtype=np.float64)
+        reduced = deviance / (excess_noise * degrees_of_freedom)
+    else:
+        total = np.asarray(spots, dtype=np.float64).reshape(n_spots, n_pixels)
+        expected = excess_noise * total.sum(axis=1)
+        if variance is not None:
+            expected += (
+                np.asarray(variance, dtype=np.float64)
+                .reshape(n_spots, n_pixels)
+                .sum(axis=1)
+            )
+        # At least one photon squared over the whole box, so a box without
+        # signal cannot divide by zero; an infinite value would make
+        # lib.ensure_sanity drop the localization.
+        expected = np.maximum(expected, 1.0) * degrees_of_freedom / n_pixels
+        reduced = np.asarray(chi_square, dtype=np.float64) / expected
+    return reduced.astype(np.float32)
+
+
+def _fit_statistic_columns(
+    spots: np.ndarray | None,
+    n_parameters: int,
+    em: bool,
+    log_likelihood: lib.FloatArray1D | None,
+    iterations: lib.FloatArray1D | None,
+    chi_square: lib.FloatArray1D | None,
+    variance: np.ndarray | None,
+) -> dict:
+    """The goodness-of-fit columns shared by every fit's localizations.
+
+    Each of ``log_likelihood``, ``iterations`` and ``chi_square`` becomes a
+    column of the same name when given. ``reduced_chi_square`` (see
+    :func:`reduced_chi_square`) is added when the ``spots`` and either
+    statistic are given."""
+    columns = {}
+    if log_likelihood is not None:
+        columns["log_likelihood"] = np.asarray(log_likelihood).astype(
+            np.float32
+        )
+    if iterations is not None:
+        columns["iterations"] = np.asarray(iterations).astype(np.int32)
+    if chi_square is not None:
+        columns["chi_square"] = np.asarray(chi_square).astype(np.float32)
+    if spots is not None and (
+        log_likelihood is not None or chi_square is not None
+    ):
+        columns["reduced_chi_square"] = reduced_chi_square(
+            spots,
+            n_parameters,
+            em,
+            # a caller passing both gets the MLE normalization; no fit
+            # reports both
+            log_likelihood=log_likelihood,
+            chi_square=None if log_likelihood is not None else chi_square,
+            variance=variance,
+        )
+    return columns
+
+
 def _clip_for_mle(
     spots: lib.FloatArray3D, variance: lib.FloatArray3D | None
 ) -> lib.FloatArray3D:
@@ -3867,6 +4005,7 @@ def locs_from_fits_gauss(
     spherical: bool = False,
     chi_square: lib.FloatArray1D | None = None,
     variance: lib.FloatArray3D | None = None,
+    spots: lib.FloatArray3D | None = None,
 ) -> pd.DataFrame:
     """Convert the fit results from a Gaussian fit into a data frame of
     localizations.
@@ -3922,13 +4061,18 @@ def locs_from_fits_gauss(
         added. It is the least-squares counterpart of the MLE fits'
         ``log_likelihood``: a goodness-of-fit measure in photons squared,
         so it scales with the spot brightness and the box size and is
-        only comparable between fits of the same box size. Default is
-        None.
+        only comparable between fits of the same box size;
+        ``reduced_chi_square`` is its normalized form. Default is None.
     variance : lib.FloatArray3D, optional
         Per-pixel sCMOS readout variance in photoelectrons squared, laid out
         exactly like the fitted spots. It enters the Cramer-Rao bound of an
         MLE fit pixel by pixel, and the Mortensen closed form of a
         least-squares fit as its mean over the box. Default is None.
+    spots : np.ndarray, optional
+        The spots that were fitted, in photons. With ``log_likelihood`` or
+        ``chi_square`` they add the ``reduced_chi_square`` column, the
+        goodness of fit normalized for the box size and the photon counts
+        (see :func:`reduced_chi_square`). Default is None.
 
     Returns
     -------
@@ -4003,12 +4147,18 @@ def locs_from_fits_gauss(
                 columns["angle_unc"] = np.rad2deg(np.sqrt(crlb[:, 6])).astype(
                     np.float32
                 )
-    if log_likelihood is not None:
-        columns["log_likelihood"] = log_likelihood.astype(np.float32)
-    if iterations is not None:
-        columns["iterations"] = iterations.astype(np.int32)
-    if chi_square is not None:
-        columns["chi_square"] = np.asarray(chi_square).astype(np.float32)
+    columns.update(
+        _fit_statistic_columns(
+            spots,
+            # a spherical fit's theta repeats its single width as sx and sy
+            theta.shape[1] - 1 if spherical else theta.shape[1],
+            em,
+            log_likelihood,
+            iterations,
+            chi_square,
+            variance,
+        )
+    )
     locs = pd.DataFrame(columns)
     if "n_id" in identifications.columns:
         # The cross-channel link index. Carried through and sorted on, as
@@ -4093,6 +4243,7 @@ def _fit2d_gauss(
         spherical=spherical,
         chi_square=chi_square,
         variance=variance,
+        spots=spots,
     )
     return locs
 
@@ -4282,6 +4433,7 @@ def locs_from_fits_gauss_multichannel(
     iterations: lib.FloatArray1D | None = None,
     chi_square: lib.FloatArray1D | None = None,
     variance: np.ndarray | None = None,
+    spots: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Localizations from a multichannel spherical Gaussian fit.
 
@@ -4320,6 +4472,12 @@ def locs_from_fits_gauss_multichannel(
         when given.
     variance : np.ndarray, optional
         Channel-major per-pixel sCMOS readout variance, for the uncertainties.
+    spots : np.ndarray, optional
+        The spots that were fitted in all channels, in photons. With
+        ``log_likelihood`` or ``chi_square`` they add the
+        ``reduced_chi_square`` column, the goodness of fit normalized for the
+        box size and the photon counts (see :func:`reduced_chi_square`).
+        Default is None.
 
     Returns
     -------
@@ -4420,14 +4578,17 @@ def locs_from_fits_gauss_multichannel(
         sigma_unc = np.sqrt(crlb[:, 2]).astype(np.float32)
     columns["sx_unc"] = sigma_unc
     columns["sy_unc"] = sigma_unc
-    if log_likelihood is not None:
-        columns["log_likelihood"] = np.asarray(log_likelihood).astype(
-            np.float32
+    columns.update(
+        _fit_statistic_columns(
+            spots,
+            theta.shape[1],
+            em,
+            log_likelihood,
+            iterations,
+            chi_square,
+            variance,
         )
-    if iterations is not None:
-        columns["iterations"] = np.asarray(iterations).astype(np.int32)
-    if chi_square is not None:
-        columns["chi_square"] = np.asarray(chi_square).astype(np.float32)
+    )
     locs = pd.DataFrame(columns)
     if "n_id" in identifications.columns:
         locs["n_id"] = np.asarray(identifications["n_id"]).astype(np.uint32)
@@ -4586,6 +4747,7 @@ def fit_gauss_multichannel(
         variance=precision._crlb_variance_channel_major(
             variance, len(transforms)
         ),
+        spots=spots,
     )
 
 
@@ -5404,6 +5566,7 @@ def _locs_from_fits_spline_link_xyz(
     jacobians: np.ndarray | None = None,
     chi_square: lib.FloatArray1D | None = None,
     variance: lib.FloatArray4D | None = None,
+    spots: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Localizations from a photon-decoupled (link-XYZ) multichannel spline
     fit.
@@ -5493,14 +5656,17 @@ def _locs_from_fits_spline_link_xyz(
         columns[f"photons_ch{c}"] = photons_ch[:, c].astype(np.float32)
         columns[f"bg_ch{c}"] = bg_ch[:, c].astype(np.float32)
         columns[f"rel_photons_ch{c}"] = rel_photons[:, c].astype(np.float32)
-    if log_likelihood is not None:
-        columns["log_likelihood"] = np.asarray(log_likelihood).astype(
-            np.float32
+    columns.update(
+        _fit_statistic_columns(
+            spots,
+            theta.shape[1],
+            em,
+            log_likelihood,
+            iterations,
+            chi_square,
+            variance,
         )
-    if iterations is not None:
-        columns["iterations"] = np.asarray(iterations).astype(np.int32)
-    if chi_square is not None:
-        columns["chi_square"] = np.asarray(chi_square).astype(np.float32)
+    )
     locs = pd.DataFrame(columns)
     locs.sort_values(by="frame", kind="quicksort", inplace=True)
     return locs
@@ -5522,6 +5688,7 @@ def locs_from_fits_spline(
     jacobians: np.ndarray | None = None,
     chi_square: lib.FloatArray1D | None = None,
     variance: lib.FloatArray4D | None = None,
+    spots: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Convert spline fit results into a localizations data frame.
 
@@ -5574,6 +5741,11 @@ def locs_from_fits_spline(
     variance : lib.FloatArray4D, optional
         Per-pixel sCMOS readout variance in photoelectrons squared, laid out
         like the fitted spots; enters the CRLB pixel by pixel. Default None.
+    spots : np.ndarray, optional
+        The spots that were fitted, in photons. With ``log_likelihood`` or
+        ``chi_square`` they add the ``reduced_chi_square`` column, the
+        goodness of fit normalized for the box size and the photon counts
+        (see :func:`reduced_chi_square`). Default None.
 
     Returns
     -------
@@ -5581,9 +5753,9 @@ def locs_from_fits_spline(
         The localizations, sorted by frame, with ``frame``, ``x``, ``y``,
         ``photons``, ``bg``, ``lpx``, ``lpy``, ``net_gradient``,
         ``photons_unc`` and ``bg_unc``, plus ``z`` and ``lpz`` for a 3D model
-        and whichever of ``log_likelihood``, ``iterations`` and
-        ``chi_square`` were given. Single-channel results additionally have
-        the calibration's lateral transforms applied
+        and whichever of ``log_likelihood``, ``iterations``, ``chi_square``
+        and ``reduced_chi_square`` were given. Single-channel results
+        additionally have the calibration's lateral transforms applied
         (``lib.apply_lateral_transforms``).
     """
     calibration = crop_spline_calibration(calibration, box)
@@ -5606,6 +5778,7 @@ def locs_from_fits_spline(
             jacobians=jacobians,
             chi_square=chi_square,
             variance=variance,
+            spots=spots,
         )
     is_3d = model != "spline-2d"
     box_offset = int(box / 2)
@@ -5677,12 +5850,17 @@ def locs_from_fits_spline(
         columns["lpz"] = lpz.astype(np.float32)
     columns["photons_unc"] = photons_unc.astype(np.float32)
     columns["bg_unc"] = bg_unc.astype(np.float32)
-    if log_likelihood is not None:
-        columns["log_likelihood"] = log_likelihood.astype(np.float32)
-    if iterations is not None:
-        columns["iterations"] = iterations.astype(np.int32)
-    if chi_square is not None:
-        columns["chi_square"] = np.asarray(chi_square).astype(np.float32)
+    columns.update(
+        _fit_statistic_columns(
+            spots,
+            theta.shape[1],
+            em,
+            log_likelihood,
+            iterations,
+            chi_square,
+            variance,
+        )
+    )
     locs = pd.DataFrame(columns)
     locs.sort_values(by="frame", kind="quicksort", inplace=True)
     if precision._spline_n_channels(calibration) > 1:
@@ -5736,6 +5914,7 @@ def _fit2d_spline_gpu(
         progress_callback=progress_callback,
         chi_square=chi_square,
         variance=variance,
+        spots=spots,
     )
     return locs
 
@@ -5799,6 +5978,7 @@ def _fit2d_spline_cpu(
         ),
         chi_square=chi_square,
         variance=variance,
+        spots=spots,
     )
 
 
@@ -6640,6 +6820,7 @@ def fit_spline_multichannel(
         jacobians=jacobians,
         chi_square=chi_square,
         variance=variance,
+        spots=spots,
     )
 
 
@@ -6856,6 +7037,7 @@ def fit_spline_multichannel_ratiometric(
         mle,
         variance,
         n_channels,
+        spots,
     )
 
     locs = pd.concat(parts) if parts else pd.DataFrame()
@@ -6983,6 +7165,7 @@ def _assemble_ratiometric_locs(
     mle: bool,
     variance: lib.FloatArray3D | None,
     n_channels: int,
+    spots: np.ndarray,
 ) -> list:
     """Build localizations per winning-hypothesis group.
 
@@ -7020,6 +7203,7 @@ def _assemble_ratiometric_locs(
             # negative-curvature exits make it unreliable anyway (see above).
             chi_square=(None if mle else chis[k][rows]),
             variance=(None if variance is None else variance[rows]),
+            spots=spots[rows],
         )
         amp = pd.Series(np.asarray(theta_k[:, 0]), index=ids_k.index)
         ps = _photon_scales(calib_k, n_channels)

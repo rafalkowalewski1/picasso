@@ -25,6 +25,7 @@ Last change: 25-SEP-2026 CEST
 
 ### Localize
 - New spot identification method: B-spline wavelet segmentation (Izeddin et al., *Opt. Express* 2012), see the [documentation](https://picassosr.readthedocs.io/en/latest/localize.html#b-spline-wavelet-identification).
+- New column `reduced_chi_square` for MLE and least-squares fits: the goodness of fit normalized for the box size and the photon counts, about 1 for a good fit (`picasso.localize.reduced_chi_square`).
 
 ### **Backward incompatible changes:**
 - *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.

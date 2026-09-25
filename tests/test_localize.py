@@ -1265,6 +1265,164 @@ class TestFit2D:
 # ---------------------------------------------------------------------------
 
 
+def _simulate_gauss_spots(rng, n, box, photons, bg, sigma=1.2, second=None):
+    """Pixel-integrated Gaussian spots with Poisson noise. ``second`` adds
+    an equally bright emitter at that (dx, dy) offset from the first."""
+    from scipy.special import erf
+
+    grid = np.arange(box)
+
+    def integral(center):
+        upper = (grid[None, :] - center[:, None] + 0.5) / (np.sqrt(2) * sigma)
+        lower = (grid[None, :] - center[:, None] - 0.5) / (np.sqrt(2) * sigma)
+        return 0.5 * (erf(upper) - erf(lower))
+
+    def psf(cx, cy):
+        return integral(cy)[:, :, None] * integral(cx)[:, None, :]
+
+    center = (box - 1) / 2 + rng.uniform(-0.5, 0.5, (n, 2))
+    mu = psf(center[:, 0], center[:, 1])
+    if second is not None:
+        shifted = psf(center[:, 0] + second[0], center[:, 1] + second[1])
+        mu = 0.5 * (mu + shifted)
+    mu = photons * mu + bg
+    return rng.poisson(mu).astype(np.float32)
+
+
+def _ids_for(spots):
+    n = len(spots)
+    return pd.DataFrame(
+        {
+            "frame": np.zeros(n, dtype=np.int32),
+            "x": np.full(n, 50, dtype=np.int32),
+            "y": np.full(n, 50, dtype=np.int32),
+            "net_gradient": np.ones(n, dtype=np.float32),
+        }
+    )
+
+
+class TestReducedChiSquare:
+    """``reduced_chi_square`` normalizes the goodness of fit for the box size
+    and the photon counts, so a correct model scores about 1 on any spot."""
+
+    @pytest.mark.parametrize("mle", [True, False])
+    def test_independent_of_box_and_brightness(self, mle):
+        rng = np.random.default_rng(0)
+        means = []
+        raw = []
+        for box, photons, bg in ((5, 300, 5), (9, 5000, 30)):
+            spots = _simulate_gauss_spots(rng, 800, box, photons, bg)
+            locs = localize._fit2d_gauss(
+                spots, _ids_for(spots), box, em=False, mle=mle
+            )
+            means.append(locs["reduced_chi_square"].mean())
+            raw.append(
+                np.abs(locs["log_likelihood" if mle else "chi_square"]).mean()
+            )
+        # the raw statistic grows several-fold between the two settings
+        assert raw[1] > 3 * raw[0]
+        if mle:
+            # the deviance is chi-square distributed: exact up to sampling
+            np.testing.assert_allclose(means, 1.0, atol=0.05)
+        else:
+            # the degrees-of-freedom correction assumes equal leverage on
+            # every pixel, which undercounts the fitted parameters' share of
+            # the bright center: a good fit reads slightly below 1
+            np.testing.assert_allclose(means, 0.9, atol=0.08)
+
+    @pytest.mark.parametrize("mle", [True, False])
+    def test_flags_overlapping_emitters(self, mle):
+        """Two emitters fitted as one describe the data badly."""
+        rng = np.random.default_rng(1)
+        box = 9
+        single = _simulate_gauss_spots(rng, 400, box, 3000, 10)
+        double = _simulate_gauss_spots(
+            rng, 400, box, 3000, 10, second=(3.0, 0.0)
+        )
+        good, bad = (
+            localize._fit2d_gauss(
+                spots, _ids_for(spots), box, False, mle=mle, spherical=True
+            )
+            for spots in (single, double)
+        )
+        assert np.median(bad["reduced_chi_square"]) > 2 * np.median(
+            good["reduced_chi_square"]
+        )
+
+    def test_em_excess_noise_is_divided_out(self):
+        spots = np.full((3, 5, 5), 10.0, dtype=np.float32)
+        ll = np.array([-10.0, -20.0, -30.0])
+        plain = localize.reduced_chi_square(spots, 5, False, log_likelihood=ll)
+        em = localize.reduced_chi_square(spots, 5, True, log_likelihood=ll)
+        np.testing.assert_allclose(em, plain / 2)
+        np.testing.assert_allclose(plain, -2 * ll / (25 - 5), rtol=1e-6)
+
+    def test_least_squares_normalization(self):
+        """The residual sum of squares over the summed variance (Poisson
+        from the data plus the readout), per degree of freedom."""
+        spots = np.full((2, 5, 5), 4.0, dtype=np.float32)
+        variance = np.full((2, 5, 5), 2.0, dtype=np.float32)
+        chi = np.array([100.0, 200.0])
+        out = localize.reduced_chi_square(
+            spots, 5, False, chi_square=chi, variance=variance
+        )
+        expected = chi / ((4 * 25 + 2 * 25) * (25 - 5) / 25)
+        np.testing.assert_allclose(out, expected, rtol=1e-6)
+
+    def test_empty_box_stays_finite(self):
+        """An infinite value would make lib.ensure_sanity drop the loc."""
+        spots = np.zeros((1, 5, 5), dtype=np.float32)
+        out = localize.reduced_chi_square(
+            spots, 5, False, chi_square=np.array([3.0])
+        )
+        assert np.isfinite(out).all()
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{}, {"log_likelihood": np.ones(1), "chi_square": np.ones(1)}],
+    )
+    def test_needs_exactly_one_statistic(self, kwargs):
+        with pytest.raises(ValueError, match="exactly one"):
+            localize.reduced_chi_square(np.ones((1, 3, 3)), 4, False, **kwargs)
+
+    @pytest.mark.parametrize("mle", [True, False])
+    def test_no_spots(self, mle):
+        stat = {"log_likelihood" if mle else "chi_square": np.empty(0)}
+        out = localize.reduced_chi_square(
+            np.empty((0, 5, 5)), 5, False, **stat
+        )
+        assert out.shape == (0,)
+
+    def test_multichannel_spots_flatten(self):
+        """Any pixel layout after the spot axis counts all its pixels."""
+        ll = np.array([-12.0])
+        stacked = localize.reduced_chi_square(
+            np.ones((1, 2, 5, 5)), 5, False, log_likelihood=ll
+        )
+        np.testing.assert_allclose(stacked, 24.0 / (50 - 5), rtol=1e-6)
+
+    @pytest.mark.parametrize(
+        "method", ["gausslq", "gaussmle", "gausslq-spherical"]
+    )
+    def test_fit_writes_the_column(
+        self, picasso_movie, real_identifications, method
+    ):
+        locs, _ = localize.fit(
+            picasso_movie,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
+            fitting_method=method,
+            multiprocess=False,
+        )
+        assert locs["reduced_chi_square"].dtype == np.float32
+        assert np.isfinite(locs["reduced_chi_square"]).all()
+        assert (
+            "reduced_chi_square"
+            in localize.LOCALIZATION_COLUMNS["Goodness of fit"]
+        )
+
+
 class TestLocalize:
     """The top-level ``localize`` pipeline (identify -> get_spots -> fit)."""
 
@@ -9745,6 +9903,8 @@ class TestScmosMultichannel:
         )
         assert len(plain) == len(modeled) == n_frames
         assert np.isfinite(modeled["lpx"]).any()
+        for locs in (plain, modeled):
+            assert np.isfinite(locs["reduced_chi_square"]).all()
 
     def test_the_ratiometric_fitter_accepts_a_calibration(self):
         calibration = _fake_spline_calibration(
@@ -9791,6 +9951,7 @@ class TestScmosMultichannel:
         )
         assert len(locs) == n_frames
         assert "color" in locs.columns
+        assert np.isfinite(locs["reduced_chi_square"]).all()
 
     def test_split_fov_serves_every_region_from_one_calibration(self):
         """Split-FOV is one physical sensor, so one full-frame map suffices.
@@ -14200,6 +14361,7 @@ class TestFitsWithoutNetGradient:
         )
         assert len(locs) == len(ids)
         assert "net_gradient" not in locs.columns
+        assert np.isfinite(locs["reduced_chi_square"]).all()
 
 
 class TestWaveletGui:
