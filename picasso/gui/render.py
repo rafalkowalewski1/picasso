@@ -5177,12 +5177,13 @@ class InfoDialog(lib.Dialog):
 
             # make sure the viewport is not too large
             median_lp = self.window.view.median_lp
-            max_size = 2000 * (median_lp / 2)
+            max_size = 10_000 * (median_lp / 2)
             height, width = render.viewport_size(self.window.view.viewport)
             if height > max_size and width > max_size:
                 text = (
                     "The current FOV is large and will likely lead to a long "
-                    "computation time (current FOV leads to an image of size "
+                    "computation time and high memory usage (current FOV "
+                    "leads to an image of size "
                     f"{int(width/(median_lp/2)):,} x "
                     f"{int(height/(median_lp/2)):,} pixels).\n\n"
                     "Please consider reducing the FOV size before"
