@@ -20,6 +20,7 @@ Last change: 25-SEP-2026 CEST
 - Faster FRC.
 - `picasso.render` is distributed as a package (`kernels`, `geometry`, `splat`, `scene`, `overlays_qt`, `animation`, `backend`, `gpu`); every former `picasso.render.*` name is still importable from `picasso.render`.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
+- Fixed NeNA (and FRC) overwriting group columns of localizations.
 
 ### Localize
 - New spot identification method: B-spline wavelet segmentation (Izeddin et al., *Opt. Express* 2012), see the [documentation](https://picassosr.readthedocs.io/en/latest/localize.html#b-spline-wavelet-identification).

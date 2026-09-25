@@ -2525,7 +2525,9 @@ def _next_frame_neighbor_distance_histogram(
     dnfl : lib.FloatArray1D
         Distance histogram of next frame neighbors.
     """
-    locs.sort_values(kind="quicksort", by="frame", inplace=True)
+    # sort a copy: callers (e.g. the Render GUI) hold position-aligned
+    # arrays such as group colors that an in-place sort would scramble
+    locs = locs.sort_values(kind="quicksort", by="frame")
     frame = locs["frame"].to_numpy()
     x = locs["x"].to_numpy()
     y = locs["y"].to_numpy()
