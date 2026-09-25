@@ -951,6 +951,8 @@ class DatasetDialog(lib.Dialog):
 
         # remove the channel from test clustering dialog
         self.window.test_clusterer_dialog.channels.removeItem(i)
+        self.window.tools_settings_dialog.remove_move_channel(i)
+        self.window.view.clear_move_undo()
 
         # move the remaining channels up so that there is no empty row
         self._relayout_channels()
@@ -6227,6 +6229,101 @@ class PickToolBrushSettings(QtWidgets.QWidget):
         self.grid.setRowStretch(1, 1)
 
 
+class MoveChannelsDialog(lib.Dialog):
+    """Select the channels dragged together by the Move tool.
+
+    ...
+
+    Attributes
+    ----------
+    checks : list of QCheckBox
+        One checkbox per loaded channel, ticked if the channel is
+        dragged.
+    """
+
+    DOCS_URL = "https://picassosr.readthedocs.io/en/latest/render.html#move-ctrl-g"  # noqa: E501
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        names: list[str],
+        selected: tuple[int, ...],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Channels to move")
+        vbox = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        vbox.addLayout(top)
+        top.addWidget(lib.HelpButton(self.DOCS_URL))
+        top.addWidget(QtWidgets.QLabel("Channels dragged by the Move tool:"))
+        top.addStretch()
+
+        # scrollable, as many channels may be loaded (e.g., Exchange-PAINT)
+        checks_widget = QtWidgets.QWidget()
+        checks_layout = QtWidgets.QVBoxLayout(checks_widget)
+        self.checks = []
+        for i, name in enumerate(names):
+            check = QtWidgets.QCheckBox(name)
+            check.setChecked(i in selected)
+            check.stateChanged.connect(self._update_ok)
+            checks_layout.addWidget(check)
+            self.checks.append(check)
+        checks_layout.addStretch()
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(checks_widget)
+        vbox.addWidget(scroll)
+
+        select_row = QtWidgets.QHBoxLayout()
+        vbox.addLayout(select_row)
+        all_button = QtWidgets.QPushButton("Select all")
+        all_button.clicked.connect(lambda: self._set_all(True))
+        select_row.addWidget(all_button)
+        none_button = QtWidgets.QPushButton("Deselect all")
+        none_button.clicked.connect(lambda: self._set_all(False))
+        select_row.addWidget(none_button)
+
+        self.buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal,
+            self,
+        )
+        vbox.addWidget(self.buttons)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self._update_ok()
+
+    def _set_all(self, checked: bool) -> None:
+        """Tick or untick every channel."""
+        for check in self.checks:
+            check.setChecked(checked)
+
+    def _update_ok(self, *args) -> None:
+        """Allow OK only if at least one channel is ticked."""
+        ok = self.buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        ok.setEnabled(bool(self.selected()))
+
+    def selected(self) -> tuple[int, ...]:
+        """Indices of the ticked channels."""
+        return tuple(i for i, c in enumerate(self.checks) if c.isChecked())
+
+    @staticmethod
+    def getChannels(
+        parent: QtWidgets.QWidget | None,
+        names: list[str],
+        selected: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], bool]:
+        """Open the dialog and return the ticked channels and whether
+        the dialog was accepted."""
+        dialog = MoveChannelsDialog(parent, names, selected)
+        result = dialog.exec()
+        return (
+            dialog.selected(),
+            result == QtWidgets.QDialog.DialogCode.Accepted,
+        )
+
+
 class ToolsSettingsDialog(lib.Dialog):
     """Customize picks - shape and size, annotate, change std for
     picking similar.
@@ -6355,6 +6452,110 @@ class ToolsSettingsDialog(lib.Dialog):
         self.point_picks.setToolTip("Display circular picks as points?")
         self.point_picks.stateChanged.connect(self.update_scene_with_cache)
         pick_grid.addWidget(self.point_picks, 4, 0)
+
+        # Move tool - drags the localizations of one or all channels
+        self.move_groupbox = QtWidgets.QGroupBox("Move")
+        self.vbox.addWidget(self.move_groupbox)
+        move_grid = QtWidgets.QGridLayout(self.move_groupbox)
+        move_label = QtWidgets.QLabel("Channels:")
+        move_label.setToolTip(
+            "Channels whose localizations are dragged with the Move tool."
+        )
+        move_grid.addWidget(move_label, 0, 0)
+        # whether each loaded channel is dragged, see move_channels
+        self._move_selection = []
+        self.move_channels_label = QtWidgets.QLabel()
+        move_grid.addWidget(self.move_channels_label, 0, 1)
+        self.move_channels_button = QtWidgets.QPushButton("Select...")
+        self.move_channels_button.clicked.connect(self.select_move_channels)
+        move_grid.addWidget(self.move_channels_button, 0, 2)
+        self.move_channels_button.setToolTip(
+            "Select the channels whose localizations are dragged together\n"
+            "with the Move tool.\n"
+            "Choose Ctrl+G to select the Move tool.\n\n"
+            "Dragging changes the x and y coordinates. The canvas (Width\n"
+            "and Height in the metadata) is fitted to the localizations\n"
+            "so that none is removed when saving, and it is never\n"
+            "smaller than the camera image. Dragging beyond the top or\n"
+            "left edge translates all channels, picks and measured\n"
+            "points by whole camera pixels; the translation is saved in\n"
+            "the metadata."
+        )
+        self._update_move_channels_label()
+        self.move_undo_button = QtWidgets.QPushButton("Undo last move")
+        self.move_undo_button.setToolTip(
+            "Undo the last move of a channel done with the Move tool."
+        )
+        self.move_undo_button.setEnabled(False)
+        self.move_undo_button.clicked.connect(self.window.view.undo_move)
+        move_grid.addWidget(self.move_undo_button, 1, 0, 1, 3)
+
+    def add_move_channel(self) -> None:
+        """Add a loaded channel to the Move tool's selection. Only the
+        first channel is selected by default."""
+        self._move_selection.append(not self._move_selection)
+        self._update_move_channels_label()
+
+    def remove_move_channel(self, i: int) -> None:
+        """Remove a closed channel from the Move tool's selection; the
+        first channel is selected if no other remains selected."""
+        del self._move_selection[i]
+        if self._move_selection and not any(self._move_selection):
+            self._move_selection[0] = True
+        self._update_move_channels_label()
+
+    def move_channels(self) -> tuple[int, ...]:
+        """The channels dragged by the Move tool."""
+        return tuple(i for i, s in enumerate(self._move_selection) if s)
+
+    def set_move_channels(self, channels: tuple[int, ...]) -> None:
+        """Select the channels dragged by the Move tool.
+
+        Parameters
+        ----------
+        channels : tuple of ints
+            Indices of the channels to be dragged.
+        """
+        self._move_selection = [
+            i in channels for i in range(len(self._move_selection))
+        ]
+        self._update_move_channels_label()
+
+    def select_move_channels(self) -> None:
+        """Open a dialog for selecting the channels dragged by the Move
+        tool."""
+        if not self._move_selection:
+            return
+        names = [os.path.basename(p) for p in self.window.view.locs_paths]
+        channels, ok = MoveChannelsDialog.getChannels(
+            self, names, self.move_channels()
+        )
+        if ok:
+            self.set_move_channels(channels)
+
+    def _update_move_channels_label(self) -> None:
+        """Summarize the Move tool's selection next to its button, with
+        the full list in the tooltip."""
+        channels = self.move_channels()
+        names = [os.path.basename(p) for p in self.window.view.locs_paths]
+        n_channels = len(self._move_selection)
+        if not n_channels:
+            text = "No channels loaded"
+        elif len(channels) == 1:
+            text = names[channels[0]] if channels[0] < len(names) else ""
+        elif len(channels) == n_channels:
+            text = f"All {n_channels} channels"
+        else:
+            text = f"{len(channels)} of {n_channels} channels"
+        self.move_channels_label.setText(text)
+        self.move_channels_label.setToolTip(
+            "\n".join(names[i] for i in channels if i < len(names))
+        )
+
+    def update_move_undo(self) -> None:
+        """Enable the Move tool's undo button if there is a move to
+        undo."""
+        self.move_undo_button.setEnabled(bool(self.window.view._move_undo))
 
     def on_brush_width_changed(self, *args) -> None:
         """Update the cursor to the new brush width.
@@ -7761,6 +7962,10 @@ INTERACTION_SUBSAMPLE_FRACTION = 0.1
 #: (asynchronous GUI renders only — exports stay exact-viewport)
 VIEWPORT_MARGIN = 0.15
 
+#: metadata keys accumulating the shift of a channel done with the
+#: Move tool (camera pixels), not including ``lib.CANVAS_OFFSET_KEYS``
+MANUAL_SHIFT_KEYS = ("Manual shift x (cam. px)", "Manual shift y (cam. px)")
+
 
 def _expand_viewport(
     viewport: tuple, margin: float
@@ -7807,9 +8012,12 @@ class View(QtWidgets.QLabel):
     median_lp : float
         Median theoretical lateral localization precision of the first
         locs file (camera pixels).
-    _mode : {'Zoom', 'Pick', 'Measure'}
-        Defines current mode (zoom, pick or measure), use in
+    _mode : {'Zoom', 'Pick', 'Measure', 'Move'}
+        Defines current mode (zoom, pick, measure or move), use in
         mouseEvents.
+    _move_undo : list
+        Finished moves of the Move tool, ``(channels, dx, dy)`` in
+        camera pixels, most recent last.
     n_locs : int
         Number of localizations loaded; if multichannel, the sum is
         given.
@@ -7919,6 +8127,15 @@ class View(QtWidgets.QLabel):
         self._point_sets = []  # finalized measurement sets
         self._measure_following = True  # cursor followed live while True
         self._measure_cursor = None  # live cursor position in Measure mode
+        # Move tool: the channels being dragged, the press position and
+        # the coordinates at the press (camera pixels), the current
+        # shift and the finished moves, (channels, dx, dy), for undo
+        self._move_channels = ()
+        self._move_start = None
+        self._move_origin = None
+        self._move_shift = (0.0, 0.0)
+        self._move_cursor = None  # display position of the shift label
+        self._move_undo = []
         # track the cursor without a pressed button for live measuring
         self.setMouseTracking(True)
         self.index_blocks = []
@@ -8117,6 +8334,15 @@ class View(QtWidgets.QLabel):
         self.locs_paths.append(path)
         self.index_blocks.append(None)
         self.render_index.append(render_index)
+        # a channel whose canvas was translated (e.g., by moving it
+        # beyond the top left edge and saving) is brought into the same
+        # frame as the loaded channels (see lib.fit_canvas)
+        if any(
+            lib.get_from_metadata(inf, key) is not None
+            for inf in self.infos
+            for key in lib.CANVAS_OFFSET_KEYS
+        ):
+            self.fit_canvas()
 
         # try to load a drift .txt file:
         drift = self._load_drift(info[-1])
@@ -8175,6 +8401,9 @@ class View(QtWidgets.QLabel):
         self.window.test_clusterer_dialog.channels.addItem(
             os.path.basename(path)
         )
+        # the Move tool's undo stores channel indices
+        self.window.tools_settings_dialog.add_move_channel()
+        self.clear_move_undo()
 
     def add_multiple(
         self,
@@ -9826,6 +10055,7 @@ class View(QtWidgets.QLabel):
             self.qimage = self.draw_box_pick_ongoing(self.qimage)
         if self._brush_stroke_ongoing:
             self.qimage = self.draw_brush_stroke_ongoing(self.qimage)
+        self.qimage = self.draw_move_shift(self.qimage)
 
         # convert to pixmap
         self.pixmap = QtGui.QPixmap.fromImage(self.qimage)
@@ -9984,6 +10214,10 @@ class View(QtWidgets.QLabel):
         if self.window.slicer_dialog.slicer_radio_button.isChecked():
             return None
         if len(self.locs) == 1 and "group" in self.locs[0].columns:
+            return None
+        if self._move_channels:
+            # the dragged channels' pyramids index the coordinates at
+            # the press, the renderer builds its index on the fly
             return None
         pyramids = []
         for i in range(len(self.locs)):
@@ -10874,6 +11108,8 @@ class View(QtWidgets.QLabel):
         # if drawing a rectangular or box pick
         if self._mode == "Pick":
             self._mouse_move_pick(event)
+        elif self._mode == "Move":
+            self._mouse_move_move(event)
         # live update of the measuring cross and distance
         elif self._mode == "Measure" and self._measure_following:
             self._measure_cursor = self.map_to_movie(event.pos())
@@ -10957,6 +11193,241 @@ class View(QtWidgets.QLabel):
                 self._brush_stroke = [self.map_to_movie(event.pos())]
                 self._brush_last_pos = event.pos()
 
+    def _move_tool_channels(self) -> tuple[int, ...]:
+        """The channels dragged by the Move tool, as selected in the
+        Tools settings: one channel or all of them."""
+        return self.window.tools_settings_dialog.move_channels()
+
+    def _mouse_press_move(self, event: QtCore.QEvent) -> None:
+        """Start dragging the channel(s) selected for the Move tool on
+        left click."""
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        channels = tuple(
+            i for i in self._move_tool_channels() if len(self.locs[i])
+        )
+        if not channels:
+            return
+        self._move_channels = channels
+        self._move_start = self.map_to_movie(event.pos())
+        # the columns are replaced, never modified, while dragging, so
+        # these keep the coordinates at the press; every preview is
+        # computed from them, which avoids accumulating rounding errors
+        self._move_origin = [
+            (self.locs[i]["x"].to_numpy(), self.locs[i]["y"].to_numpy())
+            for i in channels
+        ]
+        self._move_shift = (0.0, 0.0)
+        self._move_cursor = event.pos()
+        for i in channels:
+            self.index_blocks[i] = None
+        self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
+    def _mouse_move_move(self, event: QtCore.QEvent) -> None:
+        """Translate the dragged channel(s) with the cursor and render
+        an interactive preview."""
+        if not self._move_channels:
+            return
+        x, y = self.map_to_movie(event.pos())
+        dx = x - self._move_start[0]
+        dy = y - self._move_start[1]
+        self._move_shift = (dx, dy)
+        self._move_cursor = event.pos()
+        for i, (x0, y0) in zip(self._move_channels, self._move_origin):
+            self._set_channel_xy(i, x0 + np.float32(dx), y0 + np.float32(dy))
+        # a gesture that repeats rapidly: preview now, refine on idle
+        self.update_scene(interactive=True)
+
+    def _mouse_release_move(self, event: QtCore.QEvent) -> None:
+        """Finish dragging: fit the canvas and remember the move for
+        undo."""
+        if not self._move_channels:
+            return
+        channels = self._move_channels
+        dx, dy = self._move_shift
+        self._move_channels = ()
+        self._move_start = None
+        self._move_origin = None
+        self._move_shift = (0.0, 0.0)
+        self._move_cursor = None
+        event.accept()
+        if dx == 0 and dy == 0:
+            self.update_cursor()
+            return
+        for i in channels:
+            self._record_manual_shift(i, dx, dy)
+        self._move_undo.append((channels, dx, dy))
+        self.window.tools_settings_dialog.update_move_undo()
+        self.locs_moved(channels)
+
+    def undo_move(self) -> None:
+        """Undo the last move done with the Move tool.
+
+        The undone channels always fit the canvas as it is refitted
+        afterwards (see ``lib.fit_canvas``).
+        """
+        if not self._move_undo or self._move_channels:
+            return
+        channels, dx, dy = self._move_undo.pop()
+        for i in channels:
+            locs = self.locs[i]
+            self._set_channel_xy(
+                i,
+                locs["x"].to_numpy() - np.float32(dx),
+                locs["y"].to_numpy() - np.float32(dy),
+            )
+            self._record_manual_shift(i, -dx, -dy)
+        self.window.tools_settings_dialog.update_move_undo()
+        self.locs_moved(channels)
+
+    def clear_move_undo(self) -> None:
+        """Forget the moves of the Move tool, e.g., when the channels
+        change and the stored channel indices become invalid."""
+        self._move_undo = []
+        self.window.tools_settings_dialog.update_move_undo()
+
+    def _set_channel_xy(
+        self, channel: int, x: lib.FloatArray1D, y: lib.FloatArray1D
+    ) -> None:
+        """Replace the x and y columns of ``channel``.
+
+        New arrays are assigned rather than written into the existing
+        ones: the GPU backend keys its resident uploads on the array
+        memory, so an in-place change would render the old positions.
+        """
+        locs = self.locs[channel]
+        locs["x"] = x
+        locs["y"] = y
+
+    def _record_manual_shift(self, channel: int, dx: float, dy: float) -> None:
+        """Accumulate the shift of ``channel`` done with the Move tool
+        (camera pixels) in its metadata."""
+        info = self.infos[channel]
+        for key, shift in zip(MANUAL_SHIFT_KEYS, (dx, dy)):
+            info[-1][key] = float(
+                lib.get_from_metadata(info, key, 0.0) + shift
+            )
+
+    def fit_canvas(self) -> list[int]:
+        """Fit the canvas of all channels to their localizations (see
+        ``lib.fit_canvas``). If the channels are translated (the
+        canvas offset changed), picks, measured points and the viewport
+        follow, so the display does not jump.
+
+        Returns
+        -------
+        translated : list of ints
+            Channels whose localizations were translated.
+        """
+        _, _, shifts = lib.fit_canvas(self.locs, self.infos)
+        translated = [i for i, shift in enumerate(shifts) if any(shift)]
+        if translated:
+            # the displayed frame, which picks and points are in, is
+            # that of the first channel
+            dx, dy = shifts[0]
+            if dx or dy:
+                self._translate_overlays(dx, dy)
+                if self.viewport:
+                    self.viewport = render.shift_viewport(
+                        self.viewport, dx, dy
+                    )
+            for i in translated:
+                self.invalidate_locs_index(i)
+        return translated
+
+    def locs_moved(
+        self, channels: int | list[int] | tuple[int, ...], sanitize=False
+    ) -> None:
+        """Update everything that depends on the coordinates after the
+        x and/or y of ``channels`` changed, and redraw.
+
+        The canvas (``Width`` and ``Height``) is fitted to the
+        localizations, so that none is removed when saving (see
+        ``fit_canvas``).
+
+        Parameters
+        ----------
+        channels : int or list/tuple of ints
+            Channel(s) whose coordinates changed.
+        sanitize : bool, optional
+            If True, the invalid localizations of ``channels`` (NaN,
+            negative precision, etc., see ``lib.ensure_sanity``) are
+            removed after fitting the canvas, and all their columns are
+            replaced with copies, e.g., after an expression that may
+            have changed any column in place. Default is False.
+        """
+        if isinstance(channels, (int, np.integer)):
+            channels = [channels]
+        self.fit_canvas()
+        for channel in channels:
+            if sanitize:
+                n_locs = len(self.locs[channel])
+                self.locs[channel] = lib.ensure_sanity(
+                    self.locs[channel], self.infos[channel]
+                )
+                if (
+                    len(self.locs[channel]) != n_locs
+                    and len(self.locs) == 1
+                    and "group" in self.locs[0].columns
+                ):
+                    self.group_color = render.get_group_color(self.locs[0])
+            self.invalidate_locs_index(channel)
+        self.image = None
+        if self.x_render_state:
+            # the per-color copies hold the old coordinates
+            self.activate_render_property()
+        self.update_scene()
+
+    def _translate_overlays(self, dx: float, dy: float) -> None:
+        """Move picks and measured points by ``(dx, dy)`` camera pixels
+        along with the localizations."""
+        self._picks = lib.translate_picks(
+            self._picks, self._pick_shape, dx, dy
+        )
+        self._points = [(x + dx, y + dy) for x, y in self._points]
+        self._point_sets = [
+            [(x + dx, y + dy) for x, y in point_set]
+            for point_set in self._point_sets
+        ]
+
+    def draw_move_shift(self, image: QtGui.QImage) -> QtGui.QImage:
+        """Draw the shift of the channel(s) being dragged with the Move
+        tool next to the cursor.
+
+        Parameters
+        ----------
+        image : QImage
+            Image containing rendered localizations.
+
+        Returns
+        -------
+        image : QImage
+            Image with the drawn label.
+        """
+        if not self._move_channels or self._move_cursor is None:
+            return image
+        dx, dy = self._move_shift
+        pixelsize = self.pixelsize
+        text = (
+            f"Δx = {dx:.2f} px ({dx * pixelsize:.1f} nm)\n"
+            f"Δy = {dy:.2f} px ({dy * pixelsize:.1f} nm)"
+        )
+        color = (
+            QtGui.QColor("yellow")
+            if not self.window.dataset_dialog.wbackground.isChecked()
+            else QtGui.QColor("red")
+        )
+        painter = QtGui.QPainter(image)
+        painter.setPen(color)
+        rect = QtCore.QRect(
+            self._move_cursor.x() + 16, self._move_cursor.y() + 16, 400, 60
+        )
+        painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignLeft, text)
+        painter.end()
+        return image
+
     def mousePressEvent(self, event: QtCore.QEvent) -> None:
         """Start panning, drawing a zoom-in rectangle or drawing a pick
         shape."""
@@ -10989,6 +11460,8 @@ class View(QtWidgets.QLabel):
         # start drawing rectangular or box pick
         elif self._mode == "Pick":
             self._mouse_press_pick(event)
+        elif self._mode == "Move":
+            self._mouse_press_move(event)
 
     def _start_zoom_rectangle(self, event: QtCore.QEvent) -> None:
         """Begin dragging the zoom-in rectangle (rubber band) from the
@@ -11165,6 +11638,8 @@ class View(QtWidgets.QLabel):
             self._mouse_release_pick(event)
         elif self._mode == "Measure":
             self._mouse_release_measure(event)
+        elif self._mode == "Move":
+            self._mouse_release_move(event)
 
     def mouseDoubleClickEvent(self, event: QtCore.QEvent) -> None:
         """Treat the double click as a press, which is what QWidget does
@@ -12334,6 +12809,11 @@ class View(QtWidgets.QLabel):
         pyramid = self._ensure_render_index(channel)
         if pyramid is None:
             return None
+        if channel in self._move_channels:
+            # while dragged with the Move tool, the pyramid indexes the
+            # coordinates at the press, i.e., before the current shift
+            dx, dy = self._move_shift
+            viewport = render.shift_viewport(viewport, -dx, -dy)
         return spatial_index.query_viewport(pyramid, viewport)
 
     def _ensure_render_index(
@@ -13241,14 +13721,14 @@ class View(QtWidgets.QLabel):
     def set_mode(self, action: QtGui.QAction) -> None:
         """Set ``self._mode`` for QMouseEvents.
 
-        Activated when ``Zoom``, ``Pick`` or ``Measure`` is chosen from
-        Tools menu in the main window.
+        Activated when ``Zoom``, ``Pick``, ``Measure`` or ``Move`` is
+        chosen from Tools menu in the main window.
 
         Parameters
         ----------
         action : QtGui.QAction
-            Action defined in Window.__init__: ("Zoom", "Pick" or
-            "Measure")
+            Action defined in Window.__init__: ("Zoom", "Pick",
+            "Measure" or "Move")
         """
         self._mode = action.text()
         self.update_cursor()
@@ -13793,6 +14273,11 @@ class View(QtWidgets.QLabel):
                 self.unsetCursor()
         elif self._mode == "Pick":
             self._update_cursor_pick()
+        elif self._mode == "Move":
+            if not self._move_channels:
+                self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+            else:
+                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
 
     @check_pick
     def update_pick_info_long(self) -> None:
@@ -14301,6 +14786,15 @@ class Window(QtWidgets.QMainWindow):
         )
         measure_tool_action.setShortcut("Ctrl+M")
         tools_menu.addAction(measure_tool_action)
+        move_tool_action = tools_actiongroup.addAction(
+            QtGui.QAction("Move", tools_menu, checkable=True)
+        )
+        move_tool_action.setShortcut("Ctrl+G")
+        move_tool_action.setToolTip(
+            "Drag the localizations of the channel selected in the Tools\n"
+            "settings (Ctrl+T) to change their x and y coordinates."
+        )
+        tools_menu.addAction(move_tool_action)
         tools_actiongroup.triggered.connect(self.view.set_mode)
 
         tools_menu.addSeparator()
@@ -15202,9 +15696,10 @@ class Window(QtWidgets.QMainWindow):
         else:
             vars = self.view.locs[channel].columns.to_list()
             exec(cmd, {k: self.view.locs[channel][k] for k in vars})
-        lib.ensure_sanity(self.view.locs[channel], self.view.infos[channel])
-        self.view.invalidate_locs_index(channel)
-        self.view.update_scene()
+        # localizations moved beyond the canvas grow it instead of
+        # being removed when saving; the columns are replaced with
+        # copies since the expression may have changed them in place
+        self.view.locs_moved(channel, sanitize=True)
 
     def open_file_dialog(self) -> None:
         """Open localizations file(s): Picasso (.hdf5), ThunderSTORM

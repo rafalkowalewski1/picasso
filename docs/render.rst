@@ -16,7 +16,7 @@ Opening Files
 
 Navigating the image
 ~~~~~~~~~~~~~~~~~~~~
-The ``Tools`` menu selects the active tool (Zoom, Pick or Measure; ``Ctrl+Z``, ``Ctrl+P``, ``Ctrl+M``). The following controls move the view; those marked *every tool* also work while picking or measuring, so the tool need not be changed to look around.
+The ``Tools`` menu selects the active tool (Zoom, Pick, Measure or Move; ``Ctrl+Z``, ``Ctrl+P``, ``Ctrl+M``, ``Ctrl+G``). The following controls move the view; those marked *every tool* also work while picking or measuring, so the tool need not be changed to look around.
 
 - **Zoom**: with the Zoom tool, drag a rectangle with the left mouse button to zoom to it. The rectangle stretches towards the bottom right; releasing above or left of the start cancels. ``Shift`` + the left button drags the same rectangle in *every tool*. ``Ctrl`` (``Cmd`` on macOS) + the mouse wheel (or trackpad scroll) and a trackpad pinch zoom about the cursor; ``Ctrl`` +/- zoom about the center (``View`` menu).
 - **Pan**: drag with the right mouse button (Zoom tool), or, in *every tool*, with the middle mouse button, with ``Ctrl`` (``Cmd``) + the left button or with ``Alt`` (``Option`` on macOS) + the left button. The arrow keys (or ``W``/``A``/``S``/``D``) move the view by a fraction of the window.
@@ -513,6 +513,20 @@ While the tool is active, the cursor is shown as a crosshair that follows the mo
 
 Distances and lines are only drawn within a set, never across sets, so multiple independent measurements can be displayed at the same time.
 
+Move (CTRL + G)
+^^^^^^^^^^^^^^^
+Selects the move tool, which changes the x and y coordinates of localizations by dragging them with the left mouse button, e.g., to register channels by eye. The channels that are dragged together are selected in the `Tools settings` (CTRL + T) dialog: *Select...* opens a list of the loaded channels with a checkbox each. By default, the first channel is dragged. *Undo last move* in the `Tools settings` dialog reverses the moves one by one.
+
+Normally, localizations outside the image (x or y at or beyond ``Width`` or ``Height`` in the metadata, or negative) would be removed when saving. Instead, the image (the canvas) is fitted to the localizations after every move:
+
+* Dragging beyond the right or bottom edge increases ``Width`` or ``Height``.
+* Dragging beyond the left or top edge translates all channels, picks and measured points by the same whole number of camera pixels, so that no coordinate is negative and the channels stay registered. ``Width`` and ``Height`` grow by the same amount, so the camera field of view stays inside the canvas. The translation is saved in the metadata as ``Canvas offset x (cam. px)`` and ``Canvas offset y (cam. px)``; subtract it to return to the camera coordinates, e.g., for picks saved before the translation.
+* The canvas shrinks again when the localizations are moved back, but it is never smaller than the camera image, whose size is saved as ``Camera Width`` and ``Camera Height``. For example, dragging a channel beyond the left edge and back to where it was restores the original canvas and coordinates.
+
+A channel loaded later, or saved with a different canvas offset, is brought into the same frame as the loaded channels.
+
+The shift of each channel done with the move tool is saved in its metadata as ``Manual shift x (cam. px)`` and ``Manual shift y (cam. px)``.
+
 Tools settings (CTRL + T)
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 Define the settings of the tools, i.e., the radius of the pick and an option to annotate each pick. The range of pick similar can be set here as well.
@@ -654,6 +668,8 @@ This tool allows you to apply expressions to localizations, for example:
 - ``spiral r n`` will plot each localization over the time of the movie in a spiral with radius r and n number of turns (e.g., to detect repetitive binding), ``uspiral`` to reverse.
 
 **NOTE:** using two variables in one statement is not supported (e.g. ``x = y``) To filter localizations use picasso filter.
+
+Localizations moved outside the image by an expression are kept: the canvas is fitted to them as described for the `Move tool <#move-ctrl-g>`_. Invalid localizations (e.g., NaN or negative localization precision) are removed.
 
 DBSCAN
 ^^^^^^

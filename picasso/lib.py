@@ -908,6 +908,171 @@ def overwrite_metadata(
     return info
 
 
+#: Metadata keys holding the translation of the localizations from the
+#: camera frame applied by ``fit_canvas`` (camera pixels); subtract it to
+#: return to the camera coordinates
+CANVAS_OFFSET_KEYS = ("Canvas offset x (cam. px)", "Canvas offset y (cam. px)")
+#: Metadata keys holding the size of the camera image (camera pixels),
+#: stored by ``fit_canvas`` once ``Width`` or ``Height`` differ from it
+CAMERA_SIZE_KEYS = ("Camera Width", "Camera Height")
+
+
+def fit_canvas(
+    locs_list: list[pd.DataFrame], infos_list: list[list[dict]]
+) -> tuple[list[pd.DataFrame], list[list[dict]], list[tuple[int, int]]]:
+    """Fit the canvas (``Width`` and ``Height`` in the metadata) of one
+    or more channels to their localizations, so that none is removed by
+    ``ensure_sanity``, e.g., when saving.
+
+    The canvas is recomputed from the camera frame, i.e., from the
+    coordinates minus the current offset (``CANVAS_OFFSET_KEYS``, 0 if
+    missing):
+
+    - The offset becomes the smallest whole number of camera pixels
+      that makes every coordinate of every channel non-negative (0 if
+      none is negative). It is the same for all channels, so their
+      relative position is preserved.
+    - ``Width`` and ``Height`` become the camera size
+      (``CAMERA_SIZE_KEYS``, or the current ``Width`` and ``Height`` if
+      missing) or the extent of the localizations, whichever is
+      larger, plus the offset.
+
+    The canvas thus grows and shrinks with the localizations, but it
+    never becomes smaller than the camera image, which stays at the
+    offset. For example, moving a channel beyond the left edge and
+    back restores the original canvas.
+
+    The localizations and metadata are modified in place (translated
+    columns are replaced with new arrays rather than modified in
+    memory, so caches keyed on the array memory, e.g., the GPU
+    uploads, see the change). The offset and the camera size are
+    stored in the last metadata dictionary of each channel once they
+    differ from the defaults.
+
+    Parameters
+    ----------
+    locs_list : list of pd.DataFrames
+        Localizations of each channel.
+    infos_list : list of lists of dicts
+        Metadata of each channel.
+
+    Returns
+    -------
+    locs_list : list of pd.DataFrames
+        The input localizations, translated if needed.
+    infos_list : list of lists of dicts
+        The input metadata with the updated canvas.
+    shifts : list of tuples of ints
+        Translation ``(dx, dy)`` applied to each channel in this call
+        (camera pixels), e.g., to move picks along with the
+        localizations. Channels that shared an offset share the shift.
+
+    Raises
+    ------
+    KeyError
+        If ``Width`` or ``Height`` is missing from the metadata.
+    """
+
+    def finite(locs, column):
+        # NaN and inf are removed by ensure_sanity, not translated
+        values = locs[column].to_numpy()
+        return values[np.isfinite(values)]
+
+    extents = [(finite(locs, "x"), finite(locs, "y")) for locs in locs_list]
+    offsets = [
+        [get_from_metadata(info, key, 0) for key in CANVAS_OFFSET_KEYS]
+        for info in infos_list
+    ]
+
+    # the new offset, from the minimum in the camera frame
+    new_offset = []
+    for axis in range(2):
+        camera_min = [
+            ext[axis].min() - offset[axis]
+            for ext, offset in zip(extents, offsets)
+            if len(ext[axis])
+        ]
+        lowest = min(camera_min, default=0)
+        new_offset.append(int(np.ceil(-lowest)) if lowest < 0 else 0)
+
+    shifts = []
+    for locs, ext, info, offset in zip(
+        locs_list, extents, infos_list, offsets
+    ):
+        shift = tuple(int(new - old) for new, old in zip(new_offset, offset))
+        for column, delta in zip(("x", "y"), shift):
+            if delta:
+                locs[column] = locs[column].to_numpy() + np.float32(delta)
+        shifts.append(shift)
+
+        for axis, (size_key, camera_key) in enumerate(
+            zip(("Width", "Height"), CAMERA_SIZE_KEYS)
+        ):
+            stored = get_from_metadata(info, camera_key)
+            camera = stored
+            if camera is None:
+                camera = get_from_metadata(info, size_key, raise_error=True)
+            value = camera + new_offset[axis]
+            if len(ext[axis]):
+                # strictly x < Width is kept by ensure_sanity, hence + 1
+                top = ext[axis].max() + np.float32(shift[axis])
+                value = max(value, int(np.floor(top)) + 1)
+            # the canvas size is read from the first and from the last
+            # dictionary in different places, so every occurrence is set
+            for inf in info:
+                if size_key in inf:
+                    inf[size_key] = int(value)
+            if value != camera or stored is not None:
+                info[-1][camera_key] = int(camera)
+            offset_key = CANVAS_OFFSET_KEYS[axis]
+            if new_offset[axis] or get_from_metadata(info, offset_key):
+                info[-1][offset_key] = new_offset[axis]
+    return locs_list, infos_list, shifts
+
+
+def translate_picks(
+    picks: list, shape: str | None, dx: float, dy: float
+) -> list:
+    """Translate picks by ``(dx, dy)`` camera pixels, e.g., to follow
+    localizations moved by ``fit_canvas``.
+
+    Parameters
+    ----------
+    picks : list
+        Picks in the format of the Render window (see
+        ``gui.render.View._picks``).
+    shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
+            "Brush"} or None
+        Shape of the picks. None is allowed only with no picks.
+    dx, dy : float
+        Translation in camera pixels.
+
+    Returns
+    -------
+    translated : list
+        New list of translated picks; sizes (e.g., brush widths) are
+        kept.
+    """
+
+    def point(p):
+        return (p[0] + dx, p[1] + dy)
+
+    if not len(picks):
+        return []
+    if shape in ("Circle", "Square"):
+        return [point(p) for p in picks]
+    if shape in ("Rectangle", "Box"):
+        return [(point(a), point(b)) for a, b in picks]
+    if shape == "Polygon":
+        return [[point(v) for v in pick] for pick in picks]
+    if shape == "Brush":
+        return [
+            [(width, [point(p) for p in path]) for width, path in pick]
+            for pick in picks
+        ]
+    raise ValueError(f"Unrecognized pick shape: {shape}")
+
+
 def get_colors(n_channels):
     """Create a list with rgb channels for each channel.
 

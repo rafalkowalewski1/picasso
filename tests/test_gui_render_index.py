@@ -67,6 +67,7 @@ class _ViewStub:
         self.infos = [_info()]
         self.index_blocks = [None]
         self.render_index = [None]
+        self._move_channels = ()  # no channel dragged by the Move tool
 
 
 def _brute_force(locs: pd.DataFrame, viewport) -> pd.DataFrame:
@@ -234,10 +235,13 @@ def test_locs_mutation_invalidates_the_index(cls_name, fn_name, node):
     if (cls_name, fn_name) in _EXEMPT:
         pytest.skip("exempt by construction")
     source = ast.unparse(node)
+    # View.locs_moved invalidates the indices (and is checked here too)
     assert (
-        "invalidate_locs_index" in source or "resample_locs=True" in source
+        "invalidate_locs_index" in source
+        or "resample_locs=True" in source
+        or "locs_moved(" in source
     ), (
         f"{cls_name}.{fn_name} mutates the localizations without dropping "
-        "the cached spatial indices: call invalidate_locs_index(channel) "
-        "or update_scene(resample_locs=True)"
+        "the cached spatial indices: call invalidate_locs_index(channel), "
+        "update_scene(resample_locs=True) or locs_moved(channel)"
     )

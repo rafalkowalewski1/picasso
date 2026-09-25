@@ -1,8 +1,14 @@
 # Changelog
 
-Last change: 24-SEP-2026 CEST
+Last change: 25-SEP-2026 CEST
 
-## 0.12.0
+## 0.12.0/1.0.0
+
+### Render
+- New blur method **Adaptive Histogram (Quad-Tree)** in Render (Baddeley, Cannell & Soeller, *Microsc. Microanal.* 2010): a histogram whose bins split while they hold more than a leaf capacity (new setting in the display settings, default 10), so every bin has about the same signal-to-noise ratio whatever the local density (on average the square root of half the capacity, shown in the dialog) and the bin size shows the local sampling. It renders from each channel's spatial index on the CPU: a 5-million-localization overview in about 60 ms and any zoom level in a few milliseconds. In the 3D rotation window the tree is rebuilt from the projected localizations for every orientation. `blur_method="quadtree"`, `quadtree_capacity` and `render_index` in `picasso.render.render`/`render_scene`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
+- New blur method **Jittered Triangulation** in Render (Baddeley, Cannell & Soeller 2010): Delaunay triangles drawn with an intensity inverse to their area, averaged over triangulations of the localizations jittered by their mean neighbor distance, so the blur follows the local sampling and dense regions keep their resolution. Settings for the passes (25), the jitter factor (1) and a limit on the localizations in view (100,000; above it the histogram is shown with a note): it costs about 0.3 s per pass per 200,000 localizations, so it is meant for zoomed-in views; previews show the plain triangulation. Works in the 3D window and in animations. `blur_method="triangulation"`, `triangulation_passes`, `triangulation_jitter` in `picasso.render.render`/`render_scene`; `picasso.render.triangulation` holds the method. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
+- New action to move xy positions of localizations with a mouse. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#move-ctrl-g).
+- Apply expression to localizations expands the canvas (metadata's `Height` and `Width`) if x and y positions are out of range.
 
 ### Others
 - Removed support for Python 3.10 (Python 3.11–3.14 are supported).
@@ -15,8 +21,7 @@ Last change: 24-SEP-2026 CEST
 - **GPU rendering in Render**: localizations are rendered on the graphics card (Metal, Direct3D 12 or Vulkan via `wgpu`, any vendor, no CUDA needed) — uploaded once, then every view is computed on the GPU, several times faster than the CPU threads. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#gpu-rendering).
 - `View > Show info` shows the active renderer ("GPU (Apple M4 via Metal)" or "CPU (5 workers)") with a help button that opens the GPU documentation, which lists the requirements and what to check when it says CPU.
 - New user setting `max_blur_width` (`Render` section, default 100 nm): localizations with a precision worse than this are not rendered by the individual-precision blur methods (they would only add a faint wide haze while costing most of the render time). `0` or `off` disables the limit.
-- New blur method **Adaptive Histogram (Quad-Tree)** in Render (Baddeley, Cannell & Soeller, *Microsc. Microanal.* 2010): a histogram whose bins split while they hold more than a leaf capacity (new setting in the display settings, default 10), so every bin has about the same signal-to-noise ratio whatever the local density (on average the square root of half the capacity, shown in the dialog) and the bin size shows the local sampling. It renders from each channel's spatial index on the CPU: a 5-million-localization overview in about 60 ms and any zoom level in a few milliseconds. In the 3D rotation window the tree is rebuilt from the projected localizations for every orientation. `blur_method="quadtree"`, `quadtree_capacity` and `render_index` in `picasso.render.render`/`render_scene`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
-- New blur method **Jittered Triangulation** in Render (Baddeley, Cannell & Soeller 2010): Delaunay triangles drawn with an intensity inverse to their area, averaged over triangulations of the localizations jittered by their mean neighbor distance, so the blur follows the local sampling and dense regions keep their resolution. Settings for the passes (25), the jitter factor (1) and a limit on the localizations in view (100,000; above it the histogram is shown with a note): it costs about 0.3 s per pass per 200,000 localizations, so it is meant for zoomed-in views; previews show the plain triangulation. Works in the 3D window and in animations. `blur_method="triangulation"`, `triangulation_passes`, `triangulation_jitter` in `picasso.render.render`/`render_scene`; `picasso.render.triangulation` holds the method. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
+
 - The spatial index stored in localization files (`/render_index`) is version 2: sorted by a finer Morton key so the quad-tree can descend to about 1 nm; files with a version 1 index are re-indexed once when opened.
 
 ### Navigation
@@ -58,7 +63,7 @@ Last change: 24-SEP-2026 CEST
 - New tests: golden images for every blur method on both backends, GPU parity and repeatability, async GUI rendering, 3D view, animation export, navigation, picks through the pyramid, stored index, dtype standardization, user settings safety.
 
 ### Removed
-- *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements, displaying a random fraction of the localizations no longer serves a purpose.
+- *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.
 
 ### Fixes
 - The `scipy.ndimage.filters` deprecation warning is gone.

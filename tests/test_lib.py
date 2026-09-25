@@ -75,6 +75,168 @@ class TestOverwriteMetadata:
             lib.overwrite_metadata({"Width": 32}, "Missing", 1)
 
 
+def _canvas_locs(x, y):
+    n = len(x)
+    return pd.DataFrame(
+        {
+            "frame": np.zeros(n, dtype=np.uint32),
+            "x": np.asarray(x, dtype=np.float32),
+            "y": np.asarray(y, dtype=np.float32),
+            "lpx": np.full(n, 0.1, dtype=np.float32),
+            "lpy": np.full(n, 0.1, dtype=np.float32),
+        }
+    )
+
+
+def _canvas_info(width=32, height=32):
+    return [
+        {"Width": width, "Height": height, "Frames": 1},
+        {"Pixelsize": 130},
+    ]
+
+
+class TestFitCanvas:
+    def test_in_bounds_is_unchanged(self):
+        locs = _canvas_locs([1.0, 30.5], [2.0, 31.9])
+        info = _canvas_info()
+        _, _, shifts = lib.fit_canvas([locs], [info])
+        assert shifts == [(0, 0)]
+        assert locs["x"].tolist() == pytest.approx([1.0, 30.5])
+        assert info[0]["Width"] == 32 and info[0]["Height"] == 32
+        # no new keys while the canvas is the camera image
+        for key in lib.CANVAS_OFFSET_KEYS + lib.CAMERA_SIZE_KEYS:
+            assert key not in info[-1]
+
+    def test_negative_translates_all_channels(self):
+        moved = _canvas_locs([-2.5, 10.0], [5.0, -0.2])
+        other = _canvas_locs([0.0, 31.0], [0.0, 31.0])
+        infos = [_canvas_info(), _canvas_info()]
+        _, _, shifts = lib.fit_canvas([moved, other], infos)
+        assert shifts == [(3, 1), (3, 1)]  # whole camera pixels
+        assert moved["x"].min() >= 0 and moved["y"].min() >= 0
+        # the relative position of channels is kept
+        assert other["x"].tolist() == pytest.approx([3.0, 34.0])
+        assert other["y"].tolist() == pytest.approx([1.0, 32.0])
+        for info in infos:
+            assert info[-1][lib.CANVAS_OFFSET_KEYS[0]] == 3
+            assert info[-1][lib.CANVAS_OFFSET_KEYS[1]] == 1
+            assert info[-1][lib.CAMERA_SIZE_KEYS[0]] == 32
+            # grown by the offset, so the camera FOV stays inside
+            assert info[0]["Width"] == 35 and info[0]["Height"] == 33
+
+    def test_canvas_follows_the_bottom_right(self):
+        locs = _canvas_locs([40.0], [32.0])  # x == Width is invalid
+        info = _canvas_info()
+        lib.fit_canvas([locs], [info])
+        assert info[0]["Width"] == 41 and info[0]["Height"] == 33
+        # shrinks back, but not below the camera image
+        locs["x"] = np.float32([1.0])
+        locs["y"] = np.float32([1.0])
+        lib.fit_canvas([locs], [info])
+        assert info[0]["Width"] == 32 and info[0]["Height"] == 32
+
+    def test_moving_back_restores_the_canvas(self):
+        moved = _canvas_locs([0.5, 31.5], [1.0, 1.0])
+        other = _canvas_locs([0.5, 31.5], [1.0, 1.0])
+        infos = [_canvas_info(), _canvas_info()]
+        moved["x"] = moved["x"].to_numpy() - np.float32(10)
+        _, _, shifts = lib.fit_canvas([moved, other], infos)
+        assert shifts[0] == (10, 0)
+        assert infos[0][0]["Width"] == 42
+        moved["x"] = moved["x"].to_numpy() + np.float32(10)
+        _, _, shifts = lib.fit_canvas([moved, other], infos)
+        assert shifts[0] == (-10, 0)
+        assert moved["x"].tolist() == pytest.approx([0.5, 31.5])
+        assert other["x"].tolist() == pytest.approx([0.5, 31.5])
+        for info in infos:
+            assert info[0]["Width"] == 32
+            assert info[-1][lib.CANVAS_OFFSET_KEYS[0]] == 0
+
+    def test_offset_follows_the_camera_frame(self):
+        locs = _canvas_locs([-1.5], [1.0])
+        info = _canvas_info()
+        lib.fit_canvas([locs], [info])
+        assert info[-1][lib.CANVAS_OFFSET_KEYS[0]] == 2
+        locs["x"] = locs["x"].to_numpy() - np.float32(4.0)
+        lib.fit_canvas([locs], [info])
+        assert info[-1][lib.CANVAS_OFFSET_KEYS[0]] == 2 + 4
+        assert info[0]["Width"] == 32 + 6
+
+    def test_channels_with_different_offsets_are_aligned(self):
+        # e.g., a file saved after a translation, opened with a raw one
+        saved = _canvas_locs([0.0, 5.0], [1.0, 1.0])
+        saved_info = _canvas_info(width=37)
+        saved_info[-1][lib.CANVAS_OFFSET_KEYS[0]] = 5
+        saved_info[-1][lib.CAMERA_SIZE_KEYS[0]] = 32
+        raw = _canvas_locs([2.0], [1.0])
+        infos = [saved_info, _canvas_info()]
+        _, _, shifts = lib.fit_canvas([saved, raw], infos)
+        assert shifts == [(0, 0), (5, 0)]
+        assert raw["x"].tolist() == pytest.approx([7.0])
+        for info in infos:
+            assert info[-1][lib.CANVAS_OFFSET_KEYS[0]] == 5
+            assert info[0]["Width"] == 37
+
+    def test_replaces_column_arrays(self):
+        # the GPU backend keys its uploads on the array memory
+        locs = _canvas_locs([-1.0], [1.0])
+        before = locs["x"].to_numpy()
+        lib.fit_canvas([locs], [_canvas_info()])
+        assert not np.shares_memory(before, locs["x"].to_numpy())
+        assert before[0] == -1.0
+
+    def test_ignores_non_finite(self):
+        locs = _canvas_locs([np.nan, -np.inf, 3.0], [1.0, 1.0, 1.0])
+        _, _, shifts = lib.fit_canvas([locs], [_canvas_info()])
+        assert shifts == [(0, 0)]
+
+    def test_save_keeps_every_loc(self, tmp_path):
+        from picasso import io
+
+        locs = _canvas_locs([-3.2, 12.0, 40.7], [-0.5, 33.0, 4.0])
+        info = _canvas_info()
+        lib.fit_canvas([locs], [info])
+        path = str(tmp_path / "locs.hdf5")
+        io.save_locs(path, locs, info)
+        loaded, _ = io.load_locs(path)
+        assert len(loaded) == 3
+
+
+class TestTranslatePicks:
+    @pytest.mark.parametrize(
+        "shape, picks, expected",
+        [
+            ("Circle", [(1.0, 2.0)], [(2.0, 4.0)]),
+            ("Square", [(1.0, 2.0)], [(2.0, 4.0)]),
+            (
+                "Rectangle",
+                [((0.0, 0.0), (3.0, 1.0))],
+                [((1.0, 2.0), (4.0, 3.0))],
+            ),
+            ("Box", [((0.0, 0.0), (3.0, 1.0))], [((1.0, 2.0), (4.0, 3.0))]),
+            (
+                "Polygon",
+                [[(0.0, 0.0), (1.0, 0.0), (0.0, 0.0)]],
+                [[(1.0, 2.0), (2.0, 2.0), (1.0, 2.0)]],
+            ),
+            (
+                "Brush",
+                [[(0.5, [(0.0, 0.0), (1.0, 1.0)])]],
+                [[(0.5, [(1.0, 2.0), (2.0, 3.0)])]],
+            ),
+        ],
+    )
+    def test_shapes(self, shape, picks, expected):
+        assert lib.translate_picks(picks, shape, 1.0, 2.0) == expected
+
+    def test_no_picks(self):
+        assert lib.translate_picks([], None, 1.0, 2.0) == []
+
+    def test_unknown_shape_raises(self):
+        with pytest.raises(ValueError):
+            lib.translate_picks([(0.0, 0.0)], "Hexagon", 1.0, 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Color / path utilities
 # ---------------------------------------------------------------------------
