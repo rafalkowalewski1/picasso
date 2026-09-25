@@ -2,7 +2,7 @@
 
 Last change: 25-SEP-2026 CEST
 
-## 0.12.0/1.0.0
+## 0.12.0
 
 **TODO**: Describe the general overview - fast render, etc.
 
@@ -22,6 +22,12 @@ Last change: 25-SEP-2026 CEST
 
 ### **Backward incompatible changes:**
 - *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.
+- The API deprecated in v0.11 is removed:
+    - `picasso.localize.fit2D` is removed, use `picasso.localize.fit` (without the `movie_info` and `mle_method` arguments, which had no effect).
+    - `picasso.localize.localize_3D` is removed, use `picasso.localize.localize` with its `calibration_3d` argument.
+    - `picasso.localize.localize` accepts only the movie positionally; `camera_info` and `identification_parameters` are keyword-only. Its `parameters` (renamed to `identification_parameters`) and `mle_method` arguments are removed.
+    - The `return_info` argument is removed from `picasso.localize.identify`, `picasso.localize.localize`, `picasso.clusterer.cluster`, `picasso.clusterer.dbscan` and `picasso.clusterer.hdbscan`; they always return `(locs, info)`.
+    - `picasso.render.build_animation` no longer accepts positions given as Euler angles `(angle_x, angle_y, angle_z, viewport)`; pass `(rotation, viewport)` with a `scipy.spatial.transform.Rotation` (`picasso.render.rotation_matrix` converts the old angles).
 
 ### Others
 - Code readability clean ups (flake8).
@@ -38,7 +44,7 @@ Last change: 25-SEP-2026 CEST
 - New user setting `max_blur_width` (`Render` section, default 100 nm): localizations with a precision worse than this are not rendered by the individual-precision blur methods (they would only add a faint wide haze while costing most of the render time). `0` or `off` disables the limit.
 - **Rendering runs on a background thread** in the main window: panning and zooming never block the interface, a burst of mouse events renders only the newest view, and the last image is shifted or scaled on screen immediately while the new one renders, so dragging feels continuous. Renders cover a 15% margin around the window so small pans need no new render at all; exports still render the exact view.
 - While panning and zooming, large datasets are previewed with a subset of the localizations (new user setting `interaction_subsample`, `Render` section: `auto` = at least 500,000 or 10% of the localizations in view, or a fixed number) with the contrast compensated, and sharpened as soon as the mouse pauses.
-- Loading localization files no longer needs the *Indexing* step before circular picking (see *Picks*), and the spatial index used for zoomed views is now stored in the files (see *Files*).
+- Loading localization files no longer needs the *indexing localizations...* step before circular picking, and the spatial index used for zoomed views is now stored in the files.
 - The rotation window renders in the background like the main window: rotating and panning never block the GUI, a burst of mouse moves renders only the newest orientation, large picks are previewed with a subset of localizations while dragging (sized by the localizations in view, not by the loaded total) and sharpened as soon as the drag pauses, and the renders use the GPU when it is enabled.
 - 3D animations are built in the background at a resolution of your choice (`Resolution (px)` in the animation dialog, independent of the window's size, e.g. 1920 x 1080), with a cancel button; failures are reported instead of silently producing nothing; the frames use the GPU when it is enabled.
 - Localizations are standardized to float32 floating-point columns and a uint32 `frame` on loading, saving and in the processing functions (`picasso.lib.standardize_dtypes`, via `ensure_sanity`), the dtypes Localize writes. Pipelines that had promoted columns to float64 (undrifting, z fitting, imports) now produce files and DataFrames half the size, and the GPU renderer no longer converts such columns on every render.

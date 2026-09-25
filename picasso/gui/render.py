@@ -9146,7 +9146,6 @@ class View(QtWidgets.QLabel):
             min_samples,
             pixelsize=pixelsize,
             cluster_eps=cluster_eps,
-            return_info=True,
         )
         io.save_locs(path, locs, self.infos[channel] + [hdbscan_info])
         status.close()
@@ -9273,7 +9272,6 @@ class View(QtWidgets.QLabel):
             frame_analysis,
             radius_z=radius_z,
             pixelsize=pixelsize,
-            return_info=True,
             progress=progress,
         )
         progress.close()

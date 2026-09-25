@@ -546,7 +546,7 @@ def real_identifications(movie):
     """Identifications from the bundled .raw — shared across test files."""
     from picasso import localize
 
-    return localize.identify(movie, MIN_NG, BOX, return_info=False)
+    return localize.identify(movie, MIN_NG, BOX)[0]
 
 
 @pytest.fixture(scope="session")
@@ -561,8 +561,8 @@ def real_spots(movie, real_identifications):
 # AbstractPicassoMovie wrapper
 # ---------------------------------------------------------------------------
 #
-# ``localize.fit2D`` / ``localize.localize`` / ``localize.localize_3D`` all
-# assert ``isinstance(movie, io.AbstractPicassoMovie)``, but ``io.load_movie``
+# ``localize.fit`` / ``localize.localize`` assert
+# ``isinstance(movie, io.AbstractPicassoMovie)``, but ``io.load_movie``
 # returns a plain ``np.memmap`` for ``.raw`` files. To exercise these paths
 # without bundling an OME-TIFF, we wrap the memmap in a thin subclass that
 # delegates everything to the underlying ndarray.
@@ -625,9 +625,9 @@ class _MemmapPicassoMovie(io.AbstractPicassoMovie):
 def picasso_movie(movie, movie_info):
     """``AbstractPicassoMovie`` wrapper around the bundled .raw movie.
 
-    Use this for ``localize.fit2D`` / ``localize.localize`` /
-    ``localize.localize_3D`` tests — those functions assert their movie
-    argument ``isinstance`` of ``AbstractPicassoMovie``."""
+    Use this for ``localize.fit`` / ``localize.localize`` tests — those
+    functions assert their movie argument ``isinstance`` of
+    ``AbstractPicassoMovie``."""
     return _MemmapPicassoMovie(movie, movie_info)
 
 

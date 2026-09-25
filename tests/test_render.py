@@ -2081,16 +2081,12 @@ class TestAnimationSequence:
         assert np.allclose(viewports[1], ((4.0, 4.0), (28.0, 28.0)))
         assert np.allclose(viewports[-1], vp2)
 
-    def test_normalize_legacy_positions(self):
-        """Legacy Euler positions are converted with a deprecation
-        warning and match rotation_matrix."""
+    def test_normalize_legacy_positions_raise(self):
+        """Legacy Euler positions were removed in v0.12.0; the error
+        names the replacement."""
         legacy = [(0.1, 0.2, 0.3, FULL_VIEWPORT)]
-        with pytest.warns(DeprecationWarning):
-            normalized = render._normalize_animation_positions(legacy)
-        R, vp = normalized[0]
-        expected = render.rotation_matrix(0.1, 0.2, 0.3)
-        assert (R * expected.inv()).magnitude() == pytest.approx(0.0, abs=1e-9)
-        assert vp == FULL_VIEWPORT
+        with pytest.raises(ValueError, match="rotation_matrix"):
+            render._normalize_animation_positions(legacy)
 
     def test_normalize_invalid_position_raises(self):
         with pytest.raises(ValueError):
@@ -2098,31 +2094,6 @@ class TestAnimationSequence:
 
 
 class TestBuildAnimation:
-    def test_smoke_two_frames_legacy_euler(self, locs_3d, info, tmp_path):
-        """A 2-frame animation from legacy Euler positions writes both
-        an .mp4 and the sidecar .yaml (deprecated input format)."""
-        out_path = tmp_path / "anim.mp4"
-        positions = [
-            (0.0, 0.0, 0.0, FULL_VIEWPORT),
-            (0.1, 0.0, 0.0, FULL_VIEWPORT),
-        ]
-        with pytest.warns(DeprecationWarning):
-            render.build_animation(
-                str(out_path),
-                locs_3d,
-                info,
-                positions=positions,
-                durations=[1.0],
-                disp_px_size=PIXELSIZE,
-                image_size=(64, 64),
-                fps=2,
-            )
-        assert out_path.exists()
-        assert out_path.stat().st_size > 0
-        yaml_path = out_path.with_suffix(".yaml")
-        assert yaml_path.exists()
-        assert yaml_path.stat().st_size > 0
-
     def test_smoke_quaternions_with_turns(self, locs_3d, info, tmp_path):
         """An animation from scipy Rotations with a multi-turn segment
         writes both an .mp4 and the sidecar .yaml."""

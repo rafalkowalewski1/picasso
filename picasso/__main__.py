@@ -1232,7 +1232,6 @@ def _localize_process_file(
         threaded=True,
         identification_progress_callback="console",
         fit_progress_callback="console",
-        return_info=True,
     )
 
     _localize_finish(

@@ -562,8 +562,11 @@ class TestIdentify:
     def test_roi_is_strict_subset(self, movie, real_identifications):
         """ROI restricts identifications to that pixel window only."""
         roi = ((0, 0), (16, 16))  # ((y_start, x_start), (y_end, x_end))
-        ids_roi = localize.identify(
-            movie, MIN_NG, BOX, roi=roi, return_info=False
+        ids_roi, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            roi=roi,
         )
         if len(ids_roi):
             assert (ids_roi["x"] < 16).all()
@@ -574,11 +577,17 @@ class TestIdentify:
     def test_threaded_matches_serial_on_record_set(self, movie):
         """The (frame, y, x) sets identified threaded vs. serial must
         match exactly (order-independent)."""
-        ids_t = localize.identify(
-            movie, MIN_NG, BOX, threaded=True, return_info=False
+        ids_t, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            threaded=True,
         )
-        ids_s = localize.identify(
-            movie, MIN_NG, BOX, threaded=False, return_info=False
+        ids_s, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            threaded=False,
         )
         # Compare as set of (frame, y, x) tuples — same spots, possibly
         # different row order
@@ -589,8 +598,11 @@ class TestIdentify:
     def test_frame_bounds_excludes_outside(self, movie):
         """Setting ``frame_bounds`` confines identifications to that
         range of frame indices."""
-        ids = localize.identify(
-            movie, MIN_NG, BOX, frame_bounds=(20, 50), return_info=False
+        ids, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            frame_bounds=(20, 50),
         )
         if len(ids):
             assert (ids["frame"] >= 20).all()
@@ -600,8 +612,11 @@ class TestIdentify:
         """A list of ``(min, max)`` segments confines identifications to
         the union of those (disjoint) frame ranges."""
         segments = [(10, 20), (40, 50)]
-        ids = localize.identify(
-            movie, MIN_NG, BOX, frame_bounds=segments, return_info=False
+        ids, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            frame_bounds=segments,
         )
         if len(ids):
             in_any = ((ids["frame"] >= 10) & (ids["frame"] <= 20)) | (
@@ -614,19 +629,28 @@ class TestIdentify:
     def test_frame_bounds_single_segment_matches_flat_tuple(self, movie):
         """A single-segment list behaves identically to the flat
         ``(min, max)`` tuple form."""
-        flat = localize.identify(
-            movie, MIN_NG, BOX, frame_bounds=(20, 50), return_info=False
+        flat, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            frame_bounds=(20, 50),
         )
-        listed = localize.identify(
-            movie, MIN_NG, BOX, frame_bounds=[(20, 50)], return_info=False
+        listed, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            frame_bounds=[(20, 50)],
         )
         flat_set = set(zip(flat["frame"], flat["y"], flat["x"]))
         listed_set = set(zip(listed["frame"], listed["y"], listed["x"]))
         assert flat_set == listed_set
 
-    def test_return_info_returns_metadata_dict(self, movie):
+    def test_returns_metadata_dict(self, movie):
         ids, info = localize.identify(
-            movie, MIN_NG, BOX, return_info=True, threaded=False
+            movie,
+            MIN_NG,
+            BOX,
+            threaded=False,
         )
         assert isinstance(info, dict)
         for key in [
@@ -656,8 +680,11 @@ class TestIdentifyAsync:
             assert time.time() - t0 < 30, "identify_async timed out"
             time.sleep(0.05)
         ids_async = localize.identifications_from_futures(fs)
-        ids_serial = localize.identify(
-            movie, MIN_NG, BOX, threaded=False, return_info=False
+        ids_serial, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            threaded=False,
         )
         set_a = set(zip(ids_async["frame"], ids_async["y"], ids_async["x"]))
         set_s = set(zip(ids_serial["frame"], ids_serial["y"], ids_serial["x"]))
@@ -1033,10 +1060,10 @@ class TestIdentificationsFromFutures:
 
 
 # ---------------------------------------------------------------------------
-# fit2D — high-level wrapper that supports gausslq / gaussmle / avg
+# fit — high-level wrapper that supports gausslq / gaussmle / avg
 # ---------------------------------------------------------------------------
 #
-# ``fit2D`` and ``localize`` both assert ``isinstance(movie,
+# ``fit`` and ``localize`` both assert ``isinstance(movie,
 # AbstractPicassoMovie)``. The bundled .raw movie loads as a plain
 # ``np.memmap`` so we feed in the ``picasso_movie`` fixture from conftest
 # (a thin AbstractPicassoMovie wrapper around the same memmap).
@@ -1048,12 +1075,11 @@ class TestFit2D:
     def test_gausslq_returns_locs_and_metadata(
         self, picasso_movie, real_identifications, movie_info
     ):
-        locs, new_info = localize.fit2D(
+        locs, new_info = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="gausslq",
             multiprocess=False,
         )
@@ -1074,12 +1100,11 @@ class TestFit2D:
         least-squares counterpart of the MLE fits' ``log_likelihood``. Both
         the serial and the multiprocessing path must carry it, since the
         multiprocessing path ferries it as an extra ``theta`` column."""
-        locs, _ = localize.fit2D(
+        locs, _ = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="gausslq",
             multiprocess=multiprocess,
         )
@@ -1100,12 +1125,11 @@ class TestFit2D:
         """Every CPU least-squares model variant carries the column, and the
         rotated one still recovers its ``angle`` (whose detection keys off the
         parameter count, so the extra column must be split off first)."""
-        locs, _ = localize.fit2D(
+        locs, _ = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method=method,
             multiprocess=False,
         )
@@ -1116,12 +1140,11 @@ class TestFit2D:
     def test_gaussmle_returns_locs(
         self, picasso_movie, real_identifications, movie_info
     ):
-        locs, new_info = localize.fit2D(
+        locs, new_info = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="gaussmle",
             multiprocess=False,
         )
@@ -1142,12 +1165,11 @@ class TestFit2D:
     ):
         """The spherical CPU methods (LQ and MLE) fit sx == sy and omit the
         always-zero ellipticity column, while keeping every other column."""
-        locs, new_info = localize.fit2D(
+        locs, new_info = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method=method,
             multiprocess=False,
         )
@@ -1163,12 +1185,11 @@ class TestFit2D:
     ):
         """The rotated CPU LQ method keeps ellipticity (widths differ) and
         adds an ``angle`` column wrapped to [-90, 90)."""
-        locs, new_info = localize.fit2D(
+        locs, new_info = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="gausslq-rotated",
             multiprocess=False,
         )
@@ -1182,12 +1203,11 @@ class TestFit2D:
     ):
         """The ``avg`` method takes per-pixel averages — produces a locs
         DataFrame even though it doesn't fit a Gaussian."""
-        locs, new_info = localize.fit2D(
+        locs, new_info = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="avg",
             multiprocess=False,
         )
@@ -1198,12 +1218,11 @@ class TestFit2D:
         self, picasso_movie, real_identifications, movie_info
     ):
         with pytest.raises(AssertionError):
-            localize.fit2D(
+            localize.fit(
                 picasso_movie,
-                movie_info,
-                CAMERA_INFO_WITH_PIXELSIZE,
-                real_identifications,
-                BOX,
+                camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+                identifications=real_identifications,
+                box=BOX,
                 fitting_method="bogus",
                 multiprocess=False,
             )
@@ -1212,12 +1231,11 @@ class TestFit2D:
         self, picasso_movie, real_identifications, movie_info
     ):
         with pytest.raises(AssertionError):
-            localize.fit2D(
+            localize.fit(
                 picasso_movie,
-                movie_info,
-                CAMERA_INFO_WITH_PIXELSIZE,
-                real_identifications,
-                BOX,
+                camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+                identifications=real_identifications,
+                box=BOX,
                 fitting_method="gaussmle",
                 eps=-1.0,
                 multiprocess=False,
@@ -1226,16 +1244,15 @@ class TestFit2D:
     def test_missing_pixelsize_warns_and_defaults(
         self, picasso_movie, real_identifications, movie_info
     ):
-        """If ``Pixelsize`` is absent from camera_info, fit2D emits a
+        """If ``Pixelsize`` is absent from camera_info, fit emits a
         warning and defaults to 130 nm."""
         cam = {"Baseline": 0, "Sensitivity": 1, "Gain": 1}
         with pytest.warns(UserWarning, match="Pixelsize"):
-            _, new_info = localize.fit2D(
+            _, new_info = localize.fit(
                 picasso_movie,
-                movie_info,
-                cam,
-                real_identifications,
-                BOX,
+                camera_info=cam,
+                identifications=real_identifications,
+                box=BOX,
                 fitting_method="gausslq",
                 multiprocess=False,
             )
@@ -1243,7 +1260,7 @@ class TestFit2D:
 
 
 # ---------------------------------------------------------------------------
-# localize — monolithic identify + fit2D entry point
+# localize — monolithic identify + fit entry point
 # ---------------------------------------------------------------------------
 
 
@@ -1251,34 +1268,36 @@ class TestLocalize:
     """The top-level ``localize`` pipeline (identify -> get_spots -> fit)."""
 
     def test_basic_pipeline_returns_locs(self, picasso_movie, movie_info):
-        locs = localize.localize(
+        locs, _ = localize.localize(
             picasso_movie,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            {"Min. Net Gradient": MIN_NG, "Box Size": BOX},
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identification_parameters={
+                "Min. Net Gradient": MIN_NG,
+                "Box Size": BOX,
+            },
             movie_info=movie_info,
             fitting_method="gausslq",
             threaded=False,
-            return_info=False,
         )
         assert isinstance(locs, pd.DataFrame)
         assert len(locs) > 0
         for col in ["frame", "x", "y", "photons", "sx", "sy", "bg"]:
             assert col in locs.columns
 
-    def test_return_info_returns_full_info_chain(
-        self, picasso_movie, movie_info
-    ):
-        """With ``return_info=True``, returns ``(locs, info)`` where info
+    def test_returns_full_info_chain(self, picasso_movie, movie_info):
+        """Returns ``(locs, info)`` where info
         contains the original movie info, the identify metadata, and the
         fit metadata."""
         locs, info = localize.localize(
             picasso_movie,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            {"Min. Net Gradient": MIN_NG, "Box Size": BOX},
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identification_parameters={
+                "Min. Net Gradient": MIN_NG,
+                "Box Size": BOX,
+            },
             movie_info=movie_info,
             fitting_method="gausslq",
             threaded=False,
-            return_info=True,
         )
         assert isinstance(locs, pd.DataFrame)
         assert isinstance(info, list)
@@ -1304,7 +1323,6 @@ class TestLocalize:
             movie_info=mm_info,
             fitting_method="gausslq",
             threaded=False,
-            return_info=True,
         )
         _, info = localize.localize(picasso_movie, **kwargs)
         assert info[0]["Micro-Manager Metadata"] == {"Cam": "Zyla"}
@@ -1317,31 +1335,32 @@ class TestLocalize:
         assert info[0]["Frames"] == mm_info[0]["Frames"]
         assert "Micro-Manager Metadata" in mm_info[0]
 
-    def test_localize_matches_identify_plus_fit2d(
+    def test_localize_matches_identify_plus_fit(
         self, picasso_movie, real_identifications, movie_info
     ):
         """Calling ``localize`` should produce the same result (up to
-        ordering) as calling ``identify`` + ``fit2D`` separately, since
+        ordering) as calling ``identify`` + ``fit`` separately, since
         ``localize`` is just glue."""
         # Direct path
-        locs_direct, _ = localize.fit2D(
+        locs_direct, _ = localize.fit(
             picasso_movie,
-            movie_info,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            real_identifications,
-            BOX,
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="gausslq",
             multiprocess=False,
         )
         # Through the high-level entry point
-        locs_high = localize.localize(
+        locs_high, _ = localize.localize(
             picasso_movie,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            {"Min. Net Gradient": MIN_NG, "Box Size": BOX},
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identification_parameters={
+                "Min. Net Gradient": MIN_NG,
+                "Box Size": BOX,
+            },
             movie_info=movie_info,
             fitting_method="gausslq",
             threaded=False,
-            return_info=False,
         )
         assert len(locs_direct) == len(locs_high)
         # photons sums match
@@ -1355,15 +1374,17 @@ class TestLocalize:
         """Passing an ROI confines the localizations to that pixel
         window."""
         roi = ((0, 0), (16, 16))
-        locs = localize.localize(
+        locs, _ = localize.localize(
             picasso_movie,
-            CAMERA_INFO_WITH_PIXELSIZE,
-            {"Min. Net Gradient": MIN_NG, "Box Size": BOX},
+            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
+            identification_parameters={
+                "Min. Net Gradient": MIN_NG,
+                "Box Size": BOX,
+            },
             movie_info=movie_info,
             roi=roi,
             fitting_method="gausslq",
             threaded=False,
-            return_info=False,
         )
         # No localization outside the ROI window
         if len(locs) > 0:
@@ -1372,156 +1393,38 @@ class TestLocalize:
 
 
 # ---------------------------------------------------------------------------
-# localize_3D — identify + 2D fit + z fitting
+# The API removed in v0.12.0: ``fit2D`` (now ``fit``), ``localize_3D`` (now
+# ``localize(calibration_3d=...)``), ``localize``'s positional
+# ``camera_info``/``identification_parameters``, its ``parameters`` and
+# ``mle_method`` arguments, and ``return_info`` everywhere.
 # ---------------------------------------------------------------------------
 
 
-class TestLocalize3D:
-    """End-to-end 3D localization pipeline.
+class TestRemovedLocalizeAPI:
+    """The spellings deprecated in v0.11 are gone."""
 
-    Note: the public ``localize_3D`` validates its movie argument with
-    ``isinstance(movie, (np.ndarray, ND2Movie))`` — but the inner
-    ``fit2D`` then asserts ``isinstance(movie, AbstractPicassoMovie)``,
-    which conflicts. So the public ``localize_3D`` is unusable for
-    AbstractPicassoMovie inputs; we exercise the internal
-    ``_localize_3D`` (which has no such guard) to verify that the actual
-    pipeline produces sensible 3D locs.
-    """
+    @pytest.mark.parametrize("name", ["fit2D", "localize_3D"])
+    def test_removed_functions(self, name):
+        assert not hasattr(localize, name)
 
-    def test_public_localize_3d_rejects_wrapper(
-        self, picasso_movie, movie_info
-    ):
-        """The public function's input check excludes AbstractPicassoMovie."""
-        with pytest.raises(AssertionError, match="numpy array or ND2Movie"):
-            localize.localize_3D(
-                picasso_movie,
-                movie_info=movie_info,
-                camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-                box=BOX,
-                minimum_ng=MIN_NG,
-                calibration_3d=dict(CALIB_3D),
-                fitting_method="gausslq",
-                multiprocess=False,
-            )
-
-    def test_public_localize_3d_invalid_calibration_type(
-        self, movie, movie_info
-    ):
-        with pytest.raises(AssertionError, match="calibration_3d"):
-            localize.localize_3D(
-                movie,
-                movie_info=movie_info,
-                camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-                box=BOX,
-                minimum_ng=MIN_NG,
-                calibration_3d=12345,  # neither dict nor str
-                fitting_method="gausslq",
-                multiprocess=False,
-            )
-
-    def test_underlying_pipeline_produces_z_locs(
-        self, picasso_movie, movie_info
-    ):
-        """Drive the full identify->fit->zfit pipeline through
-        ``_localize_3D`` and verify the output has the expected 3D
-        columns and finite z values."""
-        locs, _ = localize._localize_3D(
-            picasso_movie,
-            movie_info=movie_info,
-            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-            box=BOX,
-            minimum_ng=MIN_NG,
-            calibration_3d=dict(CALIB_3D),
-            fitting_method="gausslq",
-            multiprocess=False,
-        )
-        assert isinstance(locs, pd.DataFrame)
-        assert len(locs) > 0
-        for col in ["x", "y", "z", "d_zcalib", "lpz", "sx", "sy"]:
-            assert col in locs.columns
-        assert np.all(np.isfinite(locs["z"].to_numpy()))
-        assert (locs["lpz"] > 0).all()
-
-
-# ---------------------------------------------------------------------------
-# The v0.12.0 API changes: ``fit2D`` -> ``fit``, ``localize_3D`` folded into
-# ``localize(calibration_3d=...)``, ``parameters`` ->
-# ``identification_parameters``, keyword-only arguments, ``mle_method`` gone.
-# Every old call must keep working (with a DeprecationWarning) until then.
-# ---------------------------------------------------------------------------
-
-
-class TestDeprecatedLocalizeAPI:
-    """The deprecated spellings still run and warn."""
-
-    def test_fit2d_warns_and_matches_fit(
-        self, picasso_movie, real_identifications, movie_info
-    ):
-        with pytest.warns(DeprecationWarning, match="fit2D"):
-            old, old_info = localize.fit2D(
-                picasso_movie,
-                movie_info,
-                CAMERA_INFO_WITH_PIXELSIZE,
-                real_identifications,
-                BOX,
-                fitting_method="gausslq",
-                mle_method="sigmaxy",
-                multiprocess=False,
-            )
-        new, new_info = localize.fit(
-            picasso_movie,
-            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-            identifications=real_identifications,
-            box=BOX,
-            fitting_method="gausslq",
-            multiprocess=False,
-        )
-        pd.testing.assert_frame_equal(old, new)
-        assert old_info == new_info
-
-    def test_fit2d_mle_method_warns_separately(
-        self, picasso_movie, real_identifications, movie_info
-    ):
-        with pytest.warns(DeprecationWarning, match="mle_method"):
-            localize.fit2D(
-                picasso_movie,
-                movie_info,
-                CAMERA_INFO_WITH_PIXELSIZE,
-                real_identifications,
-                BOX,
-                fitting_method="avg",
-                mle_method="sigma",
-                multiprocess=False,
-            )
-
-    def test_positional_arguments_warn(self, picasso_movie, movie_info):
-        with pytest.warns(DeprecationWarning, match="positional"):
-            locs, _ = localize.localize(
+    def test_positional_arguments_rejected(self, picasso_movie):
+        with pytest.raises(TypeError):
+            localize.localize(
                 picasso_movie,
                 CAMERA_INFO_WITH_PIXELSIZE,
                 {"Min. Net Gradient": MIN_NG, "Box Size": BOX},
-                movie_info=movie_info,
-                fitting_method="gausslq",
-                threaded=False,
             )
-        assert len(locs) > 0
 
-    def test_parameters_keyword_warns_and_still_works(
-        self, picasso_movie, movie_info
-    ):
-        with pytest.warns(DeprecationWarning, match="identification_para"):
-            locs, _ = localize.localize(
-                picasso_movie,
-                camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-                parameters={"Min. Net Gradient": MIN_NG, "Box Size": BOX},
-                movie_info=movie_info,
-                fitting_method="gausslq",
-                threaded=False,
-            )
-        assert len(locs) > 0
-
-    def test_mle_method_warns(self, picasso_movie, movie_info):
-        with pytest.warns(DeprecationWarning, match="mle_method"):
+    @pytest.mark.parametrize(
+        "kwarg",
+        [
+            {"parameters": {"Min. Net Gradient": MIN_NG, "Box Size": BOX}},
+            {"mle_method": "sigmaxy"},
+            {"return_info": False},
+        ],
+    )
+    def test_removed_keywords_rejected(self, picasso_movie, kwarg):
+        with pytest.raises(TypeError):
             localize.localize(
                 picasso_movie,
                 camera_info=CAMERA_INFO_WITH_PIXELSIZE,
@@ -1529,32 +1432,12 @@ class TestDeprecatedLocalizeAPI:
                     "Min. Net Gradient": MIN_NG,
                     "Box Size": BOX,
                 },
-                movie_info=movie_info,
-                fitting_method="gausslq",
-                mle_method="sigmaxy",
-                threaded=False,
+                **kwarg,
             )
 
-    def test_duplicate_camera_info_raises(self, picasso_movie):
-        with pytest.raises(TypeError, match="camera_info"):
-            localize.localize(
-                picasso_movie,
-                CAMERA_INFO_WITH_PIXELSIZE,
-                camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-            )
-
-    def test_localize_3d_warns(self, picasso_movie, movie_info):
-        with pytest.warns(DeprecationWarning, match="localize_3D"):
-            with pytest.raises(AssertionError):
-                # the movie type guard fires after the warning
-                localize.localize_3D(
-                    picasso_movie,
-                    movie_info=movie_info,
-                    camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-                    box=BOX,
-                    minimum_ng=MIN_NG,
-                    calibration_3d=dict(CALIB_3D),
-                )
+    def test_identify_return_info_rejected(self, movie):
+        with pytest.raises(TypeError):
+            localize.identify(movie, MIN_NG, BOX, return_info=False)
 
 
 class TestLocalizeAstigmatism3D:
@@ -1575,26 +1458,17 @@ class TestLocalizeAstigmatism3D:
             **kwargs,
         )
 
-    def test_matches_localize_3d(self, picasso_movie, movie_info):
-        """The astigmatic path reproduces the old ``_localize_3D``."""
-        old, old_info = localize._localize_3D(
-            picasso_movie,
-            movie_info=movie_info,
-            camera_info=CAMERA_INFO_WITH_PIXELSIZE,
-            box=BOX,
-            minimum_ng=MIN_NG,
-            calibration_3d=dict(CALIB_3D),
-            fitting_method="gausslq",
-            multiprocess=False,
-        )
-        new, new_info = self._localize(
+    def test_produces_z_locs(self, picasso_movie, movie_info):
+        """The full identify -> fit -> zfit pipeline yields finite z with
+        its uncertainty."""
+        locs, _ = self._localize(
             picasso_movie, movie_info, calibration_3d=dict(CALIB_3D)
         )
-        pd.testing.assert_frame_equal(old, new)
-        assert len(new_info) == len(old_info)
-        for col in ["z", "d_zcalib", "lpz"]:
-            assert col in new.columns
-        assert np.all(np.isfinite(new["z"].to_numpy()))
+        assert len(locs) > 0
+        for col in ["x", "y", "z", "d_zcalib", "lpz", "sx", "sy"]:
+            assert col in locs.columns
+        assert np.all(np.isfinite(locs["z"].to_numpy()))
+        assert (locs["lpz"] > 0).all()
 
     def test_no_calibration_stays_2d(self, picasso_movie, movie_info):
         locs, _ = self._localize(picasso_movie, movie_info)
@@ -4141,17 +4015,16 @@ class TestNoSelfDeprecation:
             "avg",
         ],
     )
-    def test_fit2d_raises_no_deprecation_warning(
+    def test_fit_raises_no_deprecation_warning(
         self, picasso_movie, movie_info, real_identifications, method
     ):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            localize.fit2D(
+            localize.fit(
                 picasso_movie,
-                movie_info,
-                self.CAMERA_INFO,
-                real_identifications[:20],
-                BOX,
+                camera_info=self.CAMERA_INFO,
+                identifications=real_identifications[:20],
+                box=BOX,
                 fitting_method=method,
                 multiprocess=False,
             )
@@ -4169,12 +4042,11 @@ class TestNoSelfDeprecation:
         """The process-pool path goes through ``_fit_spots_parallel``."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            localize.fit2D(
+            localize.fit(
                 picasso_movie,
-                movie_info,
-                self.CAMERA_INFO,
-                real_identifications[:20],
-                BOX,
+                camera_info=self.CAMERA_INFO,
+                identifications=real_identifications[:20],
+                box=BOX,
                 fitting_method="gausslq",
                 multiprocess=True,
             )
@@ -4238,12 +4110,11 @@ class TestConvergenceSchedulePlumbing:
             pytest.skip("no CUDA device")
 
         def run(eps, max_it):
-            _, info = localize.fit2D(
+            _, info = localize.fit(
                 picasso_movie,
-                movie_info,
-                self.CAMERA_INFO,
-                real_identifications[:20],
-                BOX,
+                camera_info=self.CAMERA_INFO,
+                identifications=real_identifications[:20],
+                box=BOX,
                 fitting_method=method,
                 eps=eps,
                 max_it=max_it,
@@ -4258,12 +4129,11 @@ class TestConvergenceSchedulePlumbing:
         self, picasso_movie, movie_info, real_identifications
     ):
         """The one method that does not iterate must not claim one."""
-        _, info = localize.fit2D(
+        _, info = localize.fit(
             picasso_movie,
-            movie_info,
-            self.CAMERA_INFO,
-            real_identifications[:20],
-            BOX,
+            camera_info=self.CAMERA_INFO,
+            identifications=real_identifications[:20],
+            box=BOX,
             fitting_method="avg",
             multiprocess=False,
         )
@@ -4435,7 +4305,7 @@ class TestGaussCodeGrammar:
             else:
                 assert localize.parse_gauss_code(code) is None, code
 
-    def test_fit2d_rejects_an_unknown_code(self, tmp_path):
+    def test_fit_rejects_an_unknown_code(self, tmp_path):
         """The grammar is the validator: anything it does not accept must be
         refused rather than silently fitted as something else."""
         raw = tmp_path / "movie.raw"
@@ -4445,12 +4315,16 @@ class TestGaussCodeGrammar:
             {"frame": [0], "x": [8.0], "y": [8.0], "net_gradient": [1.0]}
         )
         with pytest.raises(AssertionError, match="not one of"):
-            localize.fit2D(
+            localize.fit(
                 movie,
-                [{"Frames": 1}],
-                {"Baseline": 0, "Sensitivity": 1, "Gain": 1, "Pixelsize": 130},
-                identifications,
-                7,
+                camera_info={
+                    "Baseline": 0,
+                    "Sensitivity": 1,
+                    "Gain": 1,
+                    "Pixelsize": 130,
+                },
+                identifications=identifications,
+                box=7,
                 fitting_method="gausslq-nonsense",
             )
 
@@ -4462,7 +4336,7 @@ class TestGuiConvergenceDefaults:
     and the fit runs another."""
 
     def test_every_iterating_method_has_defaults(self):
-        """Every ``fit2D`` code except "avg" iterates and must be listed."""
+        """Every ``fit`` code except "avg" iterates and must be listed."""
         codes = set()
         for entry in localize_gui.FIT_MODELS.values():
             optimizers = entry["optimizers"]
@@ -4496,9 +4370,9 @@ class TestGuiConvergenceDefaults:
         assert table["spline-gpu"] == table["spline"]
         assert table["spline"] == localize._spline_schedule(True, None, None)
 
-    def test_gpu_capable_codes_are_real_fit2d_codes(self):
+    def test_gpu_capable_codes_are_real_fit_codes(self):
         """``_effective_fit_code`` appends "-gpu"; the result has to be a
-        method ``fit2D`` accepts."""
+        method ``fit`` accepts."""
         for code in localize_gui._GPU_CAPABLE_CODES:
             assert not code.endswith("-gpu")
             assert code + "-gpu" in localize_gui._CONVERGENCE_CODES
@@ -4582,7 +4456,7 @@ class TestGuiConvergenceDefaults:
             dialog.deleteLater()
 
     def test_convergence_criterion_cannot_be_zero(self):
-        """``fit2D`` asserts a positive tolerance, so the box must not offer
+        """``fit`` asserts a positive tolerance, so the box must not offer
         0 - it used to, which made the fit raise on a valid-looking value."""
 
         class _StubWindow(QtWidgets.QMainWindow):
@@ -4602,7 +4476,7 @@ class TestGuiConvergenceDefaults:
 
 @pytest.mark.skipif(not localize.CUDA_AVAILABLE, reason="no CUDA device")
 class TestFit2DGpu:
-    """End-to-end ``localize.fit2D`` through every GPU fitting method, driven by
+    """End-to-end ``localize.fit`` through every GPU fitting method, driven by
     the bundled movie and its real identifications. Verifies the high-level
     dispatch, spot extraction, GPU fit and localization assembly hang together
     and produce a saveable localizations frame."""
@@ -4626,12 +4500,11 @@ class TestFit2DGpu:
         method,
         has_angle,
     ):
-        locs, info = localize.fit2D(
+        locs, info = localize.fit(
             picasso_movie,
-            movie_info,
-            self.CAMERA_INFO,
-            real_identifications,
-            BOX,
+            camera_info=self.CAMERA_INFO,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method=method,
         )
         assert len(locs) == len(real_identifications)
@@ -4664,12 +4537,11 @@ class TestFit2DGpu:
         self, picasso_movie, movie_info, real_identifications, method
     ):
         calib, _, _, _ = _synthetic_spline_3d_calibration(box=BOX)
-        locs, info = localize.fit2D(
+        locs, info = localize.fit(
             picasso_movie,
-            movie_info,
-            self.CAMERA_INFO,
-            real_identifications,
-            BOX,
+            camera_info=self.CAMERA_INFO,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method=method,
             spline_calibration=calib,
         )
@@ -4691,14 +4563,13 @@ class TestFit2DGpu:
     def test_gpu_matches_direct_fit_path(
         self, picasso_movie, movie_info, real_identifications
     ):
-        """fit2D('gausslq-gpu') equals calling the spot extraction + GPU fit +
+        """fit('gausslq-gpu') equals calling the spot extraction + GPU fit +
         localization assembly directly - i.e. the wrapper adds no drift."""
-        locs, _ = localize.fit2D(
+        locs, _ = localize.fit(
             picasso_movie,
-            movie_info,
-            self.CAMERA_INFO,
-            real_identifications,
-            BOX,
+            camera_info=self.CAMERA_INFO,
+            identifications=real_identifications,
+            box=BOX,
             fitting_method="gausslq-gpu",
         )
         spots = localize.get_spots(
@@ -6738,21 +6609,19 @@ class TestTemporalMedian:
             assert (frame[10:, 10:] == 0).all()
 
     def test_threaded_matches_serial(self, movie):
-        ids_t = localize.identify(
+        ids_t, _ = localize.identify(
             movie,
             MIN_NG,
             BOX,
             threaded=True,
             temporal_median_window=11,
-            return_info=False,
         )
-        ids_s = localize.identify(
+        ids_s, _ = localize.identify(
             movie,
             MIN_NG,
             BOX,
             threaded=False,
             temporal_median_window=11,
-            return_info=False,
         )
         as_set = lambda ids: set(  # noqa: E731
             map(tuple, ids[["frame", "y", "x"]].to_numpy())
@@ -6763,12 +6632,11 @@ class TestTemporalMedian:
         ids_arg, info = localize.identify(
             movie, MIN_NG, BOX, threaded=False, temporal_median_window=11
         )
-        ids_wrapped = localize.identify(
+        ids_wrapped, _ = localize.identify(
             localize.TemporalMedianMovie(movie, 11, roi_pad=int(BOX / 2) + 1),
             MIN_NG,
             BOX,
             threaded=False,
-            return_info=False,
         )
         pd.testing.assert_frame_equal(ids_arg, ids_wrapped)
         assert info["Temporal Median Window"] == 11
@@ -6798,19 +6666,21 @@ class TestTemporalMedian:
             (ids["y"] - y).abs().le(1) & (ids["x"] - x).abs().le(1)
         ).any()
 
-        raw_ids = localize.identify(
-            movie, 500, BOX, threaded=False, return_info=False
+        raw_ids, _ = localize.identify(
+            movie,
+            500,
+            BOX,
+            threaded=False,
         )
         assert found(raw_ids, 8, 8)
         assert found(raw_ids, 24, 24)
 
-        filtered_ids = localize.identify(
+        filtered_ids, _ = localize.identify(
             movie,
             500,
             BOX,
             threaded=False,
             temporal_median_window=11,
-            return_info=False,
         )
         assert not found(filtered_ids, 8, 8)
         assert found(filtered_ids, 24, 24)
@@ -7139,21 +7009,24 @@ class TestGaussianFilter:
         as_set = lambda ids: set(  # noqa: E731
             map(tuple, ids[["frame", "y", "x"]].to_numpy())
         )
-        common = dict(gaussian_filter_sigma=1.0, return_info=False)
-        ids_t = localize.identify(movie, MIN_NG, BOX, threaded=True, **common)
-        ids_s = localize.identify(movie, MIN_NG, BOX, threaded=False, **common)
+        common = dict(gaussian_filter_sigma=1.0)
+        ids_t, _ = localize.identify(
+            movie, MIN_NG, BOX, threaded=True, **common
+        )
+        ids_s, _ = localize.identify(
+            movie, MIN_NG, BOX, threaded=False, **common
+        )
         assert as_set(ids_t) == as_set(ids_s)
 
     def test_identify_argument_matches_explicit_wrapper(self, movie):
         ids_arg, info = localize.identify(
             movie, MIN_NG, BOX, threaded=False, gaussian_filter_sigma=1.0
         )
-        ids_wrapped = localize.identify(
+        ids_wrapped, _ = localize.identify(
             localize.GaussianFilteredMovie(movie, 1.0),
             MIN_NG,
             BOX,
             threaded=False,
-            return_info=False,
         )
         pd.testing.assert_frame_equal(ids_arg, ids_wrapped)
         assert info["Gaussian Filter Sigma"] == 1.0
@@ -7162,17 +7035,19 @@ class TestGaussianFilter:
         _, info = localize.identify(movie, MIN_NG, BOX, threaded=False)
         assert info["Gaussian Filter Sigma"] == 0.0
 
-    def test_fit2d_rejects_the_filtered_view(self, movie, movie_info):
+    def test_fit_rejects_the_filtered_view(self, movie, movie_info):
         """The class deliberately does not implement the movie interface,
         so a filtered view reaching the fit is a loud error rather than
         silently wrong photon numbers."""
-        ids = localize.identify(
-            movie, MIN_NG, BOX, threaded=False, return_info=False
+        ids, _ = localize.identify(
+            movie,
+            MIN_NG,
+            BOX,
+            threaded=False,
         )
         with pytest.raises(AssertionError):
-            localize.fit2D(
+            localize.fit(
                 movie=localize.GaussianFilteredMovie(movie, 1.0),
-                movie_info=movie_info,
                 camera_info=CAMERA_INFO,
                 identifications=ids,
                 box=BOX,
@@ -7230,14 +7105,13 @@ class TestGaussianFilter:
             ).astype(np.uint16)
 
         def gradients(**kwargs):
-            ids = localize.identify(
+            ids, _ = localize.identify(
                 movie,
                 200,
                 BOX,
                 threaded=False,
                 temporal_median_window=5,
                 gaussian_filter_sigma=sigma,
-                return_info=False,
                 **kwargs,
             )
             return ids[ids["x"].between(29, 32)]["net_gradient"].to_numpy()
@@ -7256,8 +7130,12 @@ class TestGaussianFilter:
             ),
             sigma,
         )
-        ids = localize.identify(
-            too_small, 200, BOX, roi=[roi], threaded=False, return_info=False
+        ids, _ = localize.identify(
+            too_small,
+            200,
+            BOX,
+            roi=[roi],
+            threaded=False,
         )
         starved = ids[ids["x"].between(29, 32)]["net_gradient"].to_numpy()
         assert not np.allclose(starved, whole_frame, rtol=1e-4)
@@ -7271,20 +7149,22 @@ class TestGaussianFilter:
         movie = _double_lobed_movie()
         center = movie.shape[-1] // 2
 
-        raw_ids = localize.identify(
-            movie, 500, BOX, threaded=False, return_info=False
+        raw_ids, _ = localize.identify(
+            movie,
+            500,
+            BOX,
+            threaded=False,
         )
         assert len(raw_ids) == 2 * len(movie)
 
         # a lower threshold, since smoothing lowers gradient magnitudes -
         # that re-tuning is exactly what the tooltip and docs warn about
-        smoothed_ids = localize.identify(
+        smoothed_ids, _ = localize.identify(
             movie,
             50,
             BOX,
             threaded=False,
             gaussian_filter_sigma=2.0,
-            return_info=False,
         )
         assert len(smoothed_ids) == len(movie)
         assert (smoothed_ids["x"] - center).abs().max() <= 1
@@ -7436,7 +7316,7 @@ class TestGaussianFilterGui:
                 preview = localize.identify_by_frame_number(
                     filtered, 200, BOX, 3, roi=rois
                 )
-                batch = localize.identify(
+                batch, _ = localize.identify(
                     movie,
                     200,
                     BOX,
@@ -7444,7 +7324,6 @@ class TestGaussianFilterGui:
                     threaded=False,
                     temporal_median_window=5,
                     gaussian_filter_sigma=sigma,
-                    return_info=False,
                 )
                 batch = batch[batch["frame"] == 3]
                 assert len(preview) == len(batch) == 1
@@ -7567,8 +7446,7 @@ class TestGaussianFilterGui:
                 BOX,
                 threaded=False,
                 gaussian_filter_sigma=1.5,
-                return_info=False,
-            )
+            )[0]
             path = str(tmp_path / "ids.hdf5")
             window.save_identifications(path)
 
@@ -7871,8 +7749,7 @@ class TestPerRegionMinNetGradientGui:
                 BOX,
                 roi=TWO_REGIONS,
                 threaded=False,
-                return_info=False,
-            )
+            )[0]
             path = str(tmp_path / "ids.hdf5")
             window.save_identifications(path)
 
@@ -9364,17 +9241,16 @@ def scmos_scene():
 
 
 class TestScmosFit2DIntegration:
-    """The whole feature, end to end through ``fit2D``."""
+    """The whole feature, end to end through ``fit``."""
 
     @staticmethod
     def _fit(scene, picasso_movie_factory, method, calibration):
         movie = picasso_movie_factory(scene["movie"], scene["info"])
-        locs, info = localize.fit2D(
+        locs, info = localize.fit(
             movie,
-            [{}],
-            dict(scene["camera_info"]),
-            scene["identifications"],
-            BOX,
+            camera_info=dict(scene["camera_info"]),
+            identifications=scene["identifications"],
+            box=BOX,
             fitting_method=method,
             camera_calibration=calibration,
         )
@@ -9494,7 +9370,7 @@ class TestScmosFit2DIntegration:
 
 
 class TestScmosSplineIntegration:
-    """The spline models, through ``fit2D``, with a camera calibration."""
+    """The spline models, through ``fit``, with a camera calibration."""
 
     @pytest.fixture(scope="class")
     def scene(self):
@@ -9552,12 +9428,11 @@ class TestScmosSplineIntegration:
     @staticmethod
     def _fit(scene, picasso_movie_factory, method, calibration):
         movie = picasso_movie_factory(scene["movie"], scene["info"])
-        locs, _ = localize.fit2D(
+        locs, _ = localize.fit(
             movie,
-            [{}],
-            dict(scene["camera_info"]),
-            scene["identifications"],
-            7,
+            camera_info=dict(scene["camera_info"]),
+            identifications=scene["identifications"],
+            box=7,
             fitting_method=method,
             spline_calibration=scene["psf_calibration"],
             camera_calibration=calibration,
@@ -10116,8 +9991,8 @@ class TestCameraCalibrationConfigLookup:
 class TestCameraCalibrationProvenance:
     """A saved file must say whether the noise model was used.
 
-    ``fit2D`` records this, but Picasso Localize throws away the info
-    ``fit2D`` returns and rebuilds its own when saving, so the GUI path needs
+    ``fit`` records this, but Picasso Localize throws away the info
+    ``fit`` returns and rebuilds its own when saving, so the GUI path needs
     its own assertion - without one, a GUI run silently saved localizations
     that gave no hint a calibration had been applied.
     """
@@ -10161,7 +10036,7 @@ class TestCameraCalibrationProvenance:
         """Regression: a GUI run used to save localizations that gave no hint
         a calibration had been applied, because ``Window.save_locs`` rebuilds
         the metadata from the dialog and ``FitWorker`` discards what
-        ``fit2D`` returns."""
+        ``fit`` returns."""
         path = str(tmp_path / "c_scmos_calib.hdf5")
         io.save_camera_calibration(path, self._calibration())
 

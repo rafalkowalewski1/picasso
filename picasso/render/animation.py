@@ -20,7 +20,7 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 from .. import io, lib, __version__
-from .geometry import rotation_matrix, viewport_width
+from .geometry import viewport_width
 from .scene import render_scene
 
 if TYPE_CHECKING:
@@ -36,33 +36,28 @@ def _normalize_animation_positions(
 ) -> list[tuple[Rotation, tuple]]:
     """Normalize animation checkpoints to (Rotation, viewport) tuples.
 
-    Accepts two formats: each position is (rotation, viewport) with
-    rotation being a scipy Rotation, as well as the legacy format
-    (angle_x, angle_y, angle_z, viewport) with Euler angles in radians
-    (see ``rotation_matrix``), which is deprecated.
+    Each position must be (rotation, viewport) with rotation being a
+    scipy Rotation. The legacy format (angle_x, angle_y, angle_z,
+    viewport) with Euler angles was removed in v0.12.0; convert such
+    angles with ``rotation_matrix``.
     """
     normalized = []
-    legacy = False
     for p in positions:
         if len(p) == 2 and isinstance(p[0], Rotation):
             normalized.append((p[0], p[1]))
         elif len(p) == 4:
-            legacy = True
-            normalized.append((rotation_matrix(p[0], p[1], p[2]), p[3]))
+            raise ValueError(
+                "Animation positions given as Euler angles (angle_x, "
+                "angle_y, angle_z, viewport) are no longer supported since "
+                "v0.12.0. Pass (rotation, viewport) with rotation being a "
+                "scipy.spatial.transform.Rotation instead, e.g. "
+                "picasso.render.rotation_matrix(angle_x, angle_y, angle_z)."
+            )
         else:
             raise ValueError(
                 "Each position must be a tuple (rotation, viewport) with "
-                "rotation being a scipy Rotation, or the deprecated "
-                "4-element form (angle_x, angle_y, angle_z, viewport)."
+                "rotation being a scipy Rotation."
             )
-    if legacy:
-        lib.deprecation_warning(
-            "Deprecation warning: passing animation positions as Euler "
-            "angles (angle_x, angle_y, angle_z, viewport) is deprecated "
-            "and will be removed in v0.12.0. Pass (rotation, viewport) "
-            "with rotation being a scipy.spatial.transform.Rotation "
-            "instead."
-        )
     return normalized
 
 
@@ -197,10 +192,10 @@ def build_animation(
         is a tuple of 2 elements: (rotation, viewport). Rotation is a
         ``scipy.spatial.transform.Rotation`` defining the orientation
         of the localizations at the checkpoint. Viewport is given as
-        ((y_min, x_min), (y_max, x_max)) in camera pixels. The
-        deprecated legacy format (angle_x, angle_y, angle_z, viewport)
-        with Euler angles in radians (see ``rotation_matrix``) is also
-        accepted and will be removed in v0.12.0.
+        ((y_min, x_min), (y_max, x_max)) in camera pixels. Since
+        v0.12.0, the legacy format (angle_x, angle_y, angle_z, viewport)
+        with Euler angles is no longer accepted; convert the angles with
+        ``rotation_matrix``.
     durations : list
         List of durations in seconds between the checkpoints. Must have
         the same length as positions - 1.
