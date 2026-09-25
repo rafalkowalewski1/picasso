@@ -4,73 +4,49 @@ Last change: 25-SEP-2026 CEST
 
 ## 0.12.0/1.0.0
 
+**TODO**: Describe the general overview - fast render, etc.
+
+### General
+- Removed support for Python 3.10 (Python 3.11–3.14 are supported).
+
 ### Render
-- New blur method **Adaptive Histogram (Quad-Tree)** in Render (Baddeley, Cannell & Soeller, *Microsc. Microanal.* 2010): a histogram whose bins split while they hold more than a leaf capacity (new setting in the display settings, default 10), so every bin has about the same signal-to-noise ratio whatever the local density (on average the square root of half the capacity, shown in the dialog) and the bin size shows the local sampling. It renders from each channel's spatial index on the CPU: a 5-million-localization overview in about 60 ms and any zoom level in a few milliseconds. In the 3D rotation window the tree is rebuilt from the projected localizations for every orientation. `blur_method="quadtree"`, `quadtree_capacity` and `render_index` in `picasso.render.render`/`render_scene`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
-- New blur method **Jittered Triangulation** in Render (Baddeley, Cannell & Soeller 2010): Delaunay triangles drawn with an intensity inverse to their area, averaged over triangulations of the localizations jittered by their mean neighbor distance, so the blur follows the local sampling and dense regions keep their resolution. Settings for the passes (25), the jitter factor (1) and a limit on the localizations in view (100,000; above it the histogram is shown with a note): it costs about 0.3 s per pass per 200,000 localizations, so it is meant for zoomed-in views; previews show the plain triangulation. Works in the 3D window and in animations. `blur_method="triangulation"`, `triangulation_passes`, `triangulation_jitter` in `picasso.render.render`/`render_scene`; `picasso.render.triangulation` holds the method. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
+- Render has been largely rewritten for fast and interactive rendering of localizations even for large, multiplex datasets. GPU via the package ``wgpu`` has been added for cross-platform support. More details in the section **Technical details on Render update** below. See these links for the relevant user guides: [navigation](https://picassosr.readthedocs.io/en/latest/render.html#navigating-the-image), [user_settings](https://picassosr.readthedocs.io/en/latest/render.html#cpu-usage-on-shared-workstations), [GPU](https://picassosr.readthedocs.io/en/latest/render.html#gpu-rendering).
+- `View > 3D view` (Ctrl+Shift+R, replacing *Update rotation window*) opens the rotation window on the single selected pick or, without a pick, on the current field of view, so any region can be inspected in 3D by zooming to it; pressed again on unchanged content it only raises the window.
+- New blur methods *Adaptive Histogram (Quad-Tree)* and *Jittered Triangulation* (Baddeley, Cannell & Soeller, *Microsc. Microanal.* 2010). See the [blur documentation](https://picassosr.readthedocs.io/en/latest/render.html#blur).
+- The display settings (main and 3D window) show the minimum blur only for the Gaussian blur methods that use it.
 - New action to move xy positions of localizations with a mouse. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#move-ctrl-g).
 - Apply expression to localizations expands the canvas (metadata's `Height` and `Width`) if x and y positions are out of range.
+- Faster circular picking of localizations.
+- `picasso.render` is distributed as a package (`kernels`, `geometry`, `splat`, `scene`, `overlays_qt`, `animation`, `backend`, `gpu`); every former `picasso.render.*` name is still importable from `picasso.render`.
+- Fixed: 3D histogram rendering scaled z unnecessarily.
+
+### **Backward incompatible changes:**
+- *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.
 
 ### Others
-- Removed support for Python 3.10 (Python 3.11–3.14 are supported).
 - Code readability clean ups (flake8).
+- The spatial index stored in localization .hdf5 files (`/render_index`). See the [documentation](https://picassosr.readthedocs.io/en/latest/files.html#spatial-index).
+- The user settings file (`~/.picasso/settings.yaml`) is no longer lost when it cannot be read. Also, the [documentation](https://picassosr.readthedocs.io/en/latest/others.html#user-settings-file) has been added.
+- The Windows one-click installer's *GPU* edition is renamed *CUDA*, similarly the installed folders were renamed etc.
 
-### Rendering engine
+### Technical details on Render update
 - **Multi-threaded CPU rendering**: the render kernels release the GIL and channels are rendered in parallel by a thread pool; a single large channel is split into row chunks rendered in parallel and summed in a fixed order.
 - New user setting `cpu_utilization` (`Render` section of `~/.picasso/settings.yaml`, default 0.5): the fraction of the CPU cores rendering may use, for shared workstations. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#cpu-usage-on-shared-workstations).
 - The display pipeline after splatting (contrast, colormaps, channel compositing, 8-bit conversion) runs in fused numba kernels instead of a chain of numpy operations (another speed improvement).
 - **GPU rendering in Render**: localizations are rendered on the graphics card (Metal, Direct3D 12 or Vulkan via `wgpu`, any vendor, no CUDA needed) — uploaded once, then every view is computed on the GPU, several times faster than the CPU threads. See the [documentation](https://picassosr.readthedocs.io/en/latest/render.html#gpu-rendering).
 - `View > Show info` shows the active renderer ("GPU (Apple M4 via Metal)" or "CPU (5 workers)") with a help button that opens the GPU documentation, which lists the requirements and what to check when it says CPU.
 - New user setting `max_blur_width` (`Render` section, default 100 nm): localizations with a precision worse than this are not rendered by the individual-precision blur methods (they would only add a faint wide haze while costing most of the render time). `0` or `off` disables the limit.
-
-- The spatial index stored in localization files (`/render_index`) is version 2: sorted by a finer Morton key so the quad-tree can descend to about 1 nm; files with a version 1 index are re-indexed once when opened.
-
-### Navigation
-- Render is easier to navigate, with the same mouse and keyboard controls in the main window and the 3D rotation window. Main window: the middle mouse button and Alt (Option) + left drag pan in every tool, like Ctrl (Cmd) + left drag (added earlier in this cycle) and the right button in the Zoom tool, so the view can be moved while picking or measuring; Shift + left drag zooms to a rectangle in every tool; a trackpad pinch (macOS) zooms about the fingers' position; a triple click with the Zoom tool or the Home key fits the image to the window (like Ctrl + W). 3D window: Ctrl (Cmd) + wheel or trackpad scroll and pinch zoom about the cursor, Shift + left drag zooms to a rectangle (drawn like the main window's, only stretching towards the bottom right, cancelled by releasing above or left of the start), middle button or Alt + left drag pan like the right button (with the Measure tool the right button keeps freezing and deleting measurements, as in the main window), a triple click fits the loaded region (Shift + triple click also resets the rotation), Home fits, `1`/`2`/`3` select the XY/XZ/YZ projections and holding `S` snaps the rotation to 15 degree steps. The Mask image dialog pans with Ctrl + left or the right button too. See the documentation for the [main window](https://picassosr.readthedocs.io/en/latest/render.html#navigating-the-image) and the [3D rotation window](https://picassosr.readthedocs.io/en/latest/render.html#d-rotation-window).
-
-### Render window responsiveness
 - **Rendering runs on a background thread** in the main window: panning and zooming never block the interface, a burst of mouse events renders only the newest view, and the last image is shifted or scaled on screen immediately while the new one renders, so dragging feels continuous. Renders cover a 15% margin around the window so small pans need no new render at all; exports still render the exact view.
 - While panning and zooming, large datasets are previewed with a subset of the localizations (new user setting `interaction_subsample`, `Render` section: `auto` = at least 500,000 or 10% of the localizations in view, or a fixed number) with the contrast compensated, and sharpened as soon as the mouse pauses.
 - Loading localization files no longer needs the *Indexing* step before circular picking (see *Picks*), and the spatial index used for zoomed views is now stored in the files (see *Files*).
-
-### 3D rotation window
-- `View > 3D view` (Ctrl+Shift+R, replacing *Update rotation window*) opens the rotation window on the single selected pick or, without a pick, on the current field of view, so any region can be inspected in 3D by zooming to it; pressed again on unchanged content it only raises the window. *Save rotated localizations* records the field's bounds as the pick.
 - The rotation window renders in the background like the main window: rotating and panning never block the GUI, a burst of mouse moves renders only the newest orientation, large picks are previewed with a subset of localizations while dragging (sized by the localizations in view, not by the loaded total) and sharpened as soon as the drag pauses, and the renders use the GPU when it is enabled.
-- The rotation window rotates about the structure at the center of the view.
 - 3D animations are built in the background at a resolution of your choice (`Resolution (px)` in the animation dialog, independent of the window's size, e.g. 1920 x 1080), with a cancel button; failures are reported instead of silently producing nothing; the frames use the GPU when it is enabled.
-- Availability of the 3D window is evaluated when channels are closed.
-
-### Picks
-- Circular picks no longer index the localizations first: they query the spatial index built when a channel is loaded, which serves any pick diameter, so the *Indexing localizations...* wait (about a second per million localizations, for every channel, again after each pick-size change) is gone from picking, pick similar, counting, combining, removing, aligning and undrifting from picks. The old method can still be used via API.
-
-### Files
-- Localization files carry their spatial index: `picasso.io.save_locs` stores the render pyramid in the HDF5 group `/render_index` (files of 100,000 localizations or more; `render_index=True/False` overrides), and Render reads it instead of building one when opening the file, after checking that it still describes the localizations (a file rewritten by a script without `save_locs` is simply re-indexed). See the [documentation](https://picassosr.readthedocs.io/en/latest/files.html#spatial-index).
 - Localizations are standardized to float32 floating-point columns and a uint32 `frame` on loading, saving and in the processing functions (`picasso.lib.standardize_dtypes`, via `ensure_sanity`), the dtypes Localize writes. Pipelines that had promoted columns to float64 (undrifting, z fitting, imports) now produce files and DataFrames half the size, and the GPU renderer no longer converts such columns on every render.
-
-### Settings
-- The user settings file (`~/.picasso/settings.yaml`) is no longer lost when it cannot be read: the unreadable file is kept as `settings.yaml.broken`, a warning is logged and Render reports it at startup, and every save keeps the previous file as `settings.yaml.bak` and writes atomically. Render also writes the `Render` settings it does not find (`cpu_utilization`, `interaction_subsample`, `max_blur_width`, `gpu`) with their defaults on start, as the other Picasso settings are, so they are visible and editable. See the [documentation](https://picassosr.readthedocs.io/en/latest/others.html#user-settings-file).
-
-### Installers
-- The Windows one-click installer's *GPU* edition is renamed *CUDA* (`Picasso-Windows-64bit-CUDA-<version>.exe`, installs to `C:\Picasso-CUDA`; built by `create_installer_windows_cuda.bat`, pip extra `installer_cuda`): GPU rendering is in both editions now, the CUDA edition only adds the CUDA runtime for fitting.
-- The macOS app renders on the GPU: the launcher apps of the DMG are marked as Apple-silicon native (they used to start under Rosetta, which made the GPU initialization fail silently and fall back to the CPU). `create_macos_dmg.sh` also copes with slow Finder registration of the large image and can be re-run after a failure.
-
-### API
-- `picasso.render` is a package (`kernels`, `geometry`, `splat`, `scene`, `overlays_qt`, `animation`, `backend`, `gpu`); every former `picasso.render.*` name is still importable from `picasso.render`. Importing it still never loads PyQt6 or wgpu.
 - New `picasso.render.backend` seam: `SplatBackend` (CPU and wgpu implementations), `SplatBackendError`, `describe_active()`, `release_uploads()`, `gpu_settings()`; `picasso.render.render` itself always uses the CPU kernels, `render_scene` goes through the selected backend.
 - `picasso.render.render` and `render_scene` accept `max_blur_width`, `global_precision` (the blur of *Global loc. prec.*) and `indices` (per-channel row selections rendered without copying the DataFrame).
 - `picasso.render.build_animation` gained a `cancel` callback and returns whether the build completed.
 - New `picasso.spatial_index` functions: `query_rect`, `query_circle` (circular picks through the pyramid), `save_render_index`, `read_render_index`, `validate_render_index`, `load_render_index`. `picasso.postprocess.picked_locs` and the functions taking `index_blocks` (`pick_similar`, `combine_locs_in_picks`, `remove_locs_in_picks`, `align_from_picked`, `undrift_from_fiducials`) accept a `spatial_index.RenderIndexPyramid` in that argument.
 - `picasso.io.save_locs` gained `render_index`; `picasso.lib.standardize_dtypes` is new.
-- New tests: golden images for every blur method on both backends, GPU parity and repeatability, async GUI rendering, 3D view, animation export, navigation, picks through the pyramid, stored index, dtype standardization, user settings safety.
-
-### Removed
-- *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.
-
-### Fixes
-- The `scipy.ndimage.filters` deprecation warning is gone.
-- Fixed: 3D histogram rendering scaled z unnecessarily.
-- `View > Show info` names the reason when a render fell back from the GPU to the CPU (for example a channel above the card's storage-binding limit).
-- Fixed `MemoryError: Allocation failed` while rendering on workstations: the multi-threaded CPU renderer kept every row chunk's full-size image until the end of a render, about two per worker; the chunks are now summed as they arrive, at most one image per worker plus one is alive, and the number of workers shrinks when the memory available at that moment would not hold them.
-- The display settings (main and 3D window) show the minimum blur only for the Gaussian blur methods that use it.
 
 ## 0.11.2
 - Fixed the calibrations stored in the camera config (z, experimental PSF and sCMOS) not being cleared when switching to a camera the config has no entry for.
