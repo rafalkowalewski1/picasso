@@ -1682,3 +1682,84 @@ class TestStandardizeDtypes:
         out = lib.ensure_sanity(locs, info)
         assert out["x"].dtype == np.float32
         assert out["frame"].dtype == np.uint32
+
+
+class TestSelectFrcRois:
+    @pytest.fixture
+    def uniform_locs(self):
+        rng = np.random.default_rng(0)
+        n = 50_000
+        return pd.DataFrame(
+            {
+                "x": rng.uniform(0, 100, n).astype(np.float32),
+                "y": rng.uniform(0, 100, n).astype(np.float32),
+            }
+        )
+
+    # pixel size 100 nm, so a 1000 nm ROI is 10 camera pixels
+    info = [{"Pixelsize": 100}]
+    viewport = ((0, 0), (100, 100))
+
+    def test_rois_inside_viewport_and_not_overlapping(self, uniform_locs):
+        rois = lib.select_frc_rois(
+            uniform_locs,
+            self.info,
+            self.viewport,
+            n_rois=40,
+            roi_size=1000,
+            min_locs=100,
+        )
+        assert 0 < len(rois) <= 40
+        for (y0, x0), (y1, x1) in rois:
+            assert y1 - y0 == pytest.approx(10)
+            assert x1 - x0 == pytest.approx(10)
+            assert y0 >= 0 and x0 >= 0 and y1 <= 100 and x1 <= 100
+        for a, ((ay0, ax0), _) in enumerate(rois):
+            for (by0, bx0), _ in rois[a + 1 :]:
+                overlap_y = abs(ay0 - by0) < 10 - 1e-9
+                overlap_x = abs(ax0 - bx0) < 10 - 1e-9
+                assert not (overlap_y and overlap_x)
+
+    def test_min_locs_respected(self, uniform_locs):
+        # ~500 locs per 10 x 10 px ROI; the right half is emptied
+        locs = uniform_locs[uniform_locs["x"] < 50]
+        rois = lib.select_frc_rois(
+            locs,
+            self.info,
+            self.viewport,
+            n_rois=50,
+            roi_size=1000,
+            min_locs=300,
+        )
+        assert len(rois) > 0
+        x = locs["x"].to_numpy()
+        y = locs["y"].to_numpy()
+        for (y0, x0), (y1, x1) in rois:
+            in_roi = (x >= x0) & (x < x1) & (y >= y0) & (y < y1)
+            assert in_roi.sum() >= 300
+
+    def test_no_rois_if_too_few_locs(self, uniform_locs):
+        rois = lib.select_frc_rois(
+            uniform_locs,
+            self.info,
+            self.viewport,
+            roi_size=1000,
+            min_locs=10_000,
+        )
+        assert rois == []
+
+    def test_deterministic_with_seed(self, uniform_locs):
+        kwargs = dict(n_rois=20, roi_size=1000, min_locs=100, random_seed=3)
+        a = lib.select_frc_rois(
+            uniform_locs, self.info, self.viewport, **kwargs
+        )
+        b = lib.select_frc_rois(
+            uniform_locs, self.info, self.viewport, **kwargs
+        )
+        assert a == b
+
+    def test_viewport_smaller_than_roi_raises(self, uniform_locs):
+        with pytest.raises(ValueError):
+            lib.select_frc_rois(
+                uniform_locs, self.info, ((0, 0), (5, 5)), roi_size=1000
+            )

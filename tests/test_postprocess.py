@@ -1119,6 +1119,53 @@ class TestFrc:
         frc_res = postprocess.frc(locs, info, viewport=viewport)
         assert frc_res["images"][0].shape[0] == frc_res["images"][0].shape[1]
 
+    def test_given_lp_skips_nena(self, locs, info, monkeypatch):
+        viewport = ((15, 15), (16, 16))
+        expected = postprocess.frc(locs, info, viewport=viewport)
+        lp = postprocess.nena(locs, info)[1]
+
+        def fail(*args, **kwargs):
+            raise AssertionError("nena must not run when lp is given")
+
+        monkeypatch.setattr(postprocess, "nena", fail)
+        frc_res = postprocess.frc(locs, info, viewport=viewport, lp=lp)
+        assert frc_res["resolution"] == pytest.approx(expected["resolution"])
+
+    def test_does_not_modify_locs(self, locs, info):
+        ref = locs.copy()
+        postprocess.frc(locs, info, viewport=((15, 15), (16, 16)))
+        pd.testing.assert_frame_equal(locs, ref)
+
+    def test_plot_without_resolution(self, locs, info):
+        frc_res = postprocess.frc(locs, info, viewport=((15, 15), (16, 16)))
+        frc_res["resolution"] = None
+        fig = postprocess.plot_frc(frc_res)
+        assert "n/a" in fig.axes[0].get_title()
+
+
+class TestFrcRois:
+    def test_results_per_roi(self, locs, info):
+        viewport = ((10, 10), (20, 20))
+        ref = locs.copy()
+        progress = []
+        result = postprocess.frc_rois(
+            locs,
+            info,
+            viewport,
+            n_rois=4,
+            roi_size=260,  # 2 camera pixels
+            min_locs=20,
+            callback=progress.append,
+        )
+        n = len(result["rois"])
+        assert 0 < n <= 4
+        assert len(result["frc_results"]) == n
+        assert result["resolutions"].shape == (n,)
+        assert (result["n_locs"] >= 20).all()
+        assert all("images" not in _ for _ in result["frc_results"])
+        assert progress[-1] == n
+        pd.testing.assert_frame_equal(locs, ref)
+
 
 class TestPairCorrelation:
     def test_shape(self, locs, info):

@@ -33,6 +33,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 # selects the PyQt6 binding (picasso core no longer imports PyQt6)
 from matplotlib.backends.backend_qt5agg import FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
+from matplotlib.patches import Rectangle
 from scipy.ndimage import gaussian_filter
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.cluster import KMeans
@@ -4844,6 +4845,7 @@ class InfoDialog(lib.Dialog):
         self.lp = None
         self.nena_result = {}
         self.frc_result = {}
+        self.frc_rois_window = None
         self.change_fov = ChangeFOV(self.window)
 
         # Scroll area
@@ -4996,6 +4998,74 @@ class InfoDialog(lib.Dialog):
         show_frc_button.setToolTip("Display FRC fit.")
         show_frc_button.clicked.connect(self.show_frc_plot)
         self.frc_grid.addWidget(show_frc_button, 2, 1)
+
+        # FRC in several random ROIs, for the uncertainty; collapsed by
+        # default to keep the dialog compact
+        self.frc_rois_toggle = QtWidgets.QToolButton()
+        self.frc_rois_toggle.setText("FRC in several ROIs (uncertainty)")
+        self.frc_rois_toggle.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.frc_rois_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.frc_rois_toggle.setCheckable(True)
+        self.frc_rois_toggle.setAutoRaise(True)
+        self.frc_rois_toggle.toggled.connect(self.toggle_frc_rois)
+        self.frc_grid.addWidget(self.frc_rois_toggle, 3, 0, 1, 2)
+        self.frc_rois_widget = QtWidgets.QWidget()
+        self.frc_rois_widget.setVisible(False)
+        self.frc_grid.addWidget(self.frc_rois_widget, 4, 0, 1, 2)
+        rois_grid = QtWidgets.QGridLayout(self.frc_rois_widget)
+        rois_grid.setContentsMargins(0, 0, 0, 0)
+        frc_rois_label = QtWidgets.QLabel("FRC resolution, ROIs (nm):")
+        frc_rois_label.setToolTip(
+            "Mean ± standard deviation of the FRC resolution in several\n"
+            " random, non-overlapping square ROIs placed in the current"
+            " FOV."
+        )
+        rois_grid.addWidget(frc_rois_label, 0, 0)
+        self.frc_rois_resolution = QtWidgets.QLabel("-")
+        rois_grid.addWidget(self.frc_rois_resolution, 0, 1)
+        rois_grid.addWidget(QtWidgets.QLabel("Number of ROIs:"), 1, 0)
+        self.frc_n_rois = QtWidgets.QSpinBox()
+        self.frc_n_rois.setRange(1, 10_000)
+        self.frc_n_rois.setValue(30)
+        self.frc_n_rois.setToolTip(
+            "Maximum number of ROIs; fewer are used if the FOV does not\n"
+            " fit enough ROIs with enough localizations."
+        )
+        rois_grid.addWidget(self.frc_n_rois, 1, 1)
+        rois_grid.addWidget(QtWidgets.QLabel("ROI side length (µm):"), 2, 0)
+        self.frc_roi_size = QtWidgets.QDoubleSpinBox()
+        self.frc_roi_size.setRange(0.5, 1000)
+        self.frc_roi_size.setSingleStep(0.5)
+        self.frc_roi_size.setDecimals(1)
+        self.frc_roi_size.setValue(5)
+        rois_grid.addWidget(self.frc_roi_size, 2, 1)
+        rois_grid.addWidget(
+            QtWidgets.QLabel("Min. localizations per ROI:"), 3, 0
+        )
+        self.frc_min_locs = QtWidgets.QSpinBox()
+        self.frc_min_locs.setRange(10, 10_000_000)
+        self.frc_min_locs.setSingleStep(100)
+        self.frc_min_locs.setValue(1000)
+        self.frc_min_locs.setToolTip(
+            "ROIs with fewer localizations are not used."
+        )
+        rois_grid.addWidget(self.frc_min_locs, 3, 1)
+        calculate_frc_rois_button = QtWidgets.QPushButton(
+            "Calculate FRC in ROIs"
+        )
+        calculate_frc_rois_button.setToolTip(
+            "Calculate the FRC resolution in random ROIs and review them."
+        )
+        calculate_frc_rois_button.clicked.connect(self.calculate_frc_rois)
+        rois_grid.addWidget(calculate_frc_rois_button, 4, 0)
+        review_frc_rois_button = QtWidgets.QPushButton("Review ROIs")
+        review_frc_rois_button.setToolTip(
+            "Show the ROIs and their FRC resolutions; exclude bad ROIs."
+        )
+        review_frc_rois_button.clicked.connect(self.show_frc_rois)
+        rois_grid.addWidget(review_frc_rois_button, 4, 1)
 
         # FOV
         fov_groupbox = QtWidgets.QGroupBox("Field of view")
@@ -5241,6 +5311,83 @@ class InfoDialog(lib.Dialog):
             else:
                 self.frc_resolution.setText(f"{res_nm:.2f} nm")
 
+    def toggle_frc_rois(self, checked: bool) -> None:
+        """Show or hide the widgets for FRC in several ROIs."""
+        self.frc_rois_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow
+            if checked
+            else QtCore.Qt.ArrowType.RightArrow
+        )
+        self.frc_rois_widget.setVisible(checked)
+
+    def calculate_frc_rois(self) -> None:
+        """Calculate FRC resolution in random ROIs of the current FOV and
+        open the review window."""
+        channel = self.window.view.get_channel(
+            "Calculate FRC resolution in ROIs"
+        )
+        if channel is None:
+            return
+        locs = self.window.view.locs[channel]
+        info = self.window.view.infos[channel]
+        viewport = self.window.view.viewport
+        n_rois = self.frc_n_rois.value()
+        # close the previous review window, so that it is not mistaken
+        # for the new results while they are computed
+        if self.frc_rois_window is not None:
+            self.frc_rois_window.close()
+            self.frc_rois_window = None
+        progress = lib.ProgressDialog(
+            "Calculating FRC in ROIs", 0, n_rois, self
+        )
+        try:
+            result = postprocess.frc_rois(
+                locs,
+                info,
+                viewport,
+                n_rois=n_rois,
+                roi_size=1000 * self.frc_roi_size.value(),
+                min_locs=self.frc_min_locs.value(),
+                callback=progress.set_value,
+            )
+        except (ValueError, RuntimeError) as error:
+            progress.close()
+            QtWidgets.QMessageBox.warning(self, "FRC in ROIs", str(error))
+            return
+        progress.close()
+        n_found = len(result["rois"])
+        if n_found == 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "FRC in ROIs",
+                "No ROI with enough localizations fits in the current FOV."
+                " Zoom out, reduce the ROI side length or the minimum"
+                " number of localizations per ROI.",
+            )
+            return
+        pixelsize = lib.get_from_metadata(info, "Pixelsize")
+        self.frc_rois_window = FRCRoisWindow(
+            self, locs, viewport, pixelsize, result
+        )
+        self.frc_rois_window.show()
+        # after showing the window, so the note refers to what is shown
+        if n_found < n_rois:
+            QtWidgets.QMessageBox.information(
+                self.frc_rois_window,
+                "FRC in ROIs",
+                f"Only {n_found} of {n_rois} requested non-overlapping ROIs"
+                " with enough localizations fit in the current FOV, so the"
+                " uncertainty estimate is less reliable.",
+            )
+
+    def show_frc_rois(self) -> None:
+        """Show the review window of the FRC ROIs."""
+        if self.frc_rois_window is None:
+            self.calculate_frc_rois()
+        else:
+            self.frc_rois_window.show()
+            self.frc_rois_window.raise_()
+
     def calculate_nena_lp(self) -> None:
         """Calculate NeNA precision in a given channel."""
         channel = self.window.view.get_channel("Calculate NeNA precision")
@@ -5355,6 +5502,265 @@ class FRCPlotWindow(QtWidgets.QTabWidget):
     def plot(self, frc_result: dict) -> None:
         postprocess.plot_frc(frc_result, self.figure)
         self.canvas.draw()
+
+
+class FRCRoisWindow(QtWidgets.QWidget):
+    """Review the FRC resolutions calculated in several ROIs.
+
+    Lists the ROIs with their resolutions; unticking an ROI excludes it
+    from the mean and standard deviation. The overview shows where the
+    ROIs lie in the FOV (used: green, excluded: gray, selected: red)
+    and the lower plot shows the FRC curve of the selected ROI.
+    """
+
+    COLUMNS = ["Use", "ROI", "x (µm)", "y (µm)", "Locs", "FRC (nm)"]
+
+    def __init__(
+        self,
+        info_dialog: InfoDialog,
+        locs: pd.DataFrame,
+        viewport: tuple[tuple[float, float], tuple[float, float]],
+        pixelsize: float,
+        result: dict,
+    ) -> None:
+        super().__init__()
+        self.info_dialog = info_dialog
+        self.result = result
+        self.pixelsize = pixelsize
+        self.setWindowTitle("FRC in ROIs")
+        this_directory = os.path.dirname(os.path.realpath(__file__))
+        icon_path = os.path.join(this_directory, "icons", "render.ico")
+        self.setWindowIcon(QtGui.QIcon(icon_path))
+        self.resize(1100, 700)
+        resolutions = result["resolutions"]
+        # ROIs without a 1/7 crossing cannot enter the statistics
+        self.used = np.isfinite(resolutions)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        left = QtWidgets.QVBoxLayout()
+        layout.addLayout(left, 2)
+        self.summary = QtWidgets.QLabel()
+        self.summary.setWordWrap(True)
+        left.addWidget(self.summary)
+        self.table = QtWidgets.QTableWidget(
+            len(resolutions), len(self.COLUMNS)
+        )
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        to_um = pixelsize / 1000
+        for row, (((y0, x0), (y1, x1)), n, res) in enumerate(
+            zip(result["rois"], result["n_locs"], resolutions)
+        ):
+            use = QtWidgets.QTableWidgetItem()
+            if np.isfinite(res):
+                use.setFlags(
+                    QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                    | QtCore.Qt.ItemFlag.ItemIsEnabled
+                    | QtCore.Qt.ItemFlag.ItemIsSelectable
+                )
+                use.setCheckState(QtCore.Qt.CheckState.Checked)
+            else:
+                use.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable)
+                use.setToolTip("No 1/7 crossing, cannot be used.")
+            self.table.setItem(row, 0, use)
+            values = [
+                f"{row + 1}",
+                f"{0.5 * (x0 + x1) * to_um:.1f}",
+                f"{0.5 * (y0 + y1) * to_um:.1f}",
+                f"{n:,}",
+                f"{res:.2f}" if np.isfinite(res) else "n/a",
+            ]
+            for col, value in enumerate(values, start=1):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setTextAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
+                self.table.setItem(row, col, item)
+        self.table.resizeColumnsToContents()
+        self.table.itemChanged.connect(self.on_item_changed)
+        self.table.itemSelectionChanged.connect(self.update_plots)
+        left.addWidget(self.table)
+        export_button = QtWidgets.QPushButton("Export table")
+        export_button.setToolTip("Save the per-ROI results as .csv.")
+        export_button.clicked.connect(self.export)
+        left.addWidget(export_button)
+
+        right = QtWidgets.QVBoxLayout()
+        layout.addLayout(right, 3)
+        self.figure = plt.Figure(constrained_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.mpl_connect("button_press_event", self.on_click)
+        right.addWidget(self.canvas)
+        right.addWidget(NavigationToolbar2QT(self.canvas, self))
+
+        # overview image of the FOV, rendered once
+        (y_min, x_min), (y_max, x_max) = viewport
+        x = locs["x"].to_numpy()
+        y = locs["y"].to_numpy()
+        in_view = (x > x_min) & (x < x_max) & (y > y_min) & (y < y_max)
+        n_bins = 500
+        aspect = (y_max - y_min) / (x_max - x_min)
+        bins = (
+            max(int(n_bins * min(aspect, 1)), 1),
+            max(int(n_bins / max(aspect, 1)), 1),
+        )
+        self.overview, _, _ = np.histogram2d(
+            y[in_view],
+            x[in_view],
+            bins=bins,
+            range=((y_min, y_max), (x_min, x_max)),
+        )
+        # axes in um, origin top-left as in the Render window
+        self.extent = (
+            x_min * to_um,
+            x_max * to_um,
+            y_max * to_um,
+            y_min * to_um,
+        )
+        self.update_summary()
+        self.table.selectRow(0)
+        self.update_plots()
+
+    def on_item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
+        if item.column() != 0:
+            return
+        self.used[item.row()] = (
+            item.checkState() == QtCore.Qt.CheckState.Checked
+        )
+        self.update_summary()
+        self.update_plots()
+
+    def selected_row(self) -> int | None:
+        rows = self.table.selectionModel().selectedRows()
+        return rows[0].row() if rows else None
+
+    def update_summary(self) -> None:
+        """Update the mean and standard deviation of the used ROIs."""
+        resolutions = self.result["resolutions"][self.used]
+        n_total = len(self.result["resolutions"])
+        if len(resolutions) == 0:
+            text = "-"
+            self.summary.setText(
+                f"No ROI used (0 of {n_total}). Tick ROIs in the table."
+            )
+        else:
+            mean = np.mean(resolutions)
+            # sample standard deviation; undefined for a single ROI
+            std = np.std(resolutions, ddof=1) if len(resolutions) > 1 else 0
+            text = f"{mean:.2f} ± {std:.2f} nm"
+            self.summary.setText(
+                f"<b>FRC resolution: {text}</b> (mean ± std)<br>"
+                f"median {np.median(resolutions):.2f} nm, "
+                f"{len(resolutions)} of {n_total} ROIs used, "
+                "NeNA "
+                f"{self.result['lp'] * self.pixelsize:.2f} nm"
+            )
+        self.info_dialog.frc_rois_resolution.setText(text)
+
+    def update_plots(self) -> None:
+        """Redraw the ROI overview and the selected ROI's FRC curve."""
+        self.figure.clear()
+        ax_map, ax_frc = self.figure.subplots(2, 1, height_ratios=[3, 2])
+        ax_map.imshow(
+            np.log1p(self.overview),
+            cmap="gray",
+            extent=self.extent,
+            interpolation="nearest",
+        )
+        selected = self.selected_row()
+        to_um = self.pixelsize / 1000
+        for k, ((y0, x0), (y1, x1)) in enumerate(self.result["rois"]):
+            if k == selected:
+                color, width = "red", 2.0
+            elif self.used[k]:
+                color, width = "lime", 1.0
+            else:
+                color, width = "gray", 1.0
+            ax_map.add_patch(
+                Rectangle(
+                    (x0 * to_um, y0 * to_um),
+                    (x1 - x0) * to_um,
+                    (y1 - y0) * to_um,
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=width,
+                )
+            )
+        ax_map.set_xlabel("x (µm)")
+        ax_map.set_ylabel("y (µm)")
+        ax_map.set_title("ROIs (click to select)")
+        ax_map.grid(False)
+
+        if selected is not None:
+            frc_result = self.result["frc_results"][selected]
+            q = frc_result["frequencies"]
+            ax_frc.plot(
+                q,
+                frc_result["frc_curve"],
+                color="gray",
+                alpha=0.5,
+                label="FRC curve",
+            )
+            ax_frc.plot(q, frc_result["frc_curve_smooth"], label="Smoothed")
+            ax_frc.axhline(
+                1 / 7,
+                color="black",
+                linewidth=1.0,
+                linestyle="--",
+                label="1/7 threshold",
+            )
+            res = frc_result["resolution"]
+            res_text = "n/a" if res is None else f"{res:.2f} nm"
+            ax_frc.set_title(f"ROI {selected + 1}: {res_text}")
+            ax_frc.legend()
+        ax_frc.set_xlabel("Spatial frequency (nm⁻¹)")
+        ax_frc.set_ylabel("FRC")
+        self.canvas.draw()
+
+    def on_click(self, event) -> None:
+        """Select the ROI under a click in the overview."""
+        if event.inaxes is None or event.inaxes is not self.figure.axes[0]:
+            return
+        if self.canvas.toolbar is not None and self.canvas.toolbar.mode:
+            return  # zooming or panning
+        to_px = 1000 / self.pixelsize
+        x, y = event.xdata * to_px, event.ydata * to_px
+        for k, ((y0, x0), (y1, x1)) in enumerate(self.result["rois"]):
+            if x0 <= x < x1 and y0 <= y < y1:
+                self.table.selectRow(k)
+                return
+
+    def export(self) -> None:
+        """Save the per-ROI results as .csv."""
+        path, ext = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export FRC ROIs", "frc_rois.csv", filter="*.csv"
+        )
+        if not path:
+            return
+        to_um = self.pixelsize / 1000
+        rois = np.array(self.result["rois"])  # (n, 2, 2): (min, max) x (y, x)
+        pd.DataFrame(
+            {
+                "roi": np.arange(1, len(rois) + 1),
+                "x_min_um": rois[:, 0, 1] * to_um,
+                "y_min_um": rois[:, 0, 0] * to_um,
+                "x_max_um": rois[:, 1, 1] * to_um,
+                "y_max_um": rois[:, 1, 0] * to_um,
+                "n_locs": self.result["n_locs"],
+                "resolution_nm": self.result["resolutions"],
+                "used": self.used,
+            }
+        ).to_csv(path, index=False)
 
 
 class ZoomableLabel(QtWidgets.QLabel):

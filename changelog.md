@@ -18,6 +18,7 @@ Last change: 25-SEP-2026 CEST
 - Apply expression to localizations expands the canvas (metadata's `Height` and `Width`) if x and y positions are out of range.
 - Faster circular picking of localizations.
 - Faster FRC.
+- FRC in several random ROIs (*Info* dialog, *FRC in several ROIs*).
 - `picasso.render` is distributed as a package (`kernels`, `geometry`, `splat`, `scene`, `overlays_qt`, `animation`, `backend`, `gpu`); every former `picasso.render.*` name is still importable from `picasso.render`.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
 - Fixed NeNA (and FRC) overwriting group columns of localizations.

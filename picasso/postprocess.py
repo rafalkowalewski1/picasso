@@ -2643,7 +2643,10 @@ def plot_frc(
     )
     ax.set_xlabel("Spatial frequency (nm\u207b\u00b9)")
     ax.set_ylabel("FRC")
-    ax.set_title(f"FIRE resolution: {res:.2f} nm")
+    if res is None:
+        ax.set_title("FIRE resolution: n/a (no 1/7 crossing)")
+    else:
+        ax.set_title(f"FIRE resolution: {res:.2f} nm")
     ax.legend()
     return fig
 
@@ -2654,6 +2657,7 @@ def frc(
     viewport: tuple[tuple[float, float], tuple[float, float]],
     *,
     random_seed: int = 42,
+    lp: float | None = None,
 ) -> dict:
     """Calculate the Fourier Ring Correlation (FRC) resolution.
 
@@ -2671,6 +2675,10 @@ def frc(
         corner.
     random_seed : int, optional
         Random seed for splitting the data into halves. Default is 42.
+    lp : float or None, optional
+        Localization precision (camera pixels) that sets the bin size of
+        the rendered images. If None (default), NeNA of ``locs`` is
+        used.
 
     Returns
     -------
@@ -2681,7 +2689,8 @@ def frc(
         (2 grayscale images rendered and masked).
     """
     pixelsize = lib.get_from_metadata(info, "Pixelsize", raise_error=True)
-    lp = nena(locs, info)[1]
+    if lp is None:
+        lp = nena(locs, info)[1]
     # correct for the viewport to be square
     viewport_width = viewport[1][1] - viewport[0][1]
     viewport_height = viewport[1][0] - viewport[0][0]
@@ -2724,6 +2733,102 @@ def frc(
         "images": images,
     }
     return frc_result
+
+
+def frc_rois(
+    locs: pd.DataFrame,
+    info: list[dict],
+    viewport: tuple[tuple[float, float], tuple[float, float]],
+    *,
+    n_rois: int = 30,
+    roi_size: float = 5000.0,
+    min_locs: int = 1000,
+    random_seed: int = 42,
+    callback: Callable[[int], None] | None = None,
+) -> dict:
+    """Calculate the FRC resolution in several random ROIs.
+
+    Places up to ``n_rois`` non-overlapping square ROIs in ``viewport``
+    (see ``lib.select_frc_rois``) and runs ``frc`` in each of them. The
+    image bin size is set by the NeNA of all ``locs``, computed once,
+    so that the ROIs are comparable. The spread of the resolutions
+    across ROIs estimates the uncertainty of the FRC resolution.
+
+    Parameters
+    ----------
+    locs : pd.DataFrame
+        Localization list.
+    info : list of dicts
+        Metadata of the localizations list.
+    viewport : tuple of floats
+        Region ((y_min, x_min), (y_max, x_max)) in camera pixels in
+        which the ROIs are placed.
+    n_rois : int, optional
+        Maximum number of ROIs. Default is 30.
+    roi_size : float, optional
+        Side length of the square ROIs in nm. Default is 5000.
+    min_locs : int, optional
+        Minimum number of localizations per ROI. Default is 1000.
+    random_seed : int, optional
+        Random seed for the ROI placement and the splitting into
+        halves. Default is 42.
+    callback : function or None, optional
+        Function to display progress, called with the number of ROIs
+        processed. If None, no progress is displayed.
+
+    Returns
+    -------
+    result : dict
+        Dictionary with keys "rois" (viewports of the ROIs in camera
+        pixels), "n_locs" (localizations per ROI), "frc_results"
+        (list of ``frc`` results, one per ROI), "resolutions" (in nm,
+        NaN where the FRC curve does not cross the 1/7 threshold) and
+        "lp" (NeNA in camera pixels).
+    """
+    rois = lib.select_frc_rois(
+        locs,
+        info,
+        viewport,
+        n_rois=n_rois,
+        roi_size=roi_size,
+        min_locs=min_locs,
+        random_seed=random_seed,
+    )
+    lp = nena(locs, info)[1]
+    x = locs["x"].to_numpy()
+    y = locs["y"].to_numpy()
+    n_locs = []
+    frc_results = []
+    for k, ((y0, x0), (y1, x1)) in enumerate(rois):
+        if callable(callback):
+            callback(k)
+        in_roi = (x > x0) & (y > y0) & (x < x1) & (y < y1)
+        n_locs.append(int(in_roi.sum()))
+        frc_result = frc(
+            locs.loc[in_roi],
+            info,
+            ((y0, x0), (y1, x1)),
+            random_seed=random_seed,
+            lp=lp,
+        )
+        # drop the rendered images: tens of ROIs would hold GBs
+        del frc_result["images"]
+        frc_results.append(frc_result)
+    if callable(callback):
+        callback(len(rois))
+    resolutions = np.array(
+        [
+            np.nan if _["resolution"] is None else _["resolution"]
+            for _ in frc_results
+        ]
+    )
+    return {
+        "rois": rois,
+        "n_locs": np.array(n_locs, dtype=int),
+        "frc_results": frc_results,
+        "resolutions": resolutions,
+        "lp": lp,
+    }
 
 
 def _frc(

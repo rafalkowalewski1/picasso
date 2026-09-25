@@ -1576,6 +1576,98 @@ def hist2d_numba(
     return local.sum(axis=0)
 
 
+def select_frc_rois(
+    locs: pd.DataFrame,
+    info: list[dict],
+    viewport: tuple[tuple[float, float], tuple[float, float]],
+    *,
+    n_rois: int = 30,
+    roi_size: float = 5000.0,
+    min_locs: int = 1000,
+    random_seed: int = 42,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Randomly place non-overlapping square ROIs, e.g., for FRC in
+    several ROIs (``postprocess.frc_rois``).
+
+    ROIs are placed on a grid with a step of a tenth of the ROI side
+    length inside ``viewport``, in random order; a candidate is kept if
+    it holds at least ``min_locs`` localizations and does not overlap
+    an already kept ROI. Placement stops once ``n_rois`` ROIs are kept
+    or no candidates are left, so fewer ROIs may be returned.
+
+    Parameters
+    ----------
+    locs : pd.DataFrame
+        Localization list.
+    info : list of dicts
+        Metadata of the localizations list.
+    viewport : tuple of floats
+        Region ((y_min, x_min), (y_max, x_max)) in camera pixels in
+        which the ROIs are placed.
+    n_rois : int, optional
+        Maximum number of ROIs. Default is 30.
+    roi_size : float, optional
+        Side length of the square ROIs in nm. Default is 5000.
+    min_locs : int, optional
+        Minimum number of localizations per ROI. Default is 1000.
+    random_seed : int, optional
+        Random seed for the ROI placement. Default is 42.
+
+    Returns
+    -------
+    rois : list of tuples
+        Viewports ((y_min, x_min), (y_max, x_max)) of the selected ROIs
+        in camera pixels.
+
+    Raises
+    ------
+    ValueError
+        If ``viewport`` is smaller than one ROI.
+    """
+    pixelsize = get_from_metadata(info, "Pixelsize", raise_error=True)
+    (y_min, x_min), (y_max, x_max) = viewport
+    n_sub = 10  # grid steps per ROI side
+    step = roi_size / pixelsize / n_sub
+    ny = int((y_max - y_min) / step)
+    nx = int((x_max - x_min) / step)
+    if ny < n_sub or nx < n_sub:
+        raise ValueError(
+            f"The viewport is smaller than one ROI of {roi_size:.0f} nm."
+        )
+    # localization counts per grid cell and their integral image, so
+    # that the count of any grid-aligned ROI is exact and O(1)
+    counts, _, _ = np.histogram2d(
+        locs["y"].to_numpy(),
+        locs["x"].to_numpy(),
+        bins=(ny, nx),
+        range=((y_min, y_min + ny * step), (x_min, x_min + nx * step)),
+    )
+    integral = np.zeros((ny + 1, nx + 1))
+    integral[1:, 1:] = counts.cumsum(0).cumsum(1)
+    roi_counts = (
+        integral[n_sub:, n_sub:]
+        - integral[:-n_sub, n_sub:]
+        - integral[n_sub:, :-n_sub]
+        + integral[:-n_sub, :-n_sub]
+    )
+    candidates = np.argwhere(roi_counts >= min_locs)
+    rng = np.random.default_rng(random_seed)
+    candidates = candidates[rng.permutation(len(candidates))]
+
+    occupied = np.zeros((ny, nx), dtype=bool)
+    rois = []
+    for i, j in candidates:
+        if len(rois) == n_rois:
+            break
+        if occupied[i : i + n_sub, j : j + n_sub].any():
+            continue
+        occupied[i : i + n_sub, j : j + n_sub] = True
+        y0 = y_min + i * step
+        x0 = x_min + j * step
+        rois.append(((y0, x0), (y0 + n_sub * step, x0 + n_sub * step)))
+    return rois
+
+
 def append_to_rec(
     rec_array: np.recarray,
     data: FloatArray1D | IntArray1D,
