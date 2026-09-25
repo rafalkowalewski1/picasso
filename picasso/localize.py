@@ -66,6 +66,10 @@ from . import (
 # aliased: `transforms` is used as a local name for lists of channel
 # transforms all over this module
 from . import transforms as tform
+
+# aliased: `wavelet` is the keyword that passes the wavelet identification
+# settings all over this module
+from . import wavelet as wavelets
 from .fitting import (
     gaussfit,
     gaussfit_cuda,
@@ -135,9 +139,10 @@ def _default_n_z_starts(calibration: dict) -> int:
     )
 
 
-# The columns under base are always available and the keys such as "3D
-# only" will be displayed in the save columns dialog in the GUI for
-# clarity
+# The columns under base are available for most fits (spherical Gaussians
+# have no ellipticity, and spots identified by wavelet segmentation have no
+# net gradient) and the keys such as "3D only" will be displayed in the save
+# columns dialog in the GUI for clarity
 LOCALIZATION_COLUMNS = {
     "Base": [
         "frame",
@@ -189,6 +194,12 @@ TEMPORAL_MEDIAN_CACHE_BYTES = 512 * 1024**2
 # Gaussian filter for spot identification
 GAUSSIAN_FILTER_TRUNCATE = 4.0
 GAUSSIAN_FILTER_MODE = "nearest"
+#: Spot identification methods, recorded under ``"Identification Method"`` in
+#: the identification metadata: local maxima thresholded by their net
+#: gradient, or the wavelet segmentation of :mod:`picasso.wavelet`.
+IDENTIFY_METHOD_NET_GRADIENT = "net gradient"
+IDENTIFY_METHOD_WAVELET = "wavelet"
+IDENTIFY_METHODS = (IDENTIFY_METHOD_NET_GRADIENT, IDENTIFY_METHOD_WAVELET)
 # Default bead-detection / matching parameters for
 # `calibrate_lateral_transform`.
 _LATERAL_MATCH_MAX_DIST_PX = 40.0  # max distance between matched pair
@@ -470,9 +481,9 @@ def _as_roi_list(
 
 
 def _as_ng_list(
-    minimum_ng: float | list | np.ndarray,
+    minimum_ng: float | list | np.ndarray | None,
     n_rois: int,
-) -> list[float]:
+) -> list[float] | list[None]:
     """Normalize ``minimum_ng`` into one threshold per ROI.
 
     A scalar (the usual case) applies to every ROI. A sequence gives each
@@ -483,14 +494,15 @@ def _as_ng_list(
 
     Parameters
     ----------
-    minimum_ng : float or sequence of float
-        Minimum net gradient, shared or one per ROI.
+    minimum_ng : float, sequence of float or None
+        Minimum net gradient, shared or one per ROI. None (the wavelet
+        identification, which has none) gives None for every ROI.
     n_rois : int
         Number of ROIs the thresholds have to cover.
 
     Returns
     -------
-    list of float
+    list of float or None
         ``n_rois`` thresholds.
 
     Raises
@@ -498,6 +510,9 @@ def _as_ng_list(
     ValueError
         If a sequence is given whose length is neither 1 nor ``n_rois``.
     """
+    if minimum_ng is None:
+        # the wavelet identification has no net gradient threshold
+        return [None] * n_rois
     if isinstance(minimum_ng, (list, tuple, np.ndarray, pd.Series)):
         ngs = [float(_) for _ in minimum_ng]
     else:
@@ -990,18 +1005,38 @@ def gaussian_filter_radius(
     return int(float(truncate) * float(sigma) + 0.5)
 
 
+def _identification_crop_pad(
+    box: int, wavelet: wavelets.WaveletParameters | None = None
+) -> int:
+    """Number of pixels ``identify_in_frame`` reads outside a ROI.
+
+    The net gradient is computed up to ``int(box / 2) + 1`` pixels from
+    the ROI. The wavelet identification crops that much and the reach of
+    its wavelet planes on top, so that the planes, and with them the
+    regions of the spots at the ROI border, are the same as in the whole
+    frame.
+    """
+    pad = int(box / 2) + 1
+    if wavelet is not None:
+        pad += wavelets.WAVELET_RADIUS
+    return pad
+
+
 def identification_roi_pad(
-    box: int, gaussian_filter_sigma: float | None = None
+    box: int,
+    gaussian_filter_sigma: float | None = None,
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> int:
     """Number of pixels a ROI has to be grown by so that every pixel the
     identification actually reads is validly filtered.
 
-    ``identify_in_frame`` computes gradients up to ``int(box / 2) + 1``
-    pixels outside a ROI. A Gaussian filter mixes in everything within
-    its kernel radius, so with the filter on the valid region has to
-    extend that much further still - otherwise the zeros that a
+    ``identify_in_frame`` reads pixels up to ``int(box / 2) + 1`` pixels
+    outside a ROI, plus ``wavelet.WAVELET_RADIUS`` for the wavelet
+    identification. A Gaussian filter mixes in everything within its
+    kernel radius, so with the filter on the valid region has to extend
+    that much further still - otherwise the zeros that a
     ``TemporalMedianMovie`` leaves outside its bounding box get smeared
-    into the very pixels those gradients are computed from.
+    into the very pixels the identification reads.
 
     Parameters
     ----------
@@ -1010,13 +1045,18 @@ def identification_roi_pad(
     gaussian_filter_sigma : float or None, optional
         Sigma of the spatial Gaussian filter, see
         ``GaussianFilteredMovie``. Default is None (no filtering).
+    wavelet : wavelet.WaveletParameters or None, optional
+        Settings of the wavelet identification, or None for the net
+        gradient one. Default is None.
 
     Returns
     -------
     pad : int
         Padding in pixels.
     """
-    return int(box / 2) + 1 + gaussian_filter_radius(gaussian_filter_sigma)
+    return _identification_crop_pad(box, wavelet) + gaussian_filter_radius(
+        gaussian_filter_sigma
+    )
 
 
 class GaussianFilteredMovie:
@@ -1444,25 +1484,46 @@ class SummedChannelsMovie:
         self.close()
 
 
+def _identify_in_crop(
+    image: lib.FloatArray2D,
+    minimum_ng: float | None,
+    box: int,
+    wavelet: wavelets.WaveletParameters | None,
+) -> tuple[lib.IntArray1D, lib.IntArray1D, lib.FloatArray1D | None]:
+    """Identify spots in a float32 image with the selected method; the
+    net gradient is None for the wavelet identification."""
+    if wavelet is None:
+        return identify_in_image(image, minimum_ng, box)
+    y, x = wavelets.identify_in_image(image, box, wavelet)
+    return y, x, None
+
+
 def identify_in_frame(
     frame: lib.IntArray2D,
-    minimum_ng: float | list | np.ndarray,
+    minimum_ng: float | list | np.ndarray | None,
     box: int,
     roi: tuple[tuple[int, int], tuple[int, int]] | list | None = None,
-) -> tuple[lib.IntArray1D, lib.IntArray1D, lib.FloatArray1D]:
-    """Identify local maxima in a single frame within optionally
-    specified subregion(s) (ROI) and calculate the net gradient at those
-    maxima.
+    *,
+    wavelet: wavelets.WaveletParameters | None = None,
+) -> tuple[lib.IntArray1D, lib.IntArray1D, lib.FloatArray1D | None]:
+    """Identify spots in a single frame within optionally specified
+    subregion(s) (ROI).
+
+    By default, spots are local maxima whose net gradient exceeds
+    ``minimum_ng``. With ``wavelet`` given, they are found by wavelet
+    segmentation instead (see :mod:`picasso.wavelet`) and no net gradient
+    is computed.
 
     Parameters
     ----------
     frame : lib.IntArray2D
         An image frame, 2D array of shape (Y, X).
-    minimum_ng : float or sequence of float
+    minimum_ng : float, sequence of float or None
         Minimum net gradient value to consider a maximum as valid. A
         sequence gives each ROI in ``roi`` its own threshold (split-FOV
         regions are separate channels and need not share a brightness
-        scale); it must have one value per ROI.
+        scale); it must have one value per ROI. Ignored (and may be
+        None) if ``wavelet`` is given.
     box : int
         Size of the box used for calculating the gradient. Should be
         an odd integer.
@@ -1474,66 +1535,101 @@ def identify_in_frame(
         several (disjoint) regions. If None, the entire frame is used.
         Note that the origin of the image is in the top-left corner.
         Default is None.
+    wavelet : wavelet.WaveletParameters, optional
+        Settings of the wavelet identification. Each ROI, grown by
+        ``int(box / 2) + 1 + wavelet.WAVELET_RADIUS`` pixels, is segmented
+        on its own, with the noise estimated inside it. Default is None,
+        i.e. the net gradient identification.
 
     Returns
     -------
     y : lib.IntArray1D
-        y-coordinates of the identified maxima.
+        y-coordinates of the identified spots.
     x : lib.IntArray1D
-        x-coordinates of the identified maxima.
-    net_gradient : lib.FloatArray1D
-        Net gradient values at the identified maxima. The shape is
-        (len(y),).
+        x-coordinates of the identified spots.
+    net_gradient : lib.FloatArray1D or None
+        Net gradient values at the identified spots, shape (len(y),).
+        None for the wavelet identification.
     """
+    if wavelet is not None:
+        minimum_ng = None  # not used, and possibly per ROI
     rois = _as_roi_list(roi)
     if rois is None:
         image = np.float32(frame)  # otherwise numba goes crazy
-        return identify_in_image(image, _as_ng_list(minimum_ng, 1)[0], box)
+        return _identify_in_crop(
+            image, _as_ng_list(minimum_ng, 1)[0], box, wavelet
+        )
     minimum_ngs = _as_ng_list(minimum_ng, len(rois))
     height, width = frame.shape
     # pad each ROI to identify at the border
-    pad = int(box / 2) + 1
+    pad = _identification_crop_pad(box, wavelet)
     ys, xs, ngs = [], [], []
     for roi_index, ((y0, x0), (y1, x1)) in enumerate(rois):
         py0, px0 = max(y0 - pad, 0), max(x0 - pad, 0)
         py1, px1 = min(y1 + pad, height), min(x1 + pad, width)
         image = np.float32(frame[py0:py1, px0:px1])  # numba needs float32!
-        y, x, net_gradient = identify_in_image(
-            image, minimum_ngs[roi_index], box
+        y, x, net_gradient = _identify_in_crop(
+            image, minimum_ngs[roi_index], box, wavelet
         )
         y += py0  # offset back to global frame coordinates
         x += px0
-        # keep only maxima centered inside the actual ROI
+        # keep only spots centered inside the actual ROI
         inside = (y >= y0) & (y < y1) & (x >= x0) & (x < x1)
         ys.append(y[inside])
         xs.append(x[inside])
-        ngs.append(net_gradient[inside])
-    return np.concatenate(ys), np.concatenate(xs), np.concatenate(ngs)
+        if net_gradient is not None:
+            ngs.append(net_gradient[inside])
+    y, x = np.concatenate(ys), np.concatenate(xs)
+    return y, x, (np.concatenate(ngs) if wavelet is None else None)
+
+
+def _identifications_frame(
+    frame: lib.IntArray1D,
+    x: lib.IntArray1D,
+    y: lib.IntArray1D,
+    net_gradient: lib.FloatArray1D | None,
+) -> pd.DataFrame:
+    """Identifications as a DataFrame; without a ``net_gradient`` column
+    if ``net_gradient`` is None (wavelet identification).
+
+    Every frame of one identification run has the same columns, so that
+    concatenating them never fills a missing column with NaN (which
+    ``lib.ensure_sanity`` would drop together with the whole row).
+    """
+    columns = {
+        "frame": np.asarray(frame).astype(int),
+        "x": np.asarray(x).astype(int),
+        "y": np.asarray(y).astype(int),
+    }
+    if net_gradient is not None:
+        columns["net_gradient"] = np.asarray(net_gradient).astype(np.float32)
+    return pd.DataFrame(columns)
 
 
 def identify_by_frame_number(
     movie: MovieLike,
-    minimum_ng: float | list | np.ndarray,
+    minimum_ng: float | list | np.ndarray | None,
     box: int,
     frame_number: int,
     *,
     roi: tuple[tuple[int, int], tuple[int, int]] | list | None = None,
     frame_bounds: tuple[int, int] | list | None = None,
     lock: threading.Lock | None = None,
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> pd.DataFrame:
-    """Identify local maxima in a specific frame of a movie and
-    calculate the net gradient at those maxima. Optionally, a lock can
-    be used to ensure thread safety when accessing the movie data.
+    """Identify spots in a specific frame of a movie, see
+    :func:`identify_in_frame`. Optionally, a lock can be used to ensure
+    thread safety when accessing the movie data.
 
     Parameters
     ----------
     movie : MovieLike
         A 3D array representing the movie of shape (N, Y, X), where N is
         the number of frames, Y is the height, and X is the width.
-    minimum_ng : float or sequence of float
+    minimum_ng : float, sequence of float or None
         Minimum net gradient value to consider a maximum as valid. A
         sequence gives each ROI its own threshold, one value per ROI (see
-        :func:`identify_in_frame`).
+        :func:`identify_in_frame`). Ignored if ``wavelet`` is given.
     box : int
         Size of the box used for calculating the gradient. Should be
         an odd integer.
@@ -1560,24 +1656,27 @@ def identify_by_frame_number(
         If provided, this lock will be used to ensure thread safety when
         accessing the movie data. This is useful in a multithreaded
         environment. Default is None.
+    wavelet : wavelet.WaveletParameters, optional
+        Settings of the wavelet identification. Default is None, i.e.
+        the net gradient identification.
 
     Returns
     -------
     identifications : pd.DataFrame
         DataFrame containing the frame number, x and y coordinates of
-        the identified maxima, and their net gradient.
+        the identified spots, and their net gradient (not for the wavelet
+        identification).
     """
     # check frame bounds before reading, so that frames that are skipped
     # anyway cost nothing (a TemporalMedianMovie would otherwise compute a
     # whole temporal window for them)
     if not lib.frame_in_bounds(frame_number, frame_bounds, len(movie)):
-        return pd.DataFrame(
-            {
-                "frame": pd.Series(dtype=int),
-                "x": pd.Series(dtype=int),
-                "y": pd.Series(dtype=int),
-                "net_gradient": pd.Series(dtype=np.float32),
-            }
+        empty = np.empty(0, dtype=int)
+        return _identifications_frame(
+            empty,
+            empty,
+            empty,
+            None if wavelet is not None else np.empty(0, dtype=np.float32),
         )
     # Movies that read each frame through their own per-thread file
     # handle (TiffMap, STKMovie and the multi-file maps) or a memory map
@@ -1594,31 +1693,26 @@ def identify_by_frame_number(
     else:
         frame = movie[frame_number]
     # identify
-    y, x, net_gradient = identify_in_frame(frame, minimum_ng, box, roi)
-    frame = frame_number * np.ones(len(x))
-    identifications = pd.DataFrame(
-        {
-            "frame": frame.astype(int),
-            "x": x.astype(int),
-            "y": y.astype(int),
-            "net_gradient": net_gradient.astype(np.float32),
-        }
+    y, x, net_gradient = identify_in_frame(
+        frame, minimum_ng, box, roi, wavelet=wavelet
     )
-    return identifications
+    frame = frame_number * np.ones(len(x))
+    return _identifications_frame(frame, x, y, net_gradient)
 
 
 def _identify_worker(
     movie: MovieLike,
     current: list[int],
-    minimum_ng: float | list | np.ndarray,
+    minimum_ng: float | list | np.ndarray | None,
     box: int,
     roi: tuple[tuple[int, int], tuple[int, int]] | list | None,
     frame_bounds: tuple[int, int] | list | None,
     lock: threading.Lock | None,
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> list[pd.DataFrame]:
-    """Worker function for identifying local maxima in a movie. This
-    function is designed to be run in a separate thread and processes
-    each frame independently."""
+    """Worker function for identifying spots in a movie. This function is
+    designed to be run in a separate thread and processes each frame
+    independently."""
     n_frames = len(movie)
     identifications = []
     while True:
@@ -1636,6 +1730,7 @@ def _identify_worker(
                 roi=roi,
                 frame_bounds=frame_bounds,
                 lock=lock,
+                wavelet=wavelet,
             )
         )
 
@@ -1656,7 +1751,7 @@ def identifications_from_futures(
     ids : pd.DataFrame
         Data frame containing the combined results from
         all futures. Contains fields ``frame``, ``x``, ``y``, and
-        ``net_gradient``.
+        ``net_gradient`` (not for the wavelet identification).
     """
     ids_list_of_lists = [_.result() for _ in futures]
     ids_list = list(chain(*ids_list_of_lists))
@@ -1670,24 +1765,26 @@ def identifications_from_futures(
 
 def identify_async(
     movie: MovieLike,
-    minimum_ng: float | list | np.ndarray,
+    minimum_ng: float | list | np.ndarray | None,
     box: int,
     *,
     roi: tuple[tuple[int, int], tuple[int, int]] | list | None = None,
     frame_bounds: tuple[int, int] | list | None = None,
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> tuple[list[int], list[multiprocessing.pool.Future]]:
-    """Asynchronously (i.e., using multithreading) identify local
-    maxima in a movie using multiple threads. This function divides the
-    work among a specified number of threads.
+    """Asynchronously (i.e., using multithreading) identify spots in a
+    movie using multiple threads. This function divides the work among a
+    specified number of threads.
 
     Parameters
     ----------
     movie : MovieLike
         The input movie, read frame by frame.
-    minimum_ng : float or sequence of float
+    minimum_ng : float, sequence of float or None
         The minimum net gradient for a spot to be considered. A
         sequence gives each ROI its own threshold, one value per ROI
-        (see :func:`identify_in_frame`).
+        (see :func:`identify_in_frame`). Ignored if ``wavelet`` is
+        given.
     box : int
         The size of the box to extract around each spot.
     roi : tuple or list of tuples, optional
@@ -1706,6 +1803,9 @@ def identify_async(
         specified, the other is to be set to None, for example,
         ``(5, None)`` sets minimum frame to 5 without maximum frame.
         Default is None.
+    wavelet : wavelet.WaveletParameters, optional
+        Settings of the wavelet identification. Default is None, i.e.
+        the net gradient identification.
 
     Returns
     -------
@@ -1748,6 +1848,7 @@ def identify_async(
             roi,
             frame_bounds,
             lock,
+            wavelet,
         )
         for _ in range(n_workers)
     ]
@@ -1763,6 +1864,7 @@ def _identify_threaded(
     frame_bounds,
     progress_callback,
     abort_callback,
+    wavelet=None,
 ):
     """Run identify_async and drive its progress loop.
 
@@ -1776,7 +1878,12 @@ def _identify_threaded(
         else None
     )
     current, futures = identify_async(
-        movie, minimum_ng, box, roi=roi, frame_bounds=frame_bounds
+        movie,
+        minimum_ng,
+        box,
+        roi=roi,
+        frame_bounds=frame_bounds,
+        wavelet=wavelet,
     )
     last = 0
     while current[0] < N:
@@ -1805,6 +1912,7 @@ def _identify_serial(
     roi,
     frame_bounds,
     progress_callback,
+    wavelet=None,
 ):
     """Identify spots frame-by-frame in the current thread."""
     N = len(movie)
@@ -1824,6 +1932,7 @@ def _identify_serial(
                 i,
                 roi=roi,
                 frame_bounds=frame_bounds,
+                wavelet=wavelet,
             )
         )
         if callable(progress_callback):
@@ -1835,7 +1944,7 @@ def _identify_serial(
 
 def identify(
     movie: MovieLike,
-    minimum_ng: float | list | np.ndarray,
+    minimum_ng: float | list | np.ndarray | None,
     box: int,
     *,
     roi: tuple[tuple[int, int], tuple[int, int]] | list | None = None,
@@ -1844,23 +1953,29 @@ def identify(
     temporal_median_window: int | None = None,
     temporal_median_stride: int | None = None,
     gaussian_filter_sigma: float | None = None,
+    wavelet: wavelets.WaveletParameters | None = None,
     progress_callback: (
         Callable[[list[int]], None] | Literal["console"] | None
     ) = None,
     abort_callback: Callable[[], bool] | None = None,
 ) -> tuple[pd.DataFrame, dict] | None:
-    """Identify local maxima in a movie and calculate the net
-    gradient at those maxima. This function can run in a threaded or
+    """Identify spots in a movie. This function can run in a threaded or
     non-threaded mode.
+
+    By default, spots are local maxima whose net gradient exceeds
+    ``minimum_ng``. With ``wavelet`` given, they are found by the wavelet
+    segmentation of Izeddin et al. (2012) instead, see
+    :mod:`picasso.wavelet`.
 
     Parameters
     ----------
     movie : MovieLike
         The input movie, read frame by frame.
-    minimum_ng : float or sequence of float
+    minimum_ng : float, sequence of float or None
         The minimum net gradient for a spot to be considered. A
         sequence gives each ROI its own threshold, one value per ROI
-        (see :func:`identify_in_frame`).
+        (see :func:`identify_in_frame`). Ignored (and may be None) if
+        ``wavelet`` is given.
     box : int
         The size of the box to extract around each spot.
     roi : tuple or list of tuples, optional
@@ -1907,6 +2022,9 @@ def identify(
         on. Note that ``minimum_ng`` has to be re-tuned when this is
         changed, since smoothing lowers gradient magnitudes. Default is
         None (no filtering).
+    wavelet : wavelet.WaveletParameters, optional
+        Settings of the wavelet identification. Default is None, i.e.
+        the net gradient identification.
     progress_callback : callable, "console" or None, optional
         A callback function to report the progress of the identification
         process. If "console", progress will be printed to the console.
@@ -1921,15 +2039,19 @@ def identify(
     -------
     ids : pd.DataFrame
         Data frame containing the identified spots. Contains fields
-        `frame`, `x`, `y`, and `net_gradient`.
+        `frame`, `x`, `y`, and `net_gradient` (not for the wavelet
+        identification).
     info : dict
         Additional information about the identification process, such as
-        the parameters used.
+        the parameters used. ``"Identification Method"`` names the
+        method; the wavelet identification records its settings (see
+        ``wavelet.WaveletParameters.to_info``) instead of
+        ``"Min. Net Gradient"``.
 
     None is returned instead if the identification was aborted via
     ``abort_callback``.
     """
-    roi_pad = identification_roi_pad(box, gaussian_filter_sigma)
+    roi_pad = identification_roi_pad(box, gaussian_filter_sigma, wavelet)
     if temporal_median_window:
         # note that identify_async() is not wrapped: callers driving the
         # thread pool themselves build the filtered views explicitly
@@ -1953,6 +2075,7 @@ def identify(
             frame_bounds,
             progress_callback,
             abort_callback,
+            wavelet,
         )
         if ids is None:
             return
@@ -1964,10 +2087,11 @@ def identify(
             roi,
             frame_bounds,
             progress_callback,
+            wavelet,
         )
     info = {
         "Generated by": f"Picasso: v{__version__} Identify",
-        "Min. Net Gradient": minimum_ng,
+        **_identification_method_info(minimum_ng, wavelet),
         "Box Size": box,
         "ROI": roi,
         "Frame Bounds": frame_bounds,
@@ -1977,9 +2101,92 @@ def identify(
     return ids, info
 
 
+def _identification_method_info(
+    minimum_ng: float | list | np.ndarray | None,
+    wavelet: wavelets.WaveletParameters | None,
+) -> dict:
+    """Metadata of the identification method: its name and its
+    threshold(s)."""
+    if wavelet is None:
+        return {
+            "Identification Method": IDENTIFY_METHOD_NET_GRADIENT,
+            "Min. Net Gradient": minimum_ng,
+        }
+    return {
+        "Identification Method": IDENTIFY_METHOD_WAVELET,
+        **wavelet.to_info(),
+    }
+
+
+def wavelet_from_parameters(
+    parameters: dict,
+) -> wavelets.WaveletParameters | None:
+    """The wavelet identification settings in a dictionary of
+    identification parameters (or metadata).
+
+    Parameters
+    ----------
+    parameters : dict
+        Identification parameters, as passed to :func:`localize` as
+        ``identification_parameters`` or stored in the identification
+        metadata. ``"Identification Method"`` selects the method (the net
+        gradient if missing, as in files written before the wavelet
+        identification existed) and the keys of
+        ``wavelet.WaveletParameters.to_info`` its settings.
+
+    Returns
+    -------
+    wavelet.WaveletParameters or None
+        The wavelet settings, or None for the net gradient
+        identification.
+
+    Raises
+    ------
+    ValueError
+        If the identification method is unknown.
+    """
+    method = parameters.get(
+        "Identification Method", IDENTIFY_METHOD_NET_GRADIENT
+    )
+    if method == IDENTIFY_METHOD_NET_GRADIENT:
+        return None
+    if method == IDENTIFY_METHOD_WAVELET:
+        return wavelets.WaveletParameters.from_info(parameters)
+    raise ValueError(
+        f"Unknown identification method {method!r}; use one of "
+        f"{', '.join(IDENTIFY_METHODS)}."
+    )
+
+
+def identification_info(parameters: dict) -> dict:
+    """Identification parameters without the settings of the method that
+    was not used, for the metadata: the minimum net gradient of a
+    wavelet identification or the wavelet settings of a net gradient one.
+
+    Parameters
+    ----------
+    parameters : dict
+        Identification parameters holding the settings of both methods,
+        like those of Picasso: Localize.
+
+    Returns
+    -------
+    info : dict
+        A copy of ``parameters`` with only the settings of the method
+        named under ``"Identification Method"``.
+    """
+    info = dict(parameters)
+    if wavelet_from_parameters(parameters) is None:
+        for key in wavelets.WaveletParameters().to_info():
+            info.pop(key, None)
+    else:
+        info.pop("Min. Net Gradient", None)
+    return info
+
+
 def identify_multichannel_sum(
     movies: list,
-    minimum_ng: float,
+    minimum_ng: float | None,
     box: int,
     transforms: list,
     *,
@@ -1993,6 +2200,7 @@ def identify_multichannel_sum(
     temporal_median_window: int | None = None,
     temporal_median_stride: int | None = None,
     gaussian_filter_sigma: float | None = None,
+    wavelet: wavelets.WaveletParameters | None = None,
     order: int = 1,
     progress_callback: (
         Callable[[list[int]], None] | Literal["console"] | None
@@ -2022,10 +2230,11 @@ def identify_multichannel_sum(
     movies : list of MovieLike
         One movie per channel, reference first (or at ``reference``). For
         split-FOV data pass the single movie repeated once per region.
-    minimum_ng : float
+    minimum_ng : float or None
         Minimum net gradient, a single value: there is one summed image. It has
         to be re-tuned relative to the per-channel thresholds, since the sum is
         in photons and over all channels (see :class:`SummedChannelsMovie`).
+        Ignored if ``wavelet`` is given.
     box : int
         The size of the box to extract around each spot.
     transforms : list of lib.FloatArray2D
@@ -2038,14 +2247,15 @@ def identify_multichannel_sum(
         the reference region for split-FOV data (the only part of the canvas
         that is filled) and to the whole frame otherwise.
     frame_bounds, threaded, temporal_median_window, temporal_median_stride, \
-gaussian_filter_sigma, progress_callback, abort_callback
+gaussian_filter_sigma, wavelet, progress_callback, abort_callback
         As in :func:`identify`.
 
     Returns
     -------
     ids : pd.DataFrame
         The identified spots in *reference-channel* coordinates, with fields
-        `frame`, `x`, `y` and `net_gradient` (the latter measured on the sum).
+        `frame`, `x`, `y` and `net_gradient` (the latter measured on the sum,
+        and not for the wavelet identification).
     info : dict
         Identification metadata, with the summing recorded under
         ``"Identification Mode"``, ``"Sum Channel Transforms"`` and
@@ -2073,6 +2283,7 @@ gaussian_filter_sigma, progress_callback, abort_callback
         temporal_median_window=temporal_median_window,
         temporal_median_stride=temporal_median_stride,
         gaussian_filter_sigma=gaussian_filter_sigma,
+        wavelet=wavelet,
         progress_callback=progress_callback,
         abort_callback=abort_callback,
     )
@@ -2797,7 +3008,9 @@ def get_spots(
         The input movie, read frame by frame.
     identifications : pd.DataFrame
         Data frame containing the identified spots. Contains fields
-        `frame`, `x`, `y`, and `net_gradient`.
+        `frame`, `x`, `y`, and `net_gradient` (which is missing for spots
+        identified by wavelet segmentation and then also from the
+        localizations).
     box : int
         Size of the box to cut out around each spot. Should be an odd
         integer.
@@ -2908,9 +3121,7 @@ def locs_from_fits(
             "bg": theta[:, 3].astype(np.float32),
             "lpx": lpx.astype(np.float32),
             "lpy": lpy.astype(np.float32),
-            "net_gradient": (
-                identifications["net_gradient"].astype(np.float32)
-            ),
+            **lib.net_gradient_column(identifications),
             "log_likelihood": likelihoods.astype(np.float32),
             "iterations": iterations.astype(np.int32),
         }
@@ -2969,7 +3180,9 @@ def fit(
         "Sensitivity", "Gain" and "Pixelsize".
     identifications : pd.DataFrame
         Data frame containing the identified spots. Contains fields
-        `frame`, `x`, `y`, and `net_gradient`.
+        `frame`, `x`, `y`, and `net_gradient` (which is missing for spots
+        identified by wavelet segmentation and then also from the
+        localizations).
     box : int
         Size of the box to cut out around each spot. Should be an odd
         integer.
@@ -3774,9 +3987,7 @@ def locs_from_fits_gauss(
         b = np.minimum(theta[:, 3], theta[:, 4])
         ellipticity = (a - b) / a
         columns["ellipticity"] = ellipticity.astype(np.float32)
-    columns["net_gradient"] = identifications["net_gradient"].astype(
-        np.float32
-    )
+    columns.update(lib.net_gradient_column(identifications))
     if rotated:  # rotated elliptical Gaussian
         # Normalize to [-90, 90) as the ellipse repeats every half turn.
         angle = -np.rad2deg(theta[:, 6])
@@ -4082,7 +4293,8 @@ def locs_from_fits_gauss_multichannel(
     ----------
     identifications : pd.DataFrame
         The detections that were fitted, in the reference channel, with
-        ``frame``, ``x``, ``y`` and ``net_gradient``.
+        ``frame``, ``x``, ``y`` and ``net_gradient`` (the latter is copied
+        if present).
     theta : np.ndarray
         Fitted parameters from :func:`fit_spots_gauss_multichannel`, box-local
         and with the amplitude as a peak height.
@@ -4175,7 +4387,7 @@ def locs_from_fits_gauss_multichannel(
         "bg": bg.astype(np.float32),
         "lpx": lpx.astype(np.float32),
         "lpy": lpy.astype(np.float32),
-        "net_gradient": identifications["net_gradient"].astype(np.float32),
+        **lib.net_gradient_column(identifications),
     }
     if not link_photons:
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -5273,9 +5485,7 @@ def _locs_from_fits_spline_link_xyz(
         "lpx": lpx.astype(np.float32),
         "lpy": lpy.astype(np.float32),
         "lpz": lpz.astype(np.float32),
-        "net_gradient": np.asarray(
-            identifications["net_gradient"], dtype=np.float32
-        ),
+        **lib.net_gradient_column(identifications),
         "photons_unc": photons_unc.astype(np.float32),
         "bg_unc": bg_unc.astype(np.float32),
     }
@@ -5324,7 +5534,8 @@ def locs_from_fits_spline(
     ----------
     identifications : pd.DataFrame
         The identifications the spots were cut from, with ``frame``, ``x``,
-        ``y`` and ``net_gradient`` columns.
+        ``y`` and ``net_gradient`` columns (the latter is copied if
+        present).
     theta : lib.FloatArray2D
         The fitted parameters, ``[amplitude, x_shift, y_shift, offset]`` (2D)
         or ``[amplitude, x_shift, y_shift, z_shift, offset]`` (3D). The
@@ -5446,7 +5657,7 @@ def locs_from_fits_spline(
         "bg": offset.astype(np.float32),
         "lpx": lpx.astype(np.float32),
         "lpy": lpy.astype(np.float32),
-        "net_gradient": identifications["net_gradient"].astype(np.float32),
+        **lib.net_gradient_column(identifications),
     }
     if is_3d:
         z_shift = np.asarray(theta[:, 3])
@@ -7708,8 +7919,14 @@ def localize(
         A dictionary containing spot identification parameters,
         including:
 
+        - `Identification Method`: optional, ``"net gradient"``
+          (default) or ``"wavelet"``, see :func:`identify`.
         - `Min. Net Gradient`: Minimum net gradient for spot
-          identification.
+          identification. Not needed for the wavelet identification.
+        - `Wavelet Threshold`, `Wavelet Noise Estimate`, `Wavelet Min.
+          Area`: optional settings of the wavelet identification, see
+          ``wavelet.WaveletParameters``; missing ones take the defaults
+          of Izeddin et al. (2012).
         - `Box Size`: Size of the box to cut out around each spot.
         - `Temporal Median Window`: optional, window length (in frames)
           of the temporal median filter applied before identification;
@@ -7838,7 +8055,7 @@ def localize(
     # Identify spots
     identifications, identify_info = identify(
         movie,
-        identification_parameters["Min. Net Gradient"],
+        identification_parameters.get("Min. Net Gradient"),
         identification_parameters["Box Size"],
         roi=roi,
         frame_bounds=frame_bounds,
@@ -7849,6 +8066,7 @@ def localize(
         gaussian_filter_sigma=identification_parameters.get(
             "Gaussian Filter Sigma", None
         ),
+        wavelet=wavelet_from_parameters(identification_parameters),
         progress_callback=identification_progress_callback,
     )
 
@@ -8229,10 +8447,14 @@ def _movie_to_image(movie) -> np.ndarray:
 
 
 def _lateral_detect_beads(
-    image: np.ndarray, box: int, minimum_ng: float
+    image: np.ndarray,
+    box: int,
+    minimum_ng: float | None,
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> np.ndarray:
     """Detect bead candidates using the standard spot identification
-    (local maxima above a minimum net gradient).
+    (local maxima above a minimum net gradient, or the wavelet
+    segmentation).
 
     Parameters
     ----------
@@ -8240,16 +8462,21 @@ def _lateral_detect_beads(
         2D image to detect beads in.
     box : int
         Box size used by ``identify_in_image`` (also sets the minimum
-        distance between two detected beads). Should be an odd integer.
-    minimum_ng : float
-        Minimum net gradient for a local maximum to be kept.
+        distance between two beads detected by their net gradient).
+        Should be an odd integer.
+    minimum_ng : float or None
+        Minimum net gradient for a local maximum to be kept. Ignored if
+        ``wavelet`` is given.
+    wavelet : wavelet.WaveletParameters, optional
+        Settings of the wavelet identification. Default is None, i.e.
+        the net gradient identification.
 
     Returns
     -------
     np.ndarray
         (N, 2) array of [row, col] integer coordinates.
     """
-    y, x, _ = identify_in_image(image, minimum_ng, box)
+    y, x, _ = _identify_in_crop(np.float32(image), minimum_ng, box, wavelet)
     return np.column_stack((y, x))
 
 
@@ -8642,6 +8869,7 @@ def fit_lateral_transform(
     ref_path: str = "",
     target_path: str = "",
     model: str = "affine",
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> tuple[dict, dict]:
     """Fit the target -> reference transform and append it to
     ``calibration``'s ordered list of affine corrections.
@@ -8660,7 +8888,7 @@ def fit_lateral_transform(
         As in :func:`calibrate_lateral_transform`.
     box, minimum_ng, pixelsize : int, float and float
         As in :func:`calibrate_lateral_transform`.
-    transform_type, ref_path, target_path, model
+    transform_type, ref_path, target_path, model, wavelet
         As in :func:`calibrate_lateral_transform`. ``plot_path`` is the only
         argument of that function not accepted here.
 
@@ -8703,8 +8931,12 @@ def fit_lateral_transform(
     img_ref = _movie_to_image(movie_ref)
     img_target = _movie_to_image(movie_target)
 
-    coarse_ref = _lateral_detect_beads(img_ref, box, minimum_ng)
-    coarse_target = _lateral_detect_beads(img_target, box, minimum_ng)
+    coarse_ref = _lateral_detect_beads(
+        img_ref, box, minimum_ng, wavelet=wavelet
+    )
+    coarse_target = _lateral_detect_beads(
+        img_target, box, minimum_ng, wavelet=wavelet
+    )
     refined_ref = _lateral_refine_bead_positions(img_ref, coarse_ref, box)
     refined_target = _lateral_refine_bead_positions(
         img_target, coarse_target, box
@@ -8813,6 +9045,7 @@ def calibrate_lateral_transform(
     target_path: str = "",
     model: str = "affine",
     plot_path: str = "",
+    wavelet: wavelets.WaveletParameters | None = None,
 ) -> dict:
     """Fit a transform that maps a bead image into a reference frame and
     append it to any calibration dict.
@@ -8862,8 +9095,9 @@ def calibrate_lateral_transform(
     box : int
         Box size used to identify bead candidates (also sets the minimum
         distance between two detected beads). Should be an odd integer.
-    minimum_ng : float
-        Minimum net gradient for a bead candidate to be kept.
+    minimum_ng : float or None
+        Minimum net gradient for a bead candidate to be kept. Ignored if
+        ``wavelet`` is given.
     pixelsize : float, optional
         Camera pixel size in nm. If given, decomposition translations
         and the diagnostic plot are converted from pixels to nm. If
@@ -8883,6 +9117,9 @@ def calibrate_lateral_transform(
     plot_path : str, optional
         If given, the diagnostic figure is saved to this path. The
         figure is always shown interactively. Default is "".
+    wavelet : wavelet.WaveletParameters, optional
+        Detect the bead candidates by wavelet segmentation with these
+        settings instead of by their net gradient. Default is None.
 
     Returns
     -------
@@ -8908,6 +9145,7 @@ def calibrate_lateral_transform(
         ref_path=ref_path,
         target_path=target_path,
         model=model,
+        wavelet=wavelet,
     )
     plot_lateral_calibration(qc, save_path=plot_path)
     return calibration

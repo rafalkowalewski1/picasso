@@ -26,6 +26,7 @@ from scipy.interpolate import CubicSpline
 from PyQt6 import QtCore, QtWidgets
 
 from picasso import gaussmle, gausslq, io, lib, localize, spline, transforms
+from picasso import wavelet
 from picasso import transforms as transforms_mod
 from picasso.fitting import gaussfit_cuda, precision, seeds, splinefit
 from picasso.gui import localize as localize_gui
@@ -13822,3 +13823,824 @@ class TestIndependentFitGuards:
             assert dialog.spline_calibration_path == "shared.hdf5"
         finally:
             window.close()
+
+
+# ---------------------------------------------------------------------------
+# Wavelet identification (Izeddin et al., 2012) - see also test_wavelet.py
+# ---------------------------------------------------------------------------
+
+WAVELET = wavelet.WaveletParameters()
+
+
+def _wavelet_movie(n_frames=4, shape=(48, 64), seed=0, blink=None):
+    """Well-separated Gaussian spots (sigma 1 px) on a Poisson background of
+    1000; the first two move between frames. ``blink`` lists the frames that
+    have spots at all (default: every frame). Returns the uint16 movie and
+    the true ``(x, y)`` per frame."""
+    rng = np.random.default_rng(seed)
+    frames, truth = [], []
+    for f in range(n_frames):
+        on = blink is None or f in blink
+        xy = [(12.3 + 3 * f, 14.6), (40.8, 30.2 - 2 * f), (52.1, 10.4)]
+        spots = [(x, y, 1500.0) for x, y in xy] if on else []
+        frame = _spots_frame(shape, spots, sigma=1.0, background=1000.0)
+        frames.append(rng.poisson(frame).astype(np.uint16))
+        truth.append(xy if on else [])
+    return np.stack(frames), truth
+
+
+def _found(ids, frame):
+    in_frame = ids[ids["frame"] == frame]
+    return sorted(zip(in_frame["x"].tolist(), in_frame["y"].tolist()))
+
+
+class TestWaveletIdentify:
+    """``localize.identify(..., wavelet=...)`` and its metadata."""
+
+    def test_finds_the_spots_and_has_no_net_gradient(self):
+        movie, truth = _wavelet_movie()
+        ids, _ = localize.identify(
+            movie, None, BOX, wavelet=WAVELET, threaded=False
+        )
+        assert list(ids.columns) == ["frame", "x", "y"]
+        assert all(ids[c].dtype.kind == "i" for c in ids.columns)
+        for f, xy in enumerate(truth):
+            expected = sorted((round(x), round(y)) for x, y in xy)
+            assert _found(ids, f) == expected
+
+    def test_threaded_matches_serial(self):
+        movie, _ = _wavelet_movie(n_frames=8)
+        serial, _ = localize.identify(
+            movie, None, BOX, wavelet=WAVELET, threaded=False
+        )
+        threaded, _ = localize.identify(
+            movie, None, BOX, wavelet=WAVELET, threaded=True
+        )
+        pd.testing.assert_frame_equal(
+            serial.reset_index(drop=True), threaded.reset_index(drop=True)
+        )
+
+    def test_the_minimum_net_gradient_is_ignored(self):
+        movie, _ = _wavelet_movie()
+        runs = [
+            localize.identify(
+                movie, minimum_ng, BOX, wavelet=WAVELET, threaded=False
+            )[0].reset_index(drop=True)
+            for minimum_ng in (None, 1e12, [1, 2, 3])
+        ]
+        pd.testing.assert_frame_equal(runs[0], runs[1])
+        pd.testing.assert_frame_equal(runs[0], runs[2])
+
+    def test_a_higher_threshold_finds_no_more(self):
+        movie, _ = _wavelet_movie(n_frames=2)
+        low, _ = localize.identify(movie, None, BOX, wavelet=WAVELET)
+        high, _ = localize.identify(
+            movie,
+            None,
+            BOX,
+            wavelet=wavelet.WaveletParameters(threshold=5.0),
+        )
+        assert len(high) <= len(low)
+
+    def test_info_records_the_method(self):
+        movie, _ = _wavelet_movie(n_frames=2)
+        params = wavelet.WaveletParameters(threshold=1.0, min_area=5)
+        _, info = localize.identify(movie, 5000, BOX, wavelet=params)
+        assert info["Identification Method"] == "wavelet"
+        assert info["Wavelet Threshold"] == 1.0
+        assert info["Wavelet Noise Estimate"] == "image_std"
+        assert info["Wavelet Min. Area"] == 5
+        assert "Min. Net Gradient" not in info
+        _, info = localize.identify(movie, 5000, BOX)
+        assert info["Identification Method"] == "net gradient"
+        assert info["Min. Net Gradient"] == 5000
+        assert "Wavelet Threshold" not in info
+
+    def test_frame_bounds_keep_the_schema(self):
+        movie, _ = _wavelet_movie(n_frames=5)
+        ids, _ = localize.identify(
+            movie, None, BOX, frame_bounds=(1, 2), wavelet=WAVELET
+        )
+        assert set(ids["frame"]) == {1, 2}
+        assert list(ids.columns) == ["frame", "x", "y"]
+        assert not ids.isna().any().any()
+
+    def test_an_empty_movie_has_the_schema(self):
+        movie = np.random.default_rng(1).poisson(1000, (3, 32, 32))
+        ids, _ = localize.identify(
+            movie.astype(np.uint16),
+            None,
+            BOX,
+            wavelet=wavelet.WaveletParameters(threshold=10),
+        )
+        assert len(ids) == 0
+        assert list(ids.columns) == ["frame", "x", "y"]
+
+    def test_roi_pad_covers_the_wavelet_planes(self):
+        base = localize.identification_roi_pad(BOX)
+        assert (
+            localize.identification_roi_pad(BOX, None, WAVELET)
+            == base + wavelet.WAVELET_RADIUS
+        )
+        assert localize.identification_roi_pad(
+            BOX, 1.0, WAVELET
+        ) == localize.identification_roi_pad(BOX, 1.0) + (
+            wavelet.WAVELET_RADIUS
+        )
+
+    def test_roi(self):
+        movie, truth = _wavelet_movie(n_frames=2)
+        roi = [[0, 0], [48, 46]]
+        ids, _ = localize.identify(
+            movie, None, BOX, roi=roi, wavelet=WAVELET, threaded=False
+        )
+        for f, xy in enumerate(truth):
+            expected = sorted(
+                (round(x), round(y)) for x, y in xy if round(x) < 46
+            )
+            assert _found(ids, f) == expected
+
+    def test_roi_with_temporal_median_reads_only_valid_pixels(self):
+        """The ROI-restricted median is zero outside its padded bounding box;
+        the wavelet crop must stay inside it, i.e. give the same detections
+        as on the whole-frame median."""
+        movie, _ = _wavelet_movie(n_frames=9, blink={2, 3, 6})
+        roi = [[[10, 8], [40, 46]]]
+        ids, _ = localize.identify(
+            movie,
+            None,
+            BOX,
+            roi=roi,
+            temporal_median_window=5,
+            wavelet=WAVELET,
+            threaded=False,
+        )
+        whole = localize.TemporalMedianMovie(movie, 5)
+        for f in range(len(movie)):
+            expected = localize.identify_by_frame_number(
+                whole, None, BOX, f, roi=roi, wavelet=WAVELET
+            )
+            assert _found(ids, f) == _found(expected, f)
+        assert len(ids)
+
+    def test_channel_sum(self):
+        positions = [(16.3, 20.6), (32.8, 28.1)]
+        reference, channel = _channel_pair(
+            positions,
+            IDENTITY_AFFINE,
+            amplitudes=(800.0, 800.0),
+            background=50.0,
+            n_frames=2,
+        )
+        ids, info = localize.identify_multichannel_sum(
+            [reference, channel],
+            None,
+            BOX,
+            [IDENTITY_AFFINE, IDENTITY_AFFINE],
+            camera_infos=[UNIT_CAMERA] * 2,
+            threaded=False,
+            wavelet=WAVELET,
+        )
+        assert list(ids.columns) == ["frame", "x", "y"]
+        assert _found(ids, 0) == [(16, 21), (33, 28)]
+        assert info["Identification Mode"] == "sum"
+        assert info["Identification Method"] == "wavelet"
+
+    def test_localize_end_to_end(self, picasso_movie_factory):
+        movie, truth = _wavelet_movie(n_frames=3)
+        info = [{"Frames": 3, "Height": 48, "Width": 64}]
+        locs, locs_info = localize.localize(
+            picasso_movie_factory(movie, info),
+            camera_info={**UNIT_CAMERA, "Pixelsize": 130},
+            identification_parameters={
+                "Box Size": BOX,
+                "Identification Method": "wavelet",
+                "Wavelet Threshold": 0.75,
+            },
+            movie_info=info,
+            fitting_method="gausslq",
+            threaded=False,
+        )
+        assert len(locs) == sum(len(xy) for xy in truth)
+        assert "net_gradient" not in locs.columns
+        identify_info = next(
+            i for i in locs_info if "Identification Method" in i
+        )
+        assert identify_info["Identification Method"] == "wavelet"
+        assert identify_info["Wavelet Threshold"] == 0.75
+        # sub-pixel positions from the fit, not the rounded box centers
+        first = locs[locs["frame"] == 0].sort_values("x")
+        np.testing.assert_allclose(
+            first[["x", "y"]].to_numpy(),
+            sorted(truth[0]),
+            atol=0.15,
+        )
+
+    def test_saved_identifications_load_and_fit(
+        self, tmp_path, picasso_movie_factory
+    ):
+        movie, _ = _wavelet_movie(n_frames=3)
+        ids, info = localize.identify(movie, None, BOX, wavelet=WAVELET)
+        path = str(tmp_path / "wavelet_identifications.hdf5")
+        io.save_identifications(path, ids, [info])
+        loaded, loaded_info = io.load_identifications(path)
+        assert list(loaded.columns) == ["frame", "x", "y"]
+        assert (
+            lib.get_from_metadata(loaded_info, "Identification Method")
+            == "wavelet"
+        )
+        movie_info = [{"Frames": 3, "Height": 48, "Width": 64}]
+        locs, _ = localize.fit(
+            picasso_movie_factory(movie, movie_info),
+            camera_info={**UNIT_CAMERA, "Pixelsize": 130},
+            identifications=loaded,
+            box=BOX,
+            fitting_method="gaussmle",
+            multiprocess=False,
+        )
+        assert len(locs) == len(ids)
+        assert "net_gradient" not in locs.columns
+        # a save/load round trip keeps every localization
+        locs_path = str(tmp_path / "wavelet_locs.hdf5")
+        io.save_locs(locs_path, locs, movie_info + [info])
+        reloaded, _ = io.load_locs(locs_path)
+        assert len(reloaded) == len(locs)
+
+    def test_wavelet_from_parameters(self):
+        assert localize.wavelet_from_parameters({}) is None
+        assert (
+            localize.wavelet_from_parameters(
+                {"Identification Method": "net gradient"}
+            )
+            is None
+        )
+        assert (
+            localize.wavelet_from_parameters(
+                {"Identification Method": "wavelet"}
+            )
+            == WAVELET
+        )
+        assert localize.wavelet_from_parameters(
+            {
+                "Identification Method": "wavelet",
+                "Wavelet Threshold": 2,
+                "Wavelet Noise Estimate": "w1_mad",
+                "Wavelet Min. Area": 7,
+            }
+        ) == wavelet.WaveletParameters(2.0, "w1_mad", 7)
+        with pytest.raises(ValueError):
+            localize.wavelet_from_parameters({"Identification Method": "x"})
+
+    def test_identification_info_keeps_only_the_used_method(self):
+        both = {
+            "Box Size": BOX,
+            "Identification Method": "wavelet",
+            "Min. Net Gradient": 5000,
+            **WAVELET.to_info(),
+        }
+        info = localize.identification_info(both)
+        assert "Min. Net Gradient" not in info
+        assert info["Wavelet Threshold"] == WAVELET.threshold
+        info = localize.identification_info(
+            {**both, "Identification Method": "net gradient"}
+        )
+        assert info["Min. Net Gradient"] == 5000
+        assert "Wavelet Threshold" not in info
+        # files written before the wavelet identification name no method
+        old = {"Box Size": BOX, "Min. Net Gradient": 5000}
+        assert localize.identification_info(old) == old
+
+    def test_lateral_bead_detection(self):
+        xy = [(20.2, 18.7), (40.6, 30.3), (15.4, 44.8)]
+        image = _spots_frame(
+            (64, 64), [(x, y, 3000.0) for x, y in xy], background=100.0
+        )
+        coarse = localize._lateral_detect_beads(
+            image, BOX, None, wavelet=WAVELET
+        )
+        assert sorted(map(tuple, coarse.tolist())) == sorted(
+            (round(y), round(x)) for x, y in xy
+        )
+
+    def test_fit_lateral_transform_passes_the_wavelet(self, monkeypatch):
+        seen = []
+
+        def spy(image, box, minimum_ng, wavelet=None):
+            seen.append(wavelet)
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr(localize, "_lateral_detect_beads", spy)
+        movie = np.zeros((1, 16, 16), dtype=np.uint16)
+        with pytest.raises(RuntimeError, match="stop"):
+            localize.fit_lateral_transform(
+                movie, movie, {}, box=BOX, minimum_ng=None, wavelet=WAVELET
+            )
+        assert seen == [WAVELET]
+
+
+class TestSaveableColumnsWithoutNetGradient(TestSaveableColumns):
+    """Every fit path accepts identifications without ``net_gradient`` (the
+    wavelet identification has none) and then emits no such column."""
+
+    IDS = TestSaveableColumns.IDS.drop(columns="net_gradient")
+
+    def test_no_net_gradient_column(self):
+        for name, locs in self._fit_frames().items():
+            assert "net_gradient" not in locs.columns, name
+
+    def test_with_net_gradient_it_is_copied(self):
+        for name, locs in TestSaveableColumns()._fit_frames().items():
+            np.testing.assert_array_equal(
+                locs.sort_values("frame")["net_gradient"],
+                TestSaveableColumns.IDS["net_gradient"],
+                err_msg=name,
+            )
+
+
+class TestFitsWithoutNetGradient:
+    """End to end through the fit dispatchers with identifications that have
+    no ``net_gradient`` column."""
+
+    @pytest.mark.parametrize(
+        "fitting_method",
+        [
+            "gausslq",
+            "gaussmle",
+            "gausslq-spherical",
+            "gaussmle-rotated",
+            "avg",
+        ],
+    )
+    def test_fit(self, fitting_method, picasso_movie_factory):
+        movie, _ = _wavelet_movie(n_frames=2)
+        ids, _ = localize.identify(movie, None, BOX, wavelet=WAVELET)
+        info = [{"Frames": 2, "Height": 48, "Width": 64}]
+        locs, _ = localize.fit(
+            picasso_movie_factory(movie, info),
+            camera_info={**UNIT_CAMERA, "Pixelsize": 130},
+            identifications=ids,
+            box=BOX,
+            fitting_method=fitting_method,
+            multiprocess=False,
+        )
+        assert len(locs) == len(ids)
+        assert "net_gradient" not in locs.columns
+
+    def test_gauss_multichannel(self):
+        case = TestFitGaussMultichannel()
+        movies, camera_infos, ids, _, _ = case._dataset()
+        locs = localize.fit_gauss_multichannel(
+            movies,
+            camera_infos,
+            ids.drop(columns="net_gradient"),
+            case.BOX,
+            case._registration(),
+            use_gpu=False,
+            multiprocess=False,
+        )
+        assert len(locs) == len(ids)
+        assert "net_gradient" not in locs.columns
+
+
+class TestWaveletGui:
+    """Wiring of the wavelet identification into Picasso: Localize."""
+
+    _dialog = staticmethod(TestTemporalMedianGui._dialog)
+
+    @staticmethod
+    def _window(dialog):
+        window = localize_gui.Window.__new__(localize_gui.Window)
+        window.parameters_dialog = dialog
+        window.view = type("_View", (), {"rois": []})()
+        window.frame_range = None
+        return window
+
+    @staticmethod
+    def _select_wavelet(dialog):
+        dialog.set_identification_method("wavelet")
+        assert dialog.identification_method() == "wavelet"
+
+    def test_the_method_swaps_the_settings(self):
+        dialog = self._dialog()
+        try:
+            assert dialog.identification_method() == "net gradient"
+            assert not dialog.mng_widget.isHidden()
+            assert dialog.wavelet_widget.isHidden()
+            assert dialog.link_mng_checkbox.text() == "Min. net gradient"
+            self._select_wavelet(dialog)
+            assert dialog.mng_widget.isHidden()
+            assert not dialog.wavelet_widget.isHidden()
+            assert dialog.link_mng_checkbox.text() == "Wavelet settings"
+            dialog.set_identification_method("net gradient")
+            assert not dialog.mng_widget.isHidden()
+            assert dialog.wavelet_widget.isHidden()
+            assert dialog.link_mng_checkbox.text() == "Min. net gradient"
+        finally:
+            dialog.close()
+
+    def test_split_fov_thresholds_only_for_the_net_gradient(
+        self, qt_offscreen
+    ):
+        """The per-region minimum net gradients of split-FOV data are shown
+        (ROI table column, region labels on the image) only while the net
+        gradient identification is selected."""
+        window = localize_gui.Window()
+        dialog = window.parameters_dialog
+        try:
+            window.view.rois = [[[0, 0], [32, 16]], [[0, 16], [32, 32]]]
+            window.view.split_fov_mode = True
+            window.view.roi_mngs = [5000, 6000]
+            dialog.set_identification_method("net gradient")
+            dialog.on_edit_rois()
+            table = dialog.roi_dialog.table
+
+            def headers():
+                return [
+                    table.horizontalHeaderItem(i).text()
+                    for i in range(table.columnCount())
+                ]
+
+            def labels():
+                window.scene = QtWidgets.QGraphicsScene()
+                window._draw_rois(True, window.region_mngs())
+                return sorted(
+                    item.text()
+                    for item in window.scene.items()
+                    if isinstance(item, QtWidgets.QGraphicsSimpleTextItem)
+                )
+
+            assert headers()[-1] == "min_ng"
+            assert labels() == ["ch1 (6,000)", "ref (5,000)"]
+            self._select_wavelet(dialog)
+            assert "min_ng" not in headers()
+            assert labels() == ["ch1", "ref"]
+            # editing the table keeps the thresholds of the regions
+            table.item(0, 2).setText("30")
+            assert window.view.roi_mngs == [5000, 6000]
+        finally:
+            window.view.split_fov_mode = False
+            dialog.roi_dialog.close()
+            window.close()
+
+    def test_each_channel_keeps_its_method(self):
+        """Multichannel data: an off-screen channel is identified (and its
+        preview link colors drawn) with its own method and wavelet settings
+        unless 'Same settings across channels' links them."""
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            window.channels = [
+                localize_gui.Channel(name="a"),
+                localize_gui.Channel(name="b"),
+            ]
+            window.current_channel = 0
+            self._select_wavelet(dialog)
+            window.channels[1].params = {
+                **window._capture_params(),
+                "identification_method": "wavelet",
+                "wavelet_threshold": 1.5,
+                "wavelet_noise": "w1_mad",
+                "wavelet_min_area": 6,
+            }
+            # only the state is read here; propagating it needs a real window
+            dialog.link_mng_checkbox.blockSignals(True)
+            dialog.link_mng_checkbox.setChecked(False)
+            other = window.channel_parameters(1)
+            assert localize.wavelet_from_parameters(
+                other
+            ) == wavelet.WaveletParameters(1.5, "w1_mad", 6)
+            window.channels[1].params["identification_method"] = "net gradient"
+            other = window.channel_parameters(1)
+            assert localize.wavelet_from_parameters(other) is None
+            # linked, every channel uses the displayed settings
+            dialog.link_mng_checkbox.setChecked(True)
+            other = window.channel_parameters(1)
+            assert localize.wavelet_from_parameters(other) == WAVELET
+        finally:
+            dialog.close()
+
+    def test_saved_identifications_record_the_method_used(self, tmp_path):
+        """The dialog may have been switched to the other method since the
+        identifications were made; the file must describe how they were
+        made, with the settings of that method only."""
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            self._select_wavelet(dialog)
+            window.last_identification_info = {
+                **window.parameters,
+                "ROI": [],
+                "Frame bounds": None,
+            }
+            dialog.set_identification_method("net gradient")
+            window.identifications = pd.DataFrame(
+                {"frame": [0, 1], "x": [5, 6], "y": [7, 8]}
+            )
+            window.info = [{"Frames": 2, "Height": 16, "Width": 16}]
+            path = str(tmp_path / "ids.hdf5")
+            window.save_identifications(path)
+            saved = io.load_info(path)[-1]
+            assert saved["Identification Method"] == "wavelet"
+            assert saved["Wavelet Threshold"] == WAVELET.threshold
+            assert "Min. Net Gradient" not in saved
+            # and the net gradient ones carry no wavelet settings
+            window.last_identification_info = {
+                **window.parameters,
+                "ROI": [],
+                "Frame bounds": None,
+            }
+            window.save_identifications(path)
+            saved = io.load_info(path)[-1]
+            assert saved["Identification Method"] == "net gradient"
+            assert "Min. Net Gradient" in saved
+            assert not any(key.startswith("Wavelet") for key in saved)
+        finally:
+            dialog.close()
+
+    def test_defaults_are_the_papers(self):
+        dialog = self._dialog()
+        try:
+            assert dialog.wavelet_threshold_spinbox.value() == 0.5
+            assert dialog.wavelet_noise() == "image_std"
+            assert dialog.wavelet_min_area_spinbox.value() == 4
+        finally:
+            dialog.close()
+
+    def test_parameters(self):
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            parameters = window.parameters
+            assert parameters["Identification Method"] == "net gradient"
+            assert localize.wavelet_from_parameters(parameters) is None
+            self._select_wavelet(dialog)
+            dialog.wavelet_threshold_spinbox.setValue(1.25)
+            dialog.set_wavelet_noise("w1_mad")
+            dialog.wavelet_min_area_spinbox.setValue(6)
+            assert localize.wavelet_from_parameters(
+                window.parameters
+            ) == wavelet.WaveletParameters(1.25, "w1_mad", 6)
+        finally:
+            dialog.close()
+
+    def test_changes_invalidate_identifications(self):
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            window.last_identification_info = {
+                **window.parameters,
+                "ROI": [],
+                "Frame bounds": None,
+            }
+            assert not window.identifications_outdated()
+            self._select_wavelet(dialog)
+            assert window.identifications_outdated()
+            window.last_identification_info = {
+                **window.parameters,
+                "ROI": [],
+                "Frame bounds": None,
+            }
+            dialog.wavelet_threshold_spinbox.setValue(1.0)
+            assert window.identifications_outdated()
+        finally:
+            dialog.close()
+
+    def test_the_worker_passes_the_wavelet(self, monkeypatch):
+        dialog = self._dialog()
+        window = self._window(dialog)
+        seen = {}
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return pd.DataFrame({"frame": [], "x": [], "y": []}), {}
+
+        monkeypatch.setattr(localize, "identify", spy)
+        try:
+            window.movie = np.zeros((3, 16, 16), dtype=np.uint16)
+            self._select_wavelet(dialog)
+            worker = localize_gui.IdentificationWorker(
+                window, fit_afterwards=False, calibrate_z=True
+            )
+            worker.run()
+            assert seen["wavelet"] == WAVELET
+        finally:
+            dialog.close()
+
+    def test_channel_snapshot_round_trip(self):
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            self._select_wavelet(dialog)
+            dialog.wavelet_threshold_spinbox.setValue(1.5)
+            dialog.set_wavelet_noise("w1_mad")
+            dialog.wavelet_min_area_spinbox.setValue(7)
+            params = window._capture_params()
+            dialog.set_identification_method("net gradient")
+            dialog.wavelet_threshold_spinbox.setValue(0.5)
+            dialog.set_wavelet_noise("image_std")
+            dialog.wavelet_min_area_spinbox.setValue(4)
+            window._apply_params(params)
+            assert dialog.identification_method() == "wavelet"
+            assert dialog.wavelet_threshold_spinbox.value() == 1.5
+            assert dialog.wavelet_noise() == "w1_mad"
+            assert dialog.wavelet_min_area_spinbox.value() == 7
+            # snapshots taken before the wavelet identification existed
+            old = {k: v for k, v in params.items() if "wavelet" not in k}
+            old.pop("identification_method")
+            window._apply_params(old)
+            assert dialog.identification_method() == "net gradient"
+            assert dialog.wavelet_threshold_spinbox.value() == 0.5
+        finally:
+            dialog.close()
+
+    def test_user_settings(self):
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            window._load_identification_method_settings(
+                {
+                    "Localize": {
+                        "identification_method": "wavelet",
+                        "wavelet_threshold": 1.75,
+                        "wavelet_noise": "w1_mad",
+                        "wavelet_min_area": 9,
+                    }
+                }
+            )
+            assert dialog.identification_method() == "wavelet"
+            assert dialog.wavelet_threshold_spinbox.value() == 1.75
+            assert dialog.wavelet_noise() == "w1_mad"
+            assert dialog.wavelet_min_area_spinbox.value() == 9
+            # invalid stored values fall back to the defaults
+            window._load_identification_method_settings(
+                {
+                    "Localize": {
+                        "identification_method": "nonsense",
+                        "wavelet_threshold": -3,
+                        "wavelet_noise": "w1_mad",
+                    }
+                }
+            )
+            assert dialog.identification_method() == "net gradient"
+            assert dialog.wavelet_threshold_spinbox.value() == 0.5
+            assert dialog.wavelet_noise() == "image_std"
+        finally:
+            dialog.close()
+
+    def test_loaded_identifications_restore_the_method(self):
+        dialog = self._dialog()
+        window = self._window(dialog)
+        try:
+            info = [
+                {"Frames": 10},
+                {
+                    "Identification Method": "wavelet",
+                    "Wavelet Threshold": 2.0,
+                    "Wavelet Noise Estimate": "w1_mad",
+                    "Wavelet Min. Area": 5,
+                },
+            ]
+            window._restore_identification_method(info, None)
+            assert dialog.identification_method() == "wavelet"
+            assert dialog.wavelet_threshold_spinbox.value() == 2.0
+            assert dialog.wavelet_noise() == "w1_mad"
+            assert dialog.wavelet_min_area_spinbox.value() == 5
+            # older files carry only the minimum net gradient
+            window._restore_identification_method([{"Frames": 10}], 5000)
+            assert dialog.identification_method() == "net gradient"
+            # picks loaded as identifications name neither
+            self._select_wavelet(dialog)
+            window._restore_identification_method([{"Frames": 10}], None)
+            assert dialog.identification_method() == "wavelet"
+        finally:
+            dialog.close()
+
+    def test_status_bar_threshold(self):
+        net_gradient = {
+            "Identification Method": "net gradient",
+            "Min. Net Gradient": 5000,
+        }
+        assert (
+            localize_gui._format_threshold(net_gradient)
+            == "Min. Net Gradient: 5,000"
+        )
+        assert localize_gui._format_threshold(
+            {**net_gradient, "Identification Method": "wavelet"}
+        ) == ("Wavelet threshold: 0.5 x noise")
+        # messages asking to lower the threshold name the right one
+        assert (
+            localize_gui._threshold_name(net_gradient)
+            == "minimum net gradient"
+        )
+        assert (
+            localize_gui._threshold_name(
+                {**net_gradient, "Identification Method": "wavelet"}
+            )
+            == "wavelet threshold"
+        )
+
+
+class TestWaveletCli:
+    """``--identification-method wavelet`` and the ``--wavelet-*``
+    settings."""
+
+    def test_wavelet_from_args(self):
+        import argparse
+
+        from picasso import __main__ as cli
+
+        parser = argparse.ArgumentParser()
+        cli._add_identification_method_args(parser)
+        assert cli._wavelet_from_args(parser.parse_args([])) is None
+        args = parser.parse_args(["-im", "wavelet"])
+        assert cli._wavelet_from_args(args) == WAVELET
+        args = parser.parse_args(
+            [
+                "--identification-method",
+                "wavelet",
+                "--wavelet-threshold",
+                "1.5",
+                "--wavelet-noise",
+                "w1-mad",
+                "--wavelet-min-area",
+                "6",
+            ]
+        )
+        assert cli._wavelet_from_args(args) == wavelet.WaveletParameters(
+            1.5, "w1_mad", 6
+        )
+        # the server's watcher builds its own namespace
+        assert cli._wavelet_from_args(argparse.Namespace()) is None
+
+    @pytest.mark.parametrize(
+        "command", ["localize", "spline-calibrate", "lateral-calibrate"]
+    )
+    def test_every_command_accepts_the_arguments(
+        self, command, capsys, monkeypatch
+    ):
+        from picasso import __main__ as cli
+
+        monkeypatch.setattr(sys, "argv", ["picasso", command, "--help"])
+        with pytest.raises(SystemExit):
+            cli.main()
+        help_text = capsys.readouterr().out
+        for flag in (
+            "--identification-method",
+            "--wavelet-threshold",
+            "--wavelet-noise",
+            "--wavelet-min-area",
+        ):
+            assert flag in help_text
+
+    def test_localize(self, tmp_path, monkeypatch):
+        from picasso import __main__ as cli
+
+        movie, truth = _wavelet_movie(n_frames=3)
+        path = str(tmp_path / "movie.raw")
+        io.save_raw(
+            path,
+            movie,
+            [
+                {
+                    "Byte Order": "<",
+                    "Data Type": "uint16",
+                    "Frames": 3,
+                    "Height": 48,
+                    "Width": 64,
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "picasso",
+                "localize",
+                path,
+                "-b",
+                str(BOX),
+                "-im",
+                "wavelet",
+                "--wavelet-threshold",
+                "0.75",
+                "-a",
+                "lq",
+                "-d",
+                "0",
+                "-bl",
+                "0",
+                "-s",
+                "1",
+                "-ga",
+                "1",
+            ],
+        )
+        cli.main()
+        locs, info = io.load_locs(str(tmp_path / "movie_locs.hdf5"))
+        assert len(locs) == sum(len(xy) for xy in truth)
+        assert "net_gradient" not in locs.columns
+        assert lib.get_from_metadata(info, "Identification Method") == (
+            "wavelet"
+        )
+        assert lib.get_from_metadata(info, "Wavelet Threshold") == 0.75
+        assert lib.get_from_metadata(info, "Min. Net Gradient") is None

@@ -694,3 +694,85 @@ class TestBrushRotationWindow:
         )
         assert (x_min, x_max) == pytest.approx((-1.0, 11.0))
         assert (y_min, y_max) == pytest.approx((-1.0, 1.0))
+
+
+class TestMultiChannelSavesKeepAllLocs:
+    """Saving several channels into one file keeps every localization even
+    when the channels differ in their columns (here: only one has a
+    ``net_gradient``, as after a wavelet identification). ``pd.concat``
+    alone would fill the missing column with NaN, and ``io.save_locs``
+    would then drop all of that channel's localizations."""
+
+    LEFT = [(1.0, 1.0), (12.0, 1.0), (12.0, 12.0), (1.0, 12.0), (1.0, 1.0)]
+    RIGHT = [
+        (18.0, 18.0),
+        (30.0, 18.0),
+        (30.0, 30.0),
+        (18.0, 30.0),
+        (18.0, 18.0),
+    ]
+
+    @pytest.fixture
+    def two_channels(self, window, tmp_path):
+        with_ng = _locs(seed=1)
+        with_ng["net_gradient"] = np.full(len(with_ng), 5000.0, np.float32)
+        window.view.add(
+            str(tmp_path / "ng_locs.hdf5"), with_ng, _info(), render_=False
+        )
+        window.tools_settings_dialog.pick_shape.setCurrentText("Polygon")
+        window.view._picks = [self.LEFT, self.RIGHT]
+        return window
+
+    @staticmethod
+    def _n_picked(view, pick=None):
+        return sum(
+            len(picks[pick]) if pick is not None else sum(map(len, picks))
+            for picks in (
+                view.picked_locs(c, add_group=False)
+                for c in range(len(view.locs_paths))
+            )
+        )
+
+    def test_picked_locs_combined(self, two_channels, tmp_path):
+        view = two_channels.view
+        path = str(tmp_path / "picked_multi.hdf5")
+        with pytest.warns(UserWarning, match="net_gradient"):
+            view.save_picked_locs_multi(path)
+        saved, _ = io.load_locs(path)
+        assert len(saved) == self._n_picked(view) > 0
+        assert "net_gradient" not in saved.columns
+
+    def test_picked_locs_combined_per_pick(self, two_channels, tmp_path):
+        view = two_channels.view
+        path = str(tmp_path / "picked_sep.hdf5")
+        with pytest.warns(UserWarning, match="net_gradient"):
+            view.save_picked_locs_multi_sep(path)
+        for i in range(2):
+            saved, _ = io.load_locs(str(tmp_path / f"picked_sep_{i}.hdf5"))
+            assert len(saved) == self._n_picked(view, i) > 0
+
+    def test_all_channels_combined(self, two_channels, tmp_path, monkeypatch):
+        window = two_channels
+        path = str(tmp_path / "combined_multi.hdf5")
+        n_channels = len(window.view.locs_paths)
+        monkeypatch.setattr(
+            window.view,
+            "get_channel_save_locs",
+            lambda *_: n_channels + 1,
+        )
+        monkeypatch.setattr(
+            lib,
+            "get_save_filename_ext_dialog",
+            lambda *args, **kwargs: (path, ".hdf5"),
+        )
+        with pytest.warns(UserWarning, match="net_gradient"):
+            window.save_locs()
+        saved, _ = io.load_locs(path)
+        assert len(saved) == sum(len(locs) for locs in window.view.locs)
+
+    def test_the_3d_window_combines_the_same_way(self):
+        import inspect
+
+        source = inspect.getsource(rotation.RotationWindow.save_locs_rotated)
+        assert "lib.concat_locs(self.window.view.locs)" in source
+        assert "pd.concat" not in source

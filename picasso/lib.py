@@ -1684,6 +1684,85 @@ def merge_locs(
     return _merge_locs(locs_list, increment_frames, increment_groups)
 
 
+def net_gradient_column(identifications: pd.DataFrame) -> dict:
+    """The ``net_gradient`` column of identifications, to be copied into
+    the localizations fitted from them, or nothing: spots identified by
+    wavelet segmentation (see ``picasso.wavelet``) have no net gradient.
+
+    Parameters
+    ----------
+    identifications : pd.DataFrame
+        Identifications the localizations are fitted from.
+
+    Returns
+    -------
+    dict
+        ``{"net_gradient": values}`` (float32) if the column exists,
+        otherwise empty.
+    """
+    if "net_gradient" not in identifications.columns:
+        return {}
+    return {
+        "net_gradient": np.asarray(
+            identifications["net_gradient"], dtype=np.float32
+        )
+    }
+
+
+def concat_locs(locs_list: list[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate localization tables into one with a new index.
+
+    The tables need not have the same columns: which ones a table has
+    depends on how it was made, e.g. spots identified by wavelet
+    segmentation (see ``picasso.wavelet``) have no ``net_gradient``,
+    spherical Gaussian fits no ``ellipticity``, least-squares fits a
+    ``chi_square`` instead of the ``log_likelihood`` of maximum likelihood
+    ones, and 2D data no ``z``. A column that not every table has is
+    dropped, with a warning: ``pd.concat`` would fill it with NaN for the
+    tables without it, and ``ensure_sanity`` would then delete all of
+    their localizations when the result is saved.
+
+    Tables without localizations are left out, so their columns neither
+    remove nor add any.
+
+    Parameters
+    ----------
+    locs_list : list of pd.DataFrame
+        Localization tables.
+
+    Returns
+    -------
+    locs : pd.DataFrame
+        All localizations, with the columns of the first table that every
+        (non-empty) table has.
+    """
+    locs_list = list(locs_list)
+    filled = [locs for locs in locs_list if len(locs)]
+    if not filled:
+        return pd.concat(locs_list, ignore_index=True)
+    common = set(filled[0].columns).intersection(
+        *(locs.columns for locs in filled[1:])
+    )
+    partial = list(
+        dict.fromkeys(
+            column
+            for locs in filled
+            for column in locs.columns
+            if column not in common
+        )
+    )
+    if partial:
+        warnings.warn(
+            f"Column(s) {', '.join(map(str, partial))} are missing from some "
+            "of the localizations being combined and were dropped, so that "
+            "no localizations are lost."
+        )
+        filled = [
+            locs.drop(columns=partial, errors="ignore") for locs in filled
+        ]
+    return pd.concat(filled, ignore_index=True)
+
+
 def _merge_locs(
     locs_list: list[pd.DataFrame],
     increment_frames: list[int],
@@ -1697,7 +1776,7 @@ def _merge_locs(
         if "group" in locs.columns:
             locs["group"] += increment_groups[i]
         locs_list[i] = locs
-    locs = pd.concat(locs_list, ignore_index=True)
+    locs = concat_locs(locs_list)
     locs.sort_values(by="frame", inplace=True)
     return locs
 

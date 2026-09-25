@@ -511,6 +511,105 @@ class TestMergeLocs:
         assert merged["frame"].max() == 4
 
 
+class TestConcatLocs:
+    """Localization tables need not share their columns (no
+    ``net_gradient`` after the wavelet identification, no ``ellipticity``
+    for spherical fits, no ``z`` in 2D, ...); combining them must not lose
+    localizations to ``ensure_sanity``'s NaN filter."""
+
+    INFO = [{"Width": 32, "Height": 32, "Frames": 100}]
+
+    @staticmethod
+    def _locs(n: int, net_gradient: bool = True, **extra) -> pd.DataFrame:
+        locs = pd.DataFrame(
+            {
+                "frame": np.arange(n, dtype=int),
+                "x": np.linspace(1, 20, n),
+                "y": np.linspace(1, 20, n),
+                "lpx": np.full(n, 0.1),
+                "lpy": np.full(n, 0.1),
+            }
+        )
+        if net_gradient:
+            locs["net_gradient"] = np.full(n, 5000.0, dtype=np.float32)
+        for column, value in extra.items():
+            locs[column] = np.full(n, value)
+        return locs
+
+    def test_net_gradient_column(self):
+        ids = self._locs(3)
+        column = lib.net_gradient_column(ids)["net_gradient"]
+        np.testing.assert_array_equal(column, [5000.0] * 3)
+        assert column.dtype == np.float32
+        assert lib.net_gradient_column(self._locs(3, False)) == {}
+
+    def test_mixed_tables_drop_the_column_with_a_warning(self):
+        with pytest.warns(UserWarning, match="net_gradient"):
+            locs = lib.concat_locs([self._locs(3), self._locs(4, False)])
+        assert len(locs) == 7
+        assert "net_gradient" not in locs.columns
+        assert len(lib.ensure_sanity(locs, self.INFO)) == 7
+
+    def test_any_partial_column_is_dropped(self):
+        # a 3D elliptical fit next to a 2D spherical one
+        with pytest.warns(UserWarning, match="ellipticity, z"):
+            locs = lib.concat_locs(
+                [
+                    self._locs(3, ellipticity=0.1, z=5.0),
+                    self._locs(2, photons_unc=3.0),
+                    self._locs(2, photons_unc=4.0, z=1.0),
+                ]
+            )
+        assert list(locs.columns) == [
+            "frame",
+            "x",
+            "y",
+            "lpx",
+            "lpy",
+            "net_gradient",
+        ]
+        assert len(lib.ensure_sanity(locs, self.INFO)) == 7
+
+    @pytest.mark.parametrize("net_gradient", [True, False])
+    def test_matching_tables_are_left_alone(self, net_gradient):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            locs = lib.concat_locs(
+                [
+                    self._locs(3, net_gradient, z=1.0),
+                    self._locs(2, net_gradient, z=2.0),
+                ]
+            )
+        assert len(locs) == 5
+        assert ("net_gradient" in locs.columns) == net_gradient
+        assert list(locs["z"]) == [1.0] * 3 + [2.0] * 2
+        assert list(locs.index) == list(range(5))
+
+    def test_empty_tables_do_not_decide_the_columns(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            locs = lib.concat_locs(
+                [
+                    self._locs(0, False),
+                    pd.DataFrame(),
+                    self._locs(3, z=1.0),
+                ]
+            )
+        assert len(locs) == 3
+        assert {"net_gradient", "z"} <= set(locs.columns)
+        assert locs["frame"].dtype.kind == "i"
+        # nothing to combine at all
+        assert len(lib.concat_locs([self._locs(0), self._locs(0)])) == 0
+
+    def test_merge_locs_keeps_every_localization(self):
+        with pytest.warns(UserWarning, match="net_gradient"):
+            merged = lib.merge_locs(
+                [self._locs(3), self._locs(4, False)],
+                increment_groups=False,
+            )
+        assert len(lib.ensure_sanity(merged, self.INFO)) == 7
+
+
 class TestEnsureSanity:
     def test_drops_outside_image(self):
         locs = pd.DataFrame(

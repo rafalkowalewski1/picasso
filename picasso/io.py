@@ -4673,7 +4673,8 @@ def save_identifications(
         The path where the identifications will be saved.
     identifications : pd.DataFrame
         The identifications to be saved (typically with columns
-        ``frame``, ``x``, ``y``, ``net_gradient``, ``n_id``).
+        ``frame``, ``x``, ``y``, ``net_gradient``, ``n_id``; the
+        wavelet identification has no ``net_gradient``).
     info : list of dict
         Metadata information to be saved alongside the identifications.
     """

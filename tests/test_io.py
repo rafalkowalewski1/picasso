@@ -213,21 +213,20 @@ class TestSaveLoadLocs:
             locs["x"].to_numpy(),
         )
 
-    def test_combine_channels_inner_join_preserves_all_rows(
-        self, tmp_path, locs, info
-    ):
+    def test_combine_channels_preserves_all_rows(self, tmp_path, locs, info):
         # Regression test for "Combine all channels" only saving the first
-        # channel. The GUI combines channels with
-        # ``pd.concat(..., join="inner")``. If an outer join were used,
-        # columns missing from some channels would become NaN and
-        # io.save_locs -> lib.ensure_sanity (dropna how="any") would drop
-        # every row from those channels, silently discarding all but one.
+        # channel. The GUI combines channels with ``lib.concat_locs``. A
+        # plain (outer) ``pd.concat`` would turn columns missing from some
+        # channels into NaN and io.save_locs -> lib.ensure_sanity (dropna
+        # how="any") would drop every row from those channels, silently
+        # discarding all but one.
         ch0 = locs.copy()
         # Second channel lacks a column present in the first (e.g. "z").
         extra_col = "z" if "z" in ch0.columns else ch0.columns[-1]
         ch1 = locs.copy().drop(columns=[extra_col])
 
-        combined = pd.concat([ch0, ch1], ignore_index=True, join="inner")
+        with pytest.warns(UserWarning, match=extra_col):
+            combined = lib.concat_locs([ch0, ch1])
         # No NaN-introducing columns survive, so no rows are dropped.
         assert extra_col not in combined.columns
         assert len(combined) == len(ch0) + len(ch1)

@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from picasso import localize, registration, spline, transforms
+from picasso import localize, registration, spline, transforms, wavelet
 from picasso.fitting import precision
 
 from tests.conftest import (
@@ -2263,3 +2263,132 @@ class TestGuiWiring:
         )
         assert "bead_diagnostics" in finished
         assert "inspect_beads_action" in finished
+
+
+# ---------------------------------------------------------------------------
+# Wavelet bead detection
+# ---------------------------------------------------------------------------
+
+
+class TestWaveletDetection:
+    """Every calibration entry point detects by wavelet segmentation when
+    given ``wavelet`` (the method selected for the movie), and then needs no
+    minimum net gradient."""
+
+    WAVELET = wavelet.WaveletParameters()
+
+    def test_calibrate_spline(self):
+        movie, bead_xy, _ = _synthetic_bead_movie()
+        calib = spline.calibrate_spline(
+            movie,
+            info=[{"Frames": int(movie.shape[0])}],
+            camera_info=CAMERA_INFO,
+            box=BOX,
+            minimum_ng=None,
+            d=20.0,
+            wavelet=self.WAVELET,
+        )
+        assert calib["n_beads"] == len(bead_xy)
+
+    def test_detect_bead_positions(self):
+        movie, bead_xy, focus = _synthetic_bead_movie()
+        beads = spline._detect_bead_positions(
+            movie, None, BOX, (focus - 2, focus + 2), wavelet=self.WAVELET
+        )
+        assert sorted(zip(beads["x"], beads["y"])) == sorted(bead_xy)
+
+    def test_calibrate_spline_multichannel(self):
+        movie_ref, bead_xy, _ = _synthetic_bead_movie()
+        movie_c = np.roll(movie_ref, shift=(2, -1), axis=(1, 2))
+        info = [{"Frames": int(movie_ref.shape[0])}]
+        calib = spline.calibrate_spline_multichannel(
+            [movie_ref, movie_c],
+            infos=[info, info],
+            camera_infos=[CAMERA_INFO, CAMERA_INFO],
+            box=BOX,
+            minimum_ng=None,
+            d=20.0,
+            wavelet=self.WAVELET,
+        )
+        probe = np.array([[20.0, 20.0]])
+        shifted = transforms.from_dict(calib["channel_transforms"][1])
+        np.testing.assert_allclose(
+            shifted.apply(probe), probe + [-1.0, 2.0], atol=0.6
+        )
+
+    def test_calibrate_spline_split_fov_forwards(self, monkeypatch):
+        seen = {}
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return {}
+
+        monkeypatch.setattr(spline, "calibrate_spline_multichannel", spy)
+        spline.calibrate_spline_split_fov(
+            np.zeros((3, 16, 32)),
+            [{}],
+            CAMERA_INFO,
+            BOX,
+            None,
+            20.0,
+            regions=[[[0, 0], [16, 16]], [[0, 16], [16, 32]]],
+            wavelet=self.WAVELET,
+        )
+        assert seen["wavelet"] is self.WAVELET
+
+    def test_refine_multichannel_transforms_from_signal(self):
+        truth = np.array([[1.0, 0.0, 2.0], [0.0, 1.0, -1.5]])
+        movies = TestRefineMultichannelTransformsFromSignal._blinking_movies(
+            truth
+        )
+        calib = {
+            "n_channels": 2,
+            "box": BOX,
+            "n_data": [BOX, BOX, 1],
+            "channel_transforms": [
+                IDENTITY,
+                affine([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]).to_dict(),
+            ],
+        }
+        updated, reg_info = spline.refine_multichannel_transforms_from_signal(
+            movies, calib, minimum_ng=None, box=BOX, wavelet=self.WAVELET
+        )
+        assert reg_info[0]["n_matches"] >= 40
+        np.testing.assert_allclose(
+            affine_matrix(updated["channel_transforms"][1]), truth, atol=0.35
+        )
+
+    def test_refine_split_fov_transforms_from_signal(self):
+        truth = np.array([[1.0, 0.0, 1.5], [0.0, 1.0, -1.0]])
+        movie, regions = (
+            TestRefineSplitFovTransformsFromSignal._blinking_movie(truth)
+        )
+        calib = {
+            "split_fov": True,
+            "n_channels": 2,
+            "box": BOX,
+            "n_data": [BOX, BOX, 1],
+            "regions": regions,
+            "channel_registration": [IDENTITY, IDENTITY],
+            "channel_transforms": [
+                affine([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).to_dict(),
+                affine([[1.0, 0.0, 48.0], [0.0, 1.0, 0.0]]).to_dict(),
+            ],
+        }
+        updated, reg_info = spline.refine_split_fov_transforms_from_signal(
+            movie,
+            calib,
+            regions,
+            minimum_ng=None,
+            box=BOX,
+            wavelet=self.WAVELET,
+        )
+        assert reg_info[0]["n_matches"] >= 40
+        # the detections are integer box centers, as for the net gradient,
+        # which leaves a sub-pixel residual (the tolerance of the
+        # multichannel refinement above)
+        np.testing.assert_allclose(
+            affine_matrix(updated["channel_registration"][1]),
+            truth,
+            atol=0.35,
+        )

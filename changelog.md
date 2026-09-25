@@ -20,6 +20,9 @@ Last change: 25-SEP-2026 CEST
 - `picasso.render` is distributed as a package (`kernels`, `geometry`, `splat`, `scene`, `overlays_qt`, `animation`, `backend`, `gpu`); every former `picasso.render.*` name is still importable from `picasso.render`.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
 
+### Localize
+- New spot identification method: B-spline wavelet segmentation (Izeddin et al., *Opt. Express* 2012), see the [documentation](https://picassosr.readthedocs.io/en/latest/localize.html#b-spline-wavelet-identification).
+
 ### **Backward incompatible changes:**
 - *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.
 - The API deprecated in v0.11 is removed:
@@ -34,6 +37,7 @@ Last change: 25-SEP-2026 CEST
 - The spatial index stored in localization .hdf5 files (`/render_index`). See the [documentation](https://picassosr.readthedocs.io/en/latest/files.html#spatial-index).
 - The user settings file (`~/.picasso/settings.yaml`) is no longer lost when it cannot be read. Also, the [documentation](https://picassosr.readthedocs.io/en/latest/others.html#user-settings-file) has been added.
 - The Windows one-click installer's *GPU* edition is renamed *CUDA*, similarly the installed folders were renamed etc.
+- Fixed: combining localizations whose columns differ (e.g. with and without `net_gradient`, spherical and elliptical, least-squares and MLE fits, or 2D and 3D data) silently deleted all localizations of the files lacking a column when saving. `picasso join`, RESI, and the multi-channel saves of Render (picked localizations, also per pick) and its 3D window now drop the columns not all of them have, with a warning.
 
 ### Technical details on Render update
 - **Multi-threaded CPU rendering**: the render kernels release the GIL and channels are rendered in parallel by a thread pool; a single large channel is split into row chunks rendered in parallel and summed in a fixed order.

@@ -13515,16 +13515,13 @@ class View(QtWidgets.QLabel):
         path : str
             Path for saving localizations.
         """
-        # for each channel stack locs from all picks and combine them
-        locs = None
-        for channel in range(len(self.locs_paths)):
-            channel_locs = self.picked_locs(channel)
-            channel_locs = pd.concat(channel_locs, ignore_index=True)
-            locs = (
-                channel_locs
-                if locs is None
-                else pd.concat([locs, channel_locs], ignore_index=True)
-            )
+        # for each channel stack locs from all picks and combine them; the
+        # channels need not all have the same columns
+        channel_locs = [
+            pd.concat(self.picked_locs(channel), ignore_index=True)
+            for channel in range(len(self.locs_paths))
+        ]
+        locs = lib.concat_locs(channel_locs) if channel_locs else None
 
         # save
         if locs is not None:
@@ -13551,9 +13548,10 @@ class View(QtWidgets.QLabel):
         # from all channels within one pick
         locs = list(zip(*locs))
 
-        # stack arrays from all channels in each pick
+        # stack arrays from all channels in each pick; the channels need
+        # not all have the same columns
         for i in range(len(locs)):
-            locs[i] = pd.concat(locs[i], ignore_index=True)
+            locs[i] = lib.concat_locs(locs[i])
 
         if locs is not None:
             areas = self.pick_areas()
@@ -15890,10 +15888,9 @@ class Window(QtWidgets.QMainWindow):
                     check_ext=".yaml",
                 )
                 if path:
-                    # combine locs from all channels
-                    all_locs = pd.concat(
-                        self.view.locs, ignore_index=True, join="inner"
-                    )
+                    # combine locs from all channels, keeping the columns
+                    # they all have
+                    all_locs = lib.concat_locs(self.view.locs)
                     all_locs.sort_values(
                         kind="quicksort",
                         by="frame",

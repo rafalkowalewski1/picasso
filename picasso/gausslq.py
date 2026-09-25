@@ -886,9 +886,7 @@ def _locs_from_fits(
         b = np.minimum(theta[:, 4], theta[:, 5])
         ellipticity = (a - b) / a
         columns["ellipticity"] = ellipticity.astype(np.float32)
-    columns["net_gradient"] = identifications["net_gradient"].astype(
-        np.float32
-    )
+    columns.update(lib.net_gradient_column(identifications))
     if rotated:
         # Match the fitting subpackage's convention (see
         # localize.locs_from_fits_gauss):

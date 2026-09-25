@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from picasso import clusterer, lib, postprocess
+from picasso import clusterer, io, lib, postprocess
 
 
 # Reused parameters
@@ -1974,6 +1974,28 @@ class TestResi:
         assert any(
             "Clustering radius xy (nm) for each channel" in d for d in new_info
         )
+
+    def test_channels_with_different_columns_keep_all_centers(
+        self, locs, info, tmp_path
+    ):
+        """E.g. a wavelet-identified channel (no ``net_gradient``) next to a
+        net gradient one: every center survives the save, which drops rows
+        with NaN."""
+        assert "net_gradient" in locs.columns
+        no_ng = locs.drop(columns="net_gradient")
+        path = str(tmp_path / "resi.hdf5")
+        with pytest.warns(UserWarning, match="net_gradient"):
+            out, _ = postprocess.resi(
+                [locs.copy(), no_ng],
+                [info, info],
+                radius_xy=2 / 130,
+                min_locs=2,
+                resi_path=path,
+            )
+        assert "net_gradient" not in out.columns
+        assert set(out["resi_channel_id"]) == {0, 1}
+        saved, _ = io.load_locs(path)
+        assert len(saved) == len(out)
 
     def test_resi_requires_two_channels(self, locs, info):
         with pytest.raises(ValueError):

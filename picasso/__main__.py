@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import os.path
 import argparse
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 import pandas as pd
 from . import __version__
 from .transforms import MODELS as TRANSFORM_MODELS
+
+if TYPE_CHECKING:  # imported lazily, like every analysis module here
+    from .wavelet import WaveletParameters
 
 
 def picasso_logo():
@@ -1119,6 +1122,76 @@ _FIT_METHOD_MAP = {
 }
 
 
+def _add_identification_method_args(
+    parser: argparse.ArgumentParser, what: str = "spot"
+) -> None:
+    """Add the arguments that select the identification method (and the
+    wavelet settings), shared by every command that identifies spots or
+    beads. The wavelet defaults are left to ``wavelet.WaveletParameters``,
+    see ``_wavelet_from_args``."""
+    parser.add_argument(
+        "-im",
+        "--identification-method",
+        choices=["net-gradient", "wavelet"],
+        default="net-gradient",
+        help=(
+            f"how {what}s are identified: local maxima above the minimum net"
+            " gradient (the default), or B-spline wavelet segmentation"
+            " (Izeddin et al., Opt. Express, 2012), which ignores --gradient"
+        ),
+    )
+    parser.add_argument(
+        "--wavelet-threshold",
+        type=float,
+        default=None,
+        help=(
+            "threshold of the wavelet identification in units of the noise"
+            " standard deviation; default 0.5 (Izeddin et al. use 0.5-2)"
+        ),
+    )
+    parser.add_argument(
+        "--wavelet-noise",
+        choices=["image-std", "w1-mad"],
+        default=None,
+        help=(
+            "noise estimate of the wavelet identification: the standard"
+            " deviation of the frame (image-std, the default) or the median"
+            " absolute deviation of the first wavelet plane (w1-mad), which"
+            " is robust to dense spots and uneven background"
+        ),
+    )
+    parser.add_argument(
+        "--wavelet-min-area",
+        type=int,
+        default=None,
+        help=(
+            "smallest region (in pixels) kept by the wavelet identification;"
+            " default 4"
+        ),
+    )
+
+
+def _wavelet_from_args(
+    args: argparse.Namespace,
+) -> WaveletParameters | None:
+    """The wavelet identification settings given on the command line, or
+    None for the net gradient identification. Read with defaults, since
+    ``picasso.server.watcher`` builds its own argument namespace."""
+    if getattr(args, "identification_method", None) != "wavelet":
+        return None
+    from .wavelet import WaveletParameters
+
+    default = WaveletParameters()
+    threshold = getattr(args, "wavelet_threshold", None)
+    noise = getattr(args, "wavelet_noise", None)
+    min_area = getattr(args, "wavelet_min_area", None)
+    return WaveletParameters(
+        threshold=default.threshold if threshold is None else threshold,
+        noise=default.noise if noise is None else noise.replace("-", "_"),
+        min_area=default.min_area if min_area is None else min_area,
+    )
+
+
 def _localize_process_file(
     paths: str | list[str],
     i: int,
@@ -1216,6 +1289,12 @@ def _localize_process_file(
         "Temporal Median Window": args.temporal_median,
         "Gaussian Filter Sigma": args.gaussian_filter,
     }
+    wavelet = _wavelet_from_args(args)
+    if wavelet is not None:
+        from .localize import IDENTIFY_METHOD_WAVELET
+
+        parameters["Identification Method"] = IDENTIFY_METHOD_WAVELET
+        parameters.update(wavelet.to_info())
 
     locs, info = localize(
         movie,
@@ -1327,6 +1406,7 @@ def _localize_regions(
         threaded=True,
         temporal_median_window=args.temporal_median,
         gaussian_filter_sigma=args.gaussian_filter,
+        wavelet=_wavelet_from_args(args),
         progress_callback="console",
     )
     print(
@@ -1956,6 +2036,7 @@ def _spline_calibrate_split_fov(
         model=registration,
         path=out_path,
         progress_callback=lambda i: print(f"  step {i}/3"),
+        wavelet=_wavelet_from_args(args),
     )
 
 
@@ -1981,6 +2062,7 @@ def _spline_calibrate_single(
         correct_z_bias=args.correct_z_bias,
         path=out_path,
         progress_callback=lambda i: print(f"  step {i}/3"),
+        wavelet=_wavelet_from_args(args),
     )
 
 
@@ -2013,6 +2095,7 @@ def _spline_calibrate_multichannel(
         model=registration,
         path=out_path,
         progress_callback=lambda i: print(f"  step {i}/3"),
+        wavelet=_wavelet_from_args(args),
     )
 
 
@@ -2104,6 +2187,7 @@ def _lateral_calibrate(args: argparse.Namespace) -> None:
         ref_path=args.reference,
         target_path=args.target,
         model=args.model,
+        wavelet=_wavelet_from_args(args),
     )
     if args.plot:
         localize.plot_lateral_calibration(qc, save_path=args.plot)
@@ -3878,6 +3962,7 @@ def main():  # noqa: C901
             "needs re-tuning when this is changed"
         ),
     )
+    _add_identification_method_args(localize_parser)
     localize_parser.add_argument(
         "-cc",
         "--convergence",
@@ -4093,6 +4178,7 @@ def main():  # noqa: C901
         default=5000,
         help="minimum net gradient for bead detection",
     )
+    _add_identification_method_args(spline_calib_parser, what="bead")
     spline_calib_parser.add_argument(
         "-s",
         "--step",
@@ -4271,6 +4357,7 @@ def main():  # noqa: C901
         default=5000,
         help="minimum net gradient for bead detection",
     )
+    _add_identification_method_args(lateral_parser, what="bead")
     lateral_parser.add_argument(
         "-px",
         "--pixelsize",

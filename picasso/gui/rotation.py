@@ -3311,11 +3311,9 @@ class RotationWindow(QtWidgets.QMainWindow):
                     check_ext=".yaml",
                 )
                 if path:
-                    # combine locs from all channels
-                    all_locs = pd.concat(
-                        self.window.view.locs,
-                        ignore_index=True,
-                    )
+                    # combine locs from all channels, which need not all
+                    # have the same columns
+                    all_locs = lib.concat_locs(self.window.view.locs)
                     all_locs.sort_values(
                         kind="quicksort",
                         by="frame",

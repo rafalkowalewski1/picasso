@@ -36,6 +36,7 @@ from .. import (
     registration,
     scmos,
     spline,
+    wavelet,
     __version__,
     zfit,
 )
@@ -58,9 +59,32 @@ CONTRAST_SLIDER_SAMPLES = 10
 CONTRAST_SLIDER_PADDING = 0.05
 DEFAULT_PARAMETERS = {
     "Box Size": 7,
+    "Identification Method": localize.IDENTIFY_METHOD_NET_GRADIENT,
     "Min. Net Gradient": 5000,
+    "Wavelet Threshold": wavelet.WaveletParameters().threshold,
+    "Wavelet Noise Estimate": wavelet.WaveletParameters().noise,
+    "Wavelet Min. Area": wavelet.WaveletParameters().min_area,
     "Gaussian Filter Sigma": 0.0,
     "Temporal Median Window": 51,
+}
+#: Identification method combo box entries -> ``localize.IDENTIFY_METHODS``.
+IDENTIFICATION_METHODS = {
+    "Net gradient": localize.IDENTIFY_METHOD_NET_GRADIENT,
+    "B-spline wavelet": localize.IDENTIFY_METHOD_WAVELET,
+}
+#: Wavelet noise estimate combo box entries -> ``wavelet.NOISE_ESTIMATES``.
+WAVELET_NOISE_ESTIMATES = {
+    "Image std": wavelet.NOISE_IMAGE_STD,
+    "First wavelet plane (MAD)": wavelet.NOISE_W1_MAD,
+}
+# ``Window.parameters`` keys of the identification method and its wavelet
+# settings -> their keys in a channel's parameter snapshot
+# (``Window._capture_params``)
+_WAVELET_PARAM_KEYS = {
+    "Identification Method": "identification_method",
+    "Wavelet Threshold": "wavelet_threshold",
+    "Wavelet Noise Estimate": "wavelet_noise",
+    "Wavelet Min. Area": "wavelet_min_area",
 }
 
 IDENTIFY_MODE_SEPARATE = "Each channel separately"
@@ -542,6 +566,25 @@ def _format_mng(minimum_ng: float | list) -> str:
     if isinstance(minimum_ng, (list, tuple)):
         return "/".join(f"{int(_):,}" for _ in minimum_ng)
     return f"{int(minimum_ng):,}"
+
+
+def _threshold_name(parameters: dict) -> str:
+    """Name of the threshold of the identification method in
+    ``parameters``, for messages that ask the user to change it."""
+    if localize.wavelet_from_parameters(parameters) is None:
+        return "minimum net gradient"
+    return "wavelet threshold"
+
+
+def _format_threshold(parameters: dict) -> str:
+    """Render the identification threshold for the status bar: the
+    minimum net gradient, or the wavelet threshold for the wavelet
+    identification."""
+    settings = localize.wavelet_from_parameters(parameters)
+    if settings is None:
+        mng = _format_mng(parameters["Min. Net Gradient"])
+        return f"Min. Net Gradient: {mng}"
+    return f"Wavelet threshold: {settings.threshold:g} x noise"
 
 
 class _LoadCanceledError(Exception):
@@ -2506,8 +2549,8 @@ class RegisterChannelsDialog(lib.Dialog):
         vbox.addWidget(
             QtWidgets.QLabel(
                 "Beads are detected in the currently loaded channels\n"
-                "(or the drawn regions), with the box size and minimum\n"
-                "net gradient set in the Parameters dialog."
+                "(or the drawn regions), with the box size, identification\n"
+                "method and threshold set in the Parameters dialog."
             )
         )
         grid = QtWidgets.QGridLayout()
@@ -2747,9 +2790,17 @@ class ROIDialog(lib.Dialog):
         return self.window.parameters.get("Box Size", 7)
 
     def _split_fov(self) -> bool:
-        """Whether the ROIs are split-FOV channels, which get their own
-        per-region minimum net gradient column."""
+        """Whether the ROIs are split-FOV channels."""
         return bool(self.window.view.split_fov_mode)
+
+    def _region_thresholds(self) -> bool:
+        """Whether the ROIs get a per-region minimum net gradient column:
+        split-FOV channels identified by their net gradient (the wavelet
+        threshold is relative to the noise and shared by all regions)."""
+        return self._split_fov() and (
+            self.window.parameters_dialog.identification_method()
+            == localize.IDENTIFY_METHOD_NET_GRADIENT
+        )
 
     def _commit(self, rois: list) -> None:
         """Clip ``rois`` and store them on the view, refreshing the
@@ -2763,6 +2814,7 @@ class ROIDialog(lib.Dialog):
         view = self.window.view
         mngs = self.window.region_mngs()
         split_fov = self._split_fov()
+        thresholds = self._region_thresholds()
         # the fit settings are per region only when the regions are fitted
         # one at a time; the joint fit uses one calibration for all of them
         per_region_fit = (
@@ -2781,9 +2833,9 @@ class ROIDialog(lib.Dialog):
             "list to analyze the whole frame."
             + (
                 " In split-FOV mode each region is a channel with its own "
-                "min. net gradient (last column); selecting a row also puts "
+                "min. net gradient; selecting a row also puts "
                 "its value on the slider in the parameters dialog."
-                if split_fov
+                if thresholds
                 else ""
             )
             + (
@@ -2795,17 +2847,17 @@ class ROIDialog(lib.Dialog):
             )
         )
         self.table.setColumnCount(
-            4 + (1 if split_fov else 0) + (2 if per_region_fit else 0)
+            4 + (1 if thresholds else 0) + (2 if per_region_fit else 0)
         )
         self.table.setHorizontalHeaderLabels(
             ["y_min", "x_min", "y_max", "x_max"]
-            + (["min_ng"] if split_fov else [])
+            + (["min_ng"] if thresholds else [])
             + (["model", "PSF calib."] if per_region_fit else [])
         )
         self.table.setRowCount(len(view.rois))
         for row, ((y_min, x_min), (y_max, x_max)) in enumerate(view.rois):
             values = [y_min, x_min, y_max, x_max]
-            if split_fov:
+            if thresholds:
                 values.append(mngs[row])
             for col, val in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(str(int(val)))
@@ -2813,7 +2865,7 @@ class ROIDialog(lib.Dialog):
                 self.table.setItem(row, col, item)
             if per_region_fit:
                 for col, (text, tip) in enumerate(
-                    _region_fit_summary(params[row]), start=5
+                    _region_fit_summary(params[row]), start=len(values)
                 ):
                     item = QtWidgets.QTableWidgetItem(text)
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -2835,13 +2887,13 @@ class ROIDialog(lib.Dialog):
         thresholds) from the table, clipping overlaps."""
         if self._updating:
             return
-        split_fov = self._split_fov()
+        thresholds = self._region_thresholds()
         rois = []
         mngs = []
         for row in range(self.table.rowCount()):
             try:
                 vals = [int(self.table.item(row, c).text()) for c in range(4)]
-                if split_fov:
+                if thresholds:
                     mngs.append(int(self.table.item(row, 4).text()))
             except (AttributeError, ValueError):
                 return  # incomplete row, wait for the user to finish
@@ -2850,7 +2902,7 @@ class ROIDialog(lib.Dialog):
         self._commit(rois)
         # clipping can drop or split rectangles, so only adopt the edited
         # thresholds when the rows still line up with the stored regions
-        if split_fov and len(mngs) == len(self.window.view.rois):
+        if thresholds and len(mngs) == len(self.window.view.rois):
             self.window.view.roi_mngs = mngs
             self.window.parameters_dialog.sync_mng_to_selected_region()
             self.window.draw_frame()
@@ -3275,6 +3327,7 @@ class ParametersDialog(lib.Dialog):
     CALIB_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#d-calibration"  # noqa: E501
     GAUSSIAN_FILTER_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#gaussian-filter"  # noqa: E501
     IDENT_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#identification-and-fitting-of-single-molecule-spots"  # noqa: E501
+    WAVELET_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#b-spline-wavelet-identification"  # noqa: E501
     ROI_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#regions-of-interest-rois"  # noqa: E501
     SPLINE_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#experimental-psf-cubic-spline-fitting"  # noqa: E501
     TEMPORAL_MEDIAN_URL = "https://picassosr.readthedocs.io/en/latest/localize.html#temporal-median-filter"  # noqa: E501
@@ -3352,18 +3405,51 @@ class ParametersDialog(lib.Dialog):
         self.box_spinbox.valueChanged.connect(self.on_box_changed)
         first_row.addWidget(self.box_spinbox)
 
+        # identification method: net gradient or wavelet segmentation
+        method_row = QtWidgets.QHBoxLayout()
+        identification_grid.addLayout(method_row, 1, 0, 1, 2)
+        method_tip = (
+            "How spots are found.\n\n"
+            "Net gradient: local maxima whose net gradient (a measure of\n"
+            "brightness) exceeds a threshold.\n\n"
+            "B-spline wavelet: segmentation of the second plane of the a\n"
+            "trous B-spline wavelet transform at a threshold in units of the\n"
+            "noise, with a watershed that splits overlapping spots (Izeddin\n"
+            "et al., Opt. Express, 2012). The threshold does not depend on\n"
+            "the camera gain or the dye brightness, so one value serves all\n"
+            "channels. Its localizations have no net gradient."
+        )
+        method_label = QtWidgets.QLabel("Method:")
+        method_label.setToolTip(method_tip)
+        method_row.addWidget(method_label)
+        self.identification_method_combo = QtWidgets.QComboBox()
+        for label in IDENTIFICATION_METHODS:
+            self.identification_method_combo.addItem(label)
+        self.identification_method_combo.setToolTip(method_tip)
+        self.identification_method_combo.currentIndexChanged.connect(
+            self.on_identification_method_changed
+        )
+        method_row.addWidget(self.identification_method_combo)
+        method_row.addStretch(1)
+
+        # the net gradient settings, shown for that method only
+        self.mng_widget = QtWidgets.QWidget()
+        mng_grid = QtWidgets.QGridLayout(self.mng_widget)
+        mng_grid.setContentsMargins(0, 0, 0, 0)
+        identification_grid.addWidget(self.mng_widget, 2, 0, 1, 2)
+
         # Min. Net Gradient
         mng_label = QtWidgets.QLabel("Min. net gradient:")
         mng_label.setToolTip(
             "Threshold (related to brightness) for spot identification."
         )
-        identification_grid.addWidget(mng_label, 1, 0)
+        mng_grid.addWidget(mng_label, 0, 0)
         self.mng_spinbox = QtWidgets.QSpinBox()
         self.mng_spinbox.setRange(0, int(1e9))
         self.mng_spinbox.setValue(DEFAULT_PARAMETERS["Min. Net Gradient"])
         self.mng_spinbox.setKeyboardTracking(False)
         self.mng_spinbox.valueChanged.connect(self.on_mng_spinbox_changed)
-        identification_grid.addWidget(self.mng_spinbox, 1, 1)
+        mng_grid.addWidget(self.mng_spinbox, 0, 1)
 
         # Slider
         self.mng_slider = QtWidgets.QSlider()
@@ -3381,10 +3467,10 @@ class ParametersDialog(lib.Dialog):
         self.mng_slider.setSingleStep(1)
         self.mng_slider.setPageStep(20)
         self.mng_slider.valueChanged.connect(self.on_mng_slider_changed)
-        identification_grid.addWidget(self.mng_slider, 2, 0, 1, 2)
+        mng_grid.addWidget(self.mng_slider, 1, 0, 1, 2)
 
         hbox = QtWidgets.QHBoxLayout()
-        identification_grid.addLayout(hbox, 3, 0, 1, 2)
+        mng_grid.addLayout(hbox, 2, 0, 1, 2)
 
         # Min SpinBox
         self.mng_min_spinbox = QtWidgets.QSpinBox()
@@ -3410,6 +3496,88 @@ class ParametersDialog(lib.Dialog):
         self.mng_max_spinbox.valueChanged.connect(self.on_mng_max_changed)
         hbox.addWidget(self.mng_max_spinbox)
 
+        # the wavelet settings, shown for that method only
+        self.wavelet_widget = QtWidgets.QWidget()
+        wavelet_grid = QtWidgets.QGridLayout(self.wavelet_widget)
+        wavelet_grid.setContentsMargins(0, 0, 0, 0)
+        identification_grid.addWidget(self.wavelet_widget, 3, 0, 1, 2)
+        threshold_tip = (
+            "Threshold on the second wavelet plane, in units of the\n"
+            "standard deviation of the noise. Izeddin et al. use 0.5 to 2\n"
+            "and 0.5 for their figures, which is the default. Higher values\n"
+            "find fewer, brighter spots.\n\n"
+            "The standard deviation of a frame includes its spots, so it\n"
+            "overestimates the noise, which the low default relies on. In\n"
+            "sparse frames, and with the first wavelet plane estimate,\n"
+            "values around 1 keep noise from being identified as spots.\n"
+            "Check with 'Preview'."
+        )
+        threshold_label = QtWidgets.QLabel("Wavelet threshold:")
+        threshold_label.setToolTip(threshold_tip)
+        wavelet_grid.addWidget(threshold_label, 0, 0)
+        self.wavelet_threshold_spinbox = QtWidgets.QDoubleSpinBox()
+        self.wavelet_threshold_spinbox.setRange(0.0, 100.0)
+        self.wavelet_threshold_spinbox.setDecimals(3)
+        self.wavelet_threshold_spinbox.setSingleStep(0.05)
+        self.wavelet_threshold_spinbox.setSuffix(" x noise")
+        self.wavelet_threshold_spinbox.setValue(
+            DEFAULT_PARAMETERS["Wavelet Threshold"]
+        )
+        self.wavelet_threshold_spinbox.setKeyboardTracking(False)
+        self.wavelet_threshold_spinbox.setToolTip(threshold_tip)
+        self.wavelet_threshold_spinbox.valueChanged.connect(
+            self.on_wavelet_changed
+        )
+        wavelet_grid.addWidget(self.wavelet_threshold_spinbox, 0, 1)
+        # documents the wavelet identification only, so it is part of (and
+        # shown with) its settings, at the right edge of the dialog
+        self.wavelet_help_button = lib.HelpButton(self.WAVELET_URL)
+        wavelet_grid.addWidget(
+            self.wavelet_help_button,
+            0,
+            2,
+            QtCore.Qt.AlignmentFlag.AlignRight,
+        )
+        noise_tip = (
+            "How the noise is estimated in each frame.\n\n"
+            "Image std: the standard deviation of the frame, a good\n"
+            "estimate when spots are sparse (used by Izeddin et al.).\n\n"
+            "First wavelet plane: the median absolute deviation (MAD) of the\n"
+            "finest wavelet plane, robust to dense spots and to an uneven\n"
+            "background."
+        )
+        noise_label = QtWidgets.QLabel("Noise estimate:")
+        noise_label.setToolTip(noise_tip)
+        wavelet_grid.addWidget(noise_label, 1, 0)
+        self.wavelet_noise_combo = QtWidgets.QComboBox()
+        for label in WAVELET_NOISE_ESTIMATES:
+            self.wavelet_noise_combo.addItem(label)
+        self.wavelet_noise_combo.setToolTip(noise_tip)
+        self.wavelet_noise_combo.currentIndexChanged.connect(
+            self.on_wavelet_changed
+        )
+        wavelet_grid.addWidget(self.wavelet_noise_combo, 1, 1)
+        area_tip = (
+            "Regions of the thresholded wavelet plane with fewer pixels are\n"
+            "discarded as noise (4 in Izeddin et al.)."
+        )
+        area_label = QtWidgets.QLabel("Min. region area:")
+        area_label.setToolTip(area_tip)
+        wavelet_grid.addWidget(area_label, 2, 0)
+        self.wavelet_min_area_spinbox = QtWidgets.QSpinBox()
+        self.wavelet_min_area_spinbox.setRange(1, 100)
+        self.wavelet_min_area_spinbox.setSuffix(" px")
+        self.wavelet_min_area_spinbox.setValue(
+            DEFAULT_PARAMETERS["Wavelet Min. Area"]
+        )
+        self.wavelet_min_area_spinbox.setKeyboardTracking(False)
+        self.wavelet_min_area_spinbox.setToolTip(area_tip)
+        self.wavelet_min_area_spinbox.valueChanged.connect(
+            self.on_wavelet_changed
+        )
+        wavelet_grid.addWidget(self.wavelet_min_area_spinbox, 2, 1)
+        self.wavelet_widget.setVisible(False)
+
         # temporal median background subtraction (identification only)
         tm_row = QtWidgets.QHBoxLayout()
         tm_row.addWidget(lib.HelpButton(self.TEMPORAL_MEDIAN_URL))
@@ -3422,9 +3590,10 @@ class ParametersDialog(lib.Dialog):
             "static structures.\n\n"
             "Only the identification uses the filtered frames: fitting, spot\n"
             "cutting and photon conversion always use the raw movie.\n\n"
-            "Net gradient values change when this is on, so re-tune 'Min.\n"
-            "net gradient' with 'Preview' enabled after switching it on or"
-            "off.\n\nNot applied to bead stacks (3D / spline calibration)."
+            "Net gradient values change when this is on, so re-tune the\n"
+            "identification threshold with 'Preview' enabled after switching\n"
+            "it on or off.\n\nNot applied to bead stacks (3D / spline "
+            "calibration)."
         )
         self.temporal_median_checkbox.setTristate(False)
         self.temporal_median_checkbox.setChecked(False)
@@ -3466,8 +3635,8 @@ class ParametersDialog(lib.Dialog):
             "Only the identification uses the smoothed frames: fitting, spot\n"
             "cutting and photon conversion always use the raw movie, so\n"
             "photon counts and localization precisions are unaffected.\n\n"
-            "Smoothing requires re-tuning of 'Min. net gradient' with\n"
-            "'Preview' enabled after changing this value.\n\n"
+            "Smoothing requires re-tuning of the identification threshold\n"
+            "with 'Preview' enabled after changing this value.\n\n"
             "Note: large values merge neighboring spots into one."
         )
         gaussian_label = QtWidgets.QLabel("Gaussian filter sigma:")
@@ -3547,7 +3716,8 @@ class ParametersDialog(lib.Dialog):
             "The sum is shown (and previewed) as soon as it is selected,\n"
             "wherever the channels are already registered.\n"
             "Note that the minimum net gradient has to be re-tuned for the\n"
-            "sum: it is in photons and over all channels."
+            "sum: it is in photons and over all channels (the wavelet\n"
+            "threshold is relative to the noise of the sum)."
         )
         self.identify_mode_label.setToolTip(identify_mode_tip)
         self.identify_mode_combo = QtWidgets.QComboBox()
@@ -3591,9 +3761,11 @@ class ParametersDialog(lib.Dialog):
             "keys) to fine-tune its registration. 'Calibrate spline PSF'\n"
             "and the spline fit then use these regions as channels of\n"
             "this movie.\n\n"
-            "Each region also carries its own min. net gradient, since the\n"
-            "channels need not share a brightness scale: select a region\n"
-            "and the slider above tunes that region alone."
+            "With the net gradient identification, each region also carries\n"
+            "its own min. net gradient, since the channels need not share a\n"
+            "brightness scale: select a region and the slider above tunes\n"
+            "that region alone. The wavelet threshold is relative to the\n"
+            "noise and shared by all regions."
         )
         self.split_fov_checkbox.setTristate(False)
         self.split_fov_checkbox.stateChanged.connect(self.on_split_fov_changed)
@@ -3652,10 +3824,10 @@ class ParametersDialog(lib.Dialog):
         self.link_box_checkbox.setToolTip(
             "Use the same box size for every channel."
         )
-        self.link_mng_checkbox = QtWidgets.QCheckBox("Min. net gradient")
-        self.link_mng_checkbox.setToolTip(
-            "Use the same minimum net gradient for every channel."
-        )
+        # named after the settings of the selected identification method,
+        # see _update_method_widgets; it links the method itself, too
+        self.link_mng_checkbox = QtWidgets.QCheckBox()
+        self._update_link_threshold_checkbox()
         self.link_camera_checkbox = QtWidgets.QCheckBox("Camera settings")
         self.link_camera_checkbox.setToolTip(
             "Use the same camera and photon-conversion settings (camera,\n"
@@ -5262,6 +5434,83 @@ class ParametersDialog(lib.Dialog):
         """Handle changes to the parameter boxes."""
         self.window.on_parameters_changed()
 
+    def on_identification_method_changed(self, _index: int = 0) -> None:
+        """Show only the settings of the selected identification method and
+        refresh the preview."""
+        self._update_method_widgets()
+        self.window.on_parameters_changed()
+
+    def _update_method_widgets(self) -> None:
+        """Show the widgets that belong to the selected identification
+        method and hide those of the other one: the threshold settings, the
+        'Same across channels' threshold link and, in split-FOV mode, the
+        per-region minimum net gradients of the ROI table (the regions on
+        the image are relabeled by the next redraw)."""
+        is_wavelet = (
+            self.identification_method() == localize.IDENTIFY_METHOD_WAVELET
+        )
+        self.mng_widget.setVisible(not is_wavelet)
+        self.wavelet_widget.setVisible(is_wavelet)
+        self._update_link_threshold_checkbox()
+        roi_dialog = getattr(self, "roi_dialog", None)
+        if roi_dialog is not None:
+            roi_dialog.update_table()
+
+    def _update_link_threshold_checkbox(self) -> None:
+        """Name the 'Same across channels' threshold link after the
+        settings of the selected identification method."""
+        checkbox = getattr(self, "link_mng_checkbox", None)
+        if checkbox is None:  # built after the identification widgets
+            return
+        if self.identification_method() == localize.IDENTIFY_METHOD_WAVELET:
+            checkbox.setText("Wavelet settings")
+            checkbox.setToolTip(
+                "Use the same identification method and wavelet settings for"
+                "\nevery channel."
+            )
+        else:
+            checkbox.setText("Min. net gradient")
+            checkbox.setToolTip(
+                "Use the same identification method and minimum net gradient"
+                "\nfor every channel."
+            )
+
+    def on_wavelet_changed(self, _value: float = 0.0) -> None:
+        """Refresh the preview after a wavelet setting changed."""
+        if self.identification_method() == localize.IDENTIFY_METHOD_WAVELET:
+            self.window.on_parameters_changed()
+
+    def identification_method(self) -> str:
+        """The selected identification method, one of
+        ``localize.IDENTIFY_METHODS``."""
+        return IDENTIFICATION_METHODS[
+            self.identification_method_combo.currentText()
+        ]
+
+    def set_identification_method(self, method: str) -> None:
+        """Select an identification method (one of
+        ``localize.IDENTIFY_METHODS``); unknown values select the net
+        gradient."""
+        for label, value in IDENTIFICATION_METHODS.items():
+            if value == method:
+                self.identification_method_combo.setCurrentText(label)
+                return
+        self.identification_method_combo.setCurrentIndex(0)
+
+    def wavelet_noise(self) -> str:
+        """The selected wavelet noise estimate, one of
+        ``wavelet.NOISE_ESTIMATES``."""
+        return WAVELET_NOISE_ESTIMATES[self.wavelet_noise_combo.currentText()]
+
+    def set_wavelet_noise(self, noise: str) -> None:
+        """Select a wavelet noise estimate (one of
+        ``wavelet.NOISE_ESTIMATES``); unknown values select the default."""
+        for label, value in WAVELET_NOISE_ESTIMATES.items():
+            if value == noise:
+                self.wavelet_noise_combo.setCurrentText(label)
+                return
+        self.wavelet_noise_combo.setCurrentIndex(0)
+
     def on_camera_changed(self, index: int) -> None:
         """Handle changes to the camera selection."""
         self.set_photon_scalar("gain", 1)
@@ -6037,6 +6286,38 @@ class Window(QtWidgets.QMainWindow):
             self.parameters_dialog.gaussian_filter_spinbox.setValue(
                 float(gaussian_sigma)
             )
+        self._load_identification_method_settings(settings)
+
+    def _load_identification_method_settings(self, settings: dict) -> None:
+        """Restore the last-used identification method and wavelet
+        settings; invalid stored values keep the defaults."""
+        dialog = self.parameters_dialog
+        stored = settings["Localize"]
+        try:
+            params = wavelet.WaveletParameters(
+                threshold=stored.get(
+                    "wavelet_threshold",
+                    DEFAULT_PARAMETERS["Wavelet Threshold"],
+                ),
+                noise=stored.get(
+                    "wavelet_noise",
+                    DEFAULT_PARAMETERS["Wavelet Noise Estimate"],
+                ),
+                min_area=stored.get(
+                    "wavelet_min_area", DEFAULT_PARAMETERS["Wavelet Min. Area"]
+                ),
+            )
+        except (TypeError, ValueError):
+            params = wavelet.WaveletParameters()
+        dialog.wavelet_threshold_spinbox.setValue(params.threshold)
+        dialog.set_wavelet_noise(params.noise)
+        dialog.wavelet_min_area_spinbox.setValue(params.min_area)
+        dialog.set_identification_method(
+            stored.get(
+                "identification_method",
+                DEFAULT_PARAMETERS["Identification Method"],
+            )
+        )
 
     def _load_fit_settings(self, settings: dict) -> None:
         """Restore the last-used fitting model, optimizer and fit mode.
@@ -6090,6 +6371,18 @@ class Window(QtWidgets.QMainWindow):
         settings["Localize"][
             "gaussian_filter_sigma"
         ] = self.parameters_dialog.gaussian_filter_spinbox.value()
+        settings["Localize"][
+            "identification_method"
+        ] = self.parameters_dialog.identification_method()
+        settings["Localize"][
+            "wavelet_threshold"
+        ] = self.parameters_dialog.wavelet_threshold_spinbox.value()
+        settings["Localize"][
+            "wavelet_noise"
+        ] = self.parameters_dialog.wavelet_noise()
+        settings["Localize"][
+            "wavelet_min_area"
+        ] = self.parameters_dialog.wavelet_min_area_spinbox.value()
         settings["Localize"][
             "fit_model"
         ] = self.parameters_dialog.fit_model.currentText()
@@ -6530,6 +6823,7 @@ class Window(QtWidgets.QMainWindow):
             minimum_ng=self.parameters_dialog.mng_slider.value(),
             prompt_for_path=self._prompt_for_path,
             pixelsize_prompt=_pixelsize_prompt,
+            wavelet=localize.wavelet_from_parameters(self.parameters),
         )
         worker.statusChanged.connect(self.status_bar.showMessage)
         worker.promptRequested.connect(self._on_affine_prompt_requested)
@@ -6836,6 +7130,7 @@ class Window(QtWidgets.QMainWindow):
             channel_paths=channel_paths,
             regions=regions,
             path=path,
+            wavelet=localize.wavelet_from_parameters(self.parameters),
             **kwargs,
         )
         self.registration_worker.statusChanged.connect(
@@ -7143,6 +7438,7 @@ class Window(QtWidgets.QMainWindow):
             camera_info=self.camera_info,
             box=parameters["Box Size"],
             minimum_ng=parameters["Min. Net Gradient"],
+            wavelet=localize.wavelet_from_parameters(parameters),
             step=step,
             frames_per_step=frames_per_step,
             frame_order=frame_order,
@@ -7939,6 +8235,10 @@ class Window(QtWidgets.QMainWindow):
             "temporal_median_on": pd.temporal_median_checkbox.isChecked(),
             "temporal_median": pd.temporal_median_spinbox.value(),
             "gaussian_filter_sigma": pd.gaussian_filter_spinbox.value(),
+            "identification_method": pd.identification_method(),
+            "wavelet_threshold": pd.wavelet_threshold_spinbox.value(),
+            "wavelet_noise": pd.wavelet_noise(),
+            "wavelet_min_area": pd.wavelet_min_area_spinbox.value(),
         }
         if hasattr(pd, "camera"):
             params["camera"] = pd.camera.currentIndex()
@@ -7967,6 +8267,31 @@ class Window(QtWidgets.QMainWindow):
             pd.mng_max_spinbox.setValue(params["mng_max"])
             pd.mng_slider.setValue(params["mng"])
             pd.mng_spinbox.setValue(params["mng"])
+            # .get() with defaults: parameter sets captured before the
+            # wavelet identification existed must still restore
+            pd.wavelet_threshold_spinbox.setValue(
+                params.get(
+                    "wavelet_threshold",
+                    DEFAULT_PARAMETERS["Wavelet Threshold"],
+                )
+            )
+            pd.set_wavelet_noise(
+                params.get(
+                    "wavelet_noise",
+                    DEFAULT_PARAMETERS["Wavelet Noise Estimate"],
+                )
+            )
+            pd.wavelet_min_area_spinbox.setValue(
+                params.get(
+                    "wavelet_min_area", DEFAULT_PARAMETERS["Wavelet Min. Area"]
+                )
+            )
+            pd.set_identification_method(
+                params.get(
+                    "identification_method",
+                    DEFAULT_PARAMETERS["Identification Method"],
+                )
+            )
         # Set the model first so its handler repopulates the optimizer list,
         # then restore the optimizer selection.
         pd.fit_model.setCurrentIndex(params.get("fit_model", 0))
@@ -8031,6 +8356,7 @@ class Window(QtWidgets.QMainWindow):
             keys += ["box"]
         if pd.link_mng_checkbox.isChecked():
             keys += ["mng", "mng_min", "mng_max"]
+            keys += list(_WAVELET_PARAM_KEYS.values())
         if pd.link_calib_checkbox.isChecked():
             keys += ["spline_calibration", "spline_calibration_path"]
         if pd.link_camera_checkbox.isChecked():
@@ -8217,7 +8543,36 @@ class Window(QtWidgets.QMainWindow):
         self.parameters_dialog.gaussian_filter_spinbox.setValue(
             float(gaussian_sigma or 0.0)
         )
+        self._restore_identification_method(info, min_ng)
         self._clean_up_external_ids()
+
+    def _restore_identification_method(
+        self, info: list[dict], min_ng: float | list | None
+    ) -> None:
+        """Select the identification method (and its wavelet settings) that
+        loaded identifications were made with. Files written before the
+        wavelet identification existed name no method; one with a minimum
+        net gradient was made with the net gradient."""
+        method = lib.get_from_metadata(info, "Identification Method")
+        if method is None and min_ng is not None:
+            method = localize.IDENTIFY_METHOD_NET_GRADIENT
+        if method is None:
+            return
+        dialog = self.parameters_dialog
+        if method == localize.IDENTIFY_METHOD_WAVELET:
+            stored = {}
+            for key in wavelet.WaveletParameters().to_info():
+                value = lib.get_from_metadata(info, key)
+                if value is not None:
+                    stored[key] = value
+            try:
+                settings = wavelet.WaveletParameters.from_info(stored)
+            except ValueError:
+                settings = wavelet.WaveletParameters()
+            dialog.wavelet_threshold_spinbox.setValue(settings.threshold)
+            dialog.set_wavelet_noise(settings.noise)
+            dialog.wavelet_min_area_spinbox.setValue(settings.min_area)
+        dialog.set_identification_method(method)
 
     def _clean_up_external_ids(self) -> None:
         if self.identifications is None:
@@ -8470,9 +8825,13 @@ class Window(QtWidgets.QMainWindow):
             )
             if split_fov:
                 # label each region by its channel index (0 = reference)
-                # and the threshold it is identified with
+                # and the threshold it is identified with, which only the net
+                # gradient has per region
                 label = localize.region_label(i)
-                if i < len(region_mngs):
+                if i < len(region_mngs) and (
+                    self.parameters_dialog.identification_method()
+                    == localize.IDENTIFY_METHOD_NET_GRADIENT
+                ):
                     label += f" ({region_mngs[i]:,})"
                 text = self.scene.addSimpleText(label)
                 text.setBrush(QtGui.QBrush(color))
@@ -8509,17 +8868,19 @@ class Window(QtWidgets.QMainWindow):
                 QtCore.Qt.CursorShape.WaitCursor
             )
             try:
+                parameters = self.parameters
                 identifications_frame = localize.identify_by_frame_number(
                     self.identification_movie(),
-                    self.parameters["Min. Net Gradient"],
-                    self.parameters["Box Size"],
+                    parameters["Min. Net Gradient"],
+                    parameters["Box Size"],
                     self.curr_frame_number,
                     roi=self.identification_rois(),
                     frame_bounds=self.frame_range,
+                    wavelet=localize.wavelet_from_parameters(parameters),
                 )
                 self.draw_preview_identifications(
                     identifications_frame,
-                    self.parameters["Box Size"],
+                    parameters["Box Size"],
                 )
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
@@ -8770,7 +9131,11 @@ class Window(QtWidgets.QMainWindow):
         key = (
             frame_number,
             parameters["Box Size"],
+            parameters["Identification Method"],
             str(parameters["Min. Net Gradient"]),
+            parameters["Wavelet Threshold"],
+            parameters["Wavelet Noise Estimate"],
+            parameters["Wavelet Min. Area"],
             parameters["Temporal Median Window"],
             parameters["Gaussian Filter Sigma"],
             tuple(np.asarray(rois).ravel().tolist()) if rois else None,
@@ -8787,6 +9152,7 @@ class Window(QtWidgets.QMainWindow):
                 frame_number,
                 roi=rois,
                 frame_bounds=self.frame_range,
+                wavelet=localize.wavelet_from_parameters(parameters),
             )
         except Exception:
             # another channel's movie must never break the display; without
@@ -8819,6 +9185,12 @@ class Window(QtWidgets.QMainWindow):
                 parameters["Min. Net Gradient"] = params.get(
                     "mng", parameters["Min. Net Gradient"]
                 )
+                # the method and its wavelet settings are the threshold
+                # group, too
+                for key, param in _WAVELET_PARAM_KEYS.items():
+                    parameters[key] = params.get(
+                        param, DEFAULT_PARAMETERS[key]
+                    )
             # the filters are per channel: they are always restored from the
             # snapshot on a channel switch (see ``_apply_params``)
             parameters["Temporal Median Window"] = (
@@ -9735,9 +10107,16 @@ class Window(QtWidgets.QMainWindow):
 
     @property
     def parameters(self) -> dict:
-        """Dictionary with the identification settings: box size, min.
-        net gradient, the temporal median window (0 when disabled), the
-        Gaussian filter sigma (0 when disabled) and the identification mode.
+        """Dictionary with the identification settings: box size, the
+        identification method, min. net gradient, the wavelet settings, the
+        temporal median window (0 when disabled), the Gaussian filter sigma
+        (0 when disabled) and the identification mode.
+
+        The settings of both methods are always present; the metadata
+        written to disk keeps only those of the method used (see
+        ``localize.identification_info``), and ``localize.
+        wavelet_from_parameters`` turns them into what ``localize.identify``
+        takes.
 
         In split-FOV mode "Min. Net Gradient" is the list of per-region
         thresholds (see ``region_mngs``) rather than a single number; every
@@ -9753,11 +10132,15 @@ class Window(QtWidgets.QMainWindow):
         mode = self.identify_mode()
         return {
             "Box Size": dialog.box_spinbox.value(),
+            "Identification Method": dialog.identification_method(),
             "Min. Net Gradient": (
                 dialog.mng_slider.value()
                 if mode == IDENTIFY_MODE_SUM
                 else (self.region_mngs() or dialog.mng_slider.value())
             ),
+            "Wavelet Threshold": dialog.wavelet_threshold_spinbox.value(),
+            "Wavelet Noise Estimate": dialog.wavelet_noise(),
+            "Wavelet Min. Area": dialog.wavelet_min_area_spinbox.value(),
             "Identification Mode": mode,
             "Temporal Median Window": (
                 dialog.temporal_median_spinbox.value()
@@ -9955,11 +10338,15 @@ class Window(QtWidgets.QMainWindow):
             return False  # a partially built window has no channels to sum
         self._sum_registration_failed = False
         if notify:
+            retune = (
+                " Note that it is in photons and over all channels, so the "
+                "minimum net gradient has to be re-tuned for it."
+                if localize.wavelet_from_parameters(self.parameters) is None
+                else ""
+            )
             self.status_bar.showMessage(
                 f"Showing the sum of {len(self.sum_transforms)} channels "
-                f"(registered from {source}). Note that it is in photons and "
-                "over all channels, so the minimum net gradient has to be "
-                "re-tuned for it."
+                f"(registered from {source}).{retune}"
             )
         return True
 
@@ -10103,10 +10490,10 @@ class Window(QtWidgets.QMainWindow):
         progress."""
         n_frames = self.info[0]["Frames"]
         box = parameters["Box Size"]
-        mng = _format_mng(parameters["Min. Net Gradient"])
+        threshold = _format_threshold(parameters)
         message = (
             f"Identifying in frame {frame_number:,} / {n_frames:,}"
-            f" (Box Size: {box}; Min. Net Gradient: {mng}) ..."
+            f" (Box Size: {box}; {threshold}) ..."
         )
         self.status_bar.showMessage(message)
 
@@ -10217,7 +10604,7 @@ class Window(QtWidgets.QMainWindow):
             self.last_identification_info["Frame bounds"] = self.frame_range
             n_identifications = len(identifications)
             box = parameters["Box Size"]
-            mng = _format_mng(parameters["Min. Net Gradient"])
+            threshold = _format_threshold(parameters)
             self.identifications = identifications
             self.ready_for_fit = True
             # for split-FOV data the detections of every region sit in this one
@@ -10236,7 +10623,7 @@ class Window(QtWidgets.QMainWindow):
                 filtered += f"; Gaussian sigma: {gaussian_sigma:g}"
             message = (
                 f"Identified {counted} in {elapsed_time:.2f}"
-                f" seconds. (Box Size: {box}; Min. Net Gradient: {mng}"
+                f" seconds. (Box Size: {box}; {threshold}"
                 f"{filtered}). Ready for fit."
             )
             self.status_bar.showMessage(message)
@@ -10255,8 +10642,9 @@ class Window(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "Spline PSF Calibration",
-                "No beads were identified. Lower the minimum net gradient "
-                "or check the selected frame range and try again.",
+                f"No beads were identified. Lower the "
+                f"{_threshold_name(self.parameters)} or check the selected "
+                "frame range and try again.",
             )
 
     def _identify_all_channels(
@@ -10333,8 +10721,8 @@ class Window(QtWidgets.QMainWindow):
                     self,
                     "Spline PSF Calibration",
                     "No beads were identified in any channel. Lower the "
-                    "minimum net gradient or check the selected frame range "
-                    "and try again.",
+                    f"{_threshold_name(self.parameters)} or check the "
+                    "selected frame range and try again.",
                 )
             return
         idx = state["queue"].pop(0)
@@ -10658,8 +11046,9 @@ class Window(QtWidgets.QMainWindow):
                 "Identify on the channel sum",
                 f"The {where} could not be registered against each other, so "
                 "they cannot be summed. Every channel needs enough detections "
-                "for the transform to be estimated: lower the minimum net "
-                f"gradient of the dim {where} until spots appear in them, or "
+                "for the transform to be estimated: lower the "
+                f"{_threshold_name(self.parameters)} of the dim {where} until "
+                "spots appear in them, or "
                 "load a multichannel / split-FOV spline PSF calibration, "
                 "whose registration is used directly.",
             )
@@ -10800,13 +11189,12 @@ class Window(QtWidgets.QMainWindow):
             reference.ready_for_fit = True
             reference.last_identification_info = self.last_identification_info
         box = parameters["Box Size"]
-        mng = _format_mng(parameters["Min. Net Gradient"])
+        threshold = _format_threshold(parameters)
         self.status_bar.showMessage(
             f"Identified {len(identifications):,} spots on the sum of "
             f"{n_summed} channels in "
-            f"{elapsed_time:.2f} seconds. (Box Size: {box}; Min. Net "
-            f"Gradient: {mng}; registered from {source}). "
-            "Ready for fit."
+            f"{elapsed_time:.2f} seconds. (Box Size: {box}; {threshold}; "
+            f"registered from {source}). Ready for fit."
         )
         self.draw_frame()
         if elapsed_time > lib.SOUND_NOTIFICATION_DURATION:
@@ -11754,6 +12142,7 @@ class Window(QtWidgets.QMainWindow):
             frame_bounds=frame_bounds,
             max_frames=max_frames,
             model=model,
+            wavelet=localize.wavelet_from_parameters(self.parameters),
         )
 
     def _reregister_multichannel_inputs(
@@ -11802,6 +12191,7 @@ class Window(QtWidgets.QMainWindow):
             frame_bounds=frame_bounds,
             max_frames=max_frames,
             model=model,
+            wavelet=localize.wavelet_from_parameters(self.parameters),
         )
 
     def _run_signal_refine(
@@ -12425,7 +12815,8 @@ class Window(QtWidgets.QMainWindow):
             self.movie, self.identifications, box, self.camera_info
         )
         info = io.strip_mm_metadata(self.info) + [
-            self.last_identification_info | self.camera_info
+            localize.identification_info(self.last_identification_info)
+            | self.camera_info
         ]
         info_path = os.path.splitext(path)[0] + ".yaml"
         if path.endswith(".npy"):
@@ -12490,7 +12881,9 @@ class Window(QtWidgets.QMainWindow):
         """Save localizations and their metadata."""
         # An unset identification info must not cost the user the fit that was
         # just run: the rest of the metadata is written either way.
-        localize_info = (self.last_identification_info or {}).copy()
+        localize_info = localize.identification_info(
+            self.last_identification_info or {}
+        )
         localize_info["Generated by"] = f"Picasso v{__version__} Localize"
         model = self.parameters_dialog.fit_model.currentText()
         if FIT_MODELS[model]["optimizers"] is None:
@@ -12567,20 +12960,30 @@ class Window(QtWidgets.QMainWindow):
                 self.save_locs(path)
 
     def save_identifications(self, path: str) -> None:
-        """Save identifications and their metadata to an HDF5 file."""
-        ids_info = {
-            "Generated by": f"Picasso v{__version__} Localize",
-            "Box Size": self.parameters_dialog.box_spinbox.value(),
+        """Save identifications and their metadata to an HDF5 file.
+
+        The metadata are the settings the identifications were made with
+        (``last_identification_info``), not the dialog's current ones, which
+        may have changed since, and of the identification method only the
+        settings of the one that was used (see
+        ``localize.identification_info``)."""
+        used = self.last_identification_info or self.parameters
+        keys = [
+            "Box Size",
+            "Identification Method",
             # a list of per-region thresholds for split-FOV data, which
             # load_identifications puts back onto the regions
-            "Min. Net Gradient": self.parameters["Min. Net Gradient"],
-            "Temporal Median Window": (
-                self.parameters["Temporal Median Window"]
-            ),
-            "Gaussian Filter Sigma": (
-                self.parameters["Gaussian Filter Sigma"]
-            ),
-        }
+            "Min. Net Gradient",
+            *wavelet.WaveletParameters().to_info(),
+            "Temporal Median Window",
+            "Gaussian Filter Sigma",
+        ]
+        ids_info = localize.identification_info(
+            {
+                "Generated by": f"Picasso v{__version__} Localize",
+                **{key: used[key] for key in keys if key in used},
+            }
+        )
         info = io.strip_mm_metadata(self.info) + [ids_info]
         io.save_identifications(path, self.identifications, info)
 
@@ -12727,6 +13130,7 @@ class IdentificationWorker(QtCore.QThread):
             threaded=True,
             temporal_median_window=self.parameters["Temporal Median Window"],
             gaussian_filter_sigma=self.parameters["Gaussian Filter Sigma"],
+            wavelet=localize.wavelet_from_parameters(self.parameters),
             progress_callback=self.on_progress,
             abort_callback=self.isInterruptionRequested,
         )
@@ -13480,6 +13884,7 @@ class ChannelRegistrationWorker(QtCore.QThread):
         seed_transforms: list | None = None,
         regions: list | None = None,
         multi_fov: bool = False,
+        wavelet: wavelet.WaveletParameters | None = None,
     ) -> None:
         """Set up a channel-registration measurement.
 
@@ -13518,6 +13923,10 @@ class ChannelRegistrationWorker(QtCore.QThread):
             Beads only: each frame of the bead movie is a different field of
             view, so beads are paired within a frame rather than the frames
             being averaged. Default False.
+        wavelet : wavelet.WaveletParameters, optional
+            Detect by wavelet segmentation with these settings instead of
+            by the net gradient (``minimum_ng`` is then ignored). Default
+            None.
         """
         super().__init__()
         self.source = source
@@ -13532,6 +13941,7 @@ class ChannelRegistrationWorker(QtCore.QThread):
         self.seed_transforms = seed_transforms
         self.regions = regions
         self.multi_fov = multi_fov
+        self.wavelet = wavelet
 
     def run(self) -> None:
         """Measure and save the registration.
@@ -13551,6 +13961,7 @@ class ChannelRegistrationWorker(QtCore.QThread):
                     multi_fov=self.multi_fov,
                     channel_paths=self.channel_paths,
                     path=self.path,
+                    wavelet=self.wavelet,
                 )
             else:
                 self.statusChanged.emit(
@@ -13567,6 +13978,7 @@ class ChannelRegistrationWorker(QtCore.QThread):
                     regions=self.regions,
                     channel_paths=self.channel_paths,
                     path=self.path,
+                    wavelet=self.wavelet,
                     progress_callback=lambda n: self.statusChanged.emit(
                         f"Registered {n} channel(s)..."
                     ),
@@ -13608,6 +14020,7 @@ class SplineCalibrationWorker(QtCore.QThread):
         movies=None,
         infos=None,
         camera_infos=None,
+        wavelet: wavelet.WaveletParameters | None = None,
     ) -> None:
         super().__init__()
         self.bead_diagnostics: list[dict] = []
@@ -13636,6 +14049,9 @@ class SplineCalibrationWorker(QtCore.QThread):
         self.infos = infos
         self.camera_infos = camera_infos
         self.path = path
+        # the beads are detected like the spots of the movie (wavelet
+        # segmentation or net gradient), see ``Window.parameters``
+        self.wavelet = wavelet
 
     def run(self) -> None:
         try:
@@ -13658,6 +14074,7 @@ class SplineCalibrationWorker(QtCore.QThread):
                         reference=0,
                         path=self.path,
                         return_diagnostics=True,
+                        wavelet=self.wavelet,
                     )
                 )
             elif self.regions:
@@ -13678,6 +14095,7 @@ class SplineCalibrationWorker(QtCore.QThread):
                     model=self.registration_model,
                     path=self.path,
                     return_diagnostics=True,
+                    wavelet=self.wavelet,
                 )
             else:
                 calibration, diagnostics = spline.calibrate_spline(
@@ -13696,6 +14114,7 @@ class SplineCalibrationWorker(QtCore.QThread):
                     roi=self.roi,
                     path=self.path,
                     return_diagnostics=True,
+                    wavelet=self.wavelet,
                 )
         except Exception as e:  # surface any failure to the GUI
             self.failed.emit(str(e))
@@ -13746,6 +14165,7 @@ class AffineCalibrationWorker(QtCore.QThread):
         pixelsize_prompt,
         transform_type: str = "astigmatism",
         model: str = "affine",
+        wavelet: wavelet.WaveletParameters | None = None,
     ) -> None:
         super().__init__()
         self.ref_path = ref_path
@@ -13755,6 +14175,7 @@ class AffineCalibrationWorker(QtCore.QThread):
         self.model = model
         self.box = box
         self.minimum_ng = minimum_ng
+        self.wavelet = wavelet
         # Window._prompt_for_path: path -> metadata prompt callback
         self._prompt_for_path = prompt_for_path
         self._pixelsize_prompt = pixelsize_prompt
@@ -13829,6 +14250,7 @@ class AffineCalibrationWorker(QtCore.QThread):
                 ref_path=self.ref_path,
                 target_path=self.target_path,
                 model=self.model,
+                wavelet=self.wavelet,
             )
             io.save_any_calibration(self.calibration_path, calibration)
         except Exception as e:  # noqa: BLE001 - reported to the GUI

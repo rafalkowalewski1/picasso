@@ -1127,9 +1127,9 @@ def _locs_from_fits(
         # For a spherical (isotropic) Gaussian sx == sy, so the
         # ellipticity is always 0 and carries no information.
         columns["ellipticity"] = ellipticity.astype(np.float32)
+    columns.update(lib.net_gradient_column(identifications))
     columns.update(
         {
-            "net_gradient": identifications["net_gradient"].astype(np.float32),
             "log_likelihood": log_likelihoods.astype(np.float32),
             "iterations": iterations.astype(np.uint32),
             "photons_unc": photons_unc.astype(np.float32),

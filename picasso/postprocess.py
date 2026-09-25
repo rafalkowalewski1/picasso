@@ -5444,8 +5444,9 @@ def _resi(
     if callable(progress_callback):  # close the progress dialog
         progress_callback(len(locs))
 
-    # Combine cluster centers from all channels
-    all_resi = pd.concat(resi_channels, ignore_index=True)
+    # Combine cluster centers from all channels; they carry the columns of
+    # their channel's localizations, which need not all be the same
+    all_resi = lib.concat_locs(resi_channels)
 
     # Rename 'group' to 'cluster_id' for clarity
     all_resi["cluster_id"] = all_resi["group"]
