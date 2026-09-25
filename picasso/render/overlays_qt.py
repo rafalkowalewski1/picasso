@@ -219,7 +219,7 @@ def _draw_picks_rectangle(
         )
         painter.drawPolygon(polygon)
         if annotate_picks:
-            painter.drawText(*most_right, str(i))
+            painter.drawText(int(most_right[0]), int(most_right[1]), str(i))
     painter.end()
     return image
 
@@ -427,12 +427,12 @@ def _draw_picks_brush(
         painter.fillPath(region, QtGui.QBrush(fill))
         painter.drawPath(region)
 
-        # annotate picks at the start of the first stroke
+        # annotate picks just outside the end of the last stroke
         if annotate_picks:
-            cx, cy = map_to_view(
-                pick[0][1][0][0], pick[0][1][0][1], image.size(), viewport
-            )
-            painter.drawText(cx + 10, cy + 10, str(i))
+            width, X, Y = lib.brush_stroke_arrays(pick[-1])
+            cx, cy = map_to_view(X[-1], Y[-1], image.size(), viewport)
+            r = int(width / 2 * image.width() / viewport_width(viewport))
+            painter.drawText(cx + r + 10, cy + r + 10, str(i))
     painter.end()
     return image
 
