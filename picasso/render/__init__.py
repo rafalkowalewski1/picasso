@@ -11,7 +11,8 @@ This package splits the former single-module implementation into
 ``kernels`` (numba CPU kernels), ``geometry`` (viewport and rotation
 math), ``backend`` (splat backend contract), ``splat`` (raw splat
 stage and the CPU backend), ``overlays_qt`` (Qt overlay drawing and
-export), ``scene`` (multi-channel composition) and ``animation``.
+export), ``scene`` (multi-channel composition), ``image_overlay`` (overlay
+of an image, e.g., a widefield PNG or TIFF) and ``animation``.
 ``picasso.render`` re-exports the full former surface, so
 ``render.<name>`` keeps working unchanged.
 
@@ -109,6 +110,18 @@ from .overlays_qt import (
     rgb_to_qimage,
     optimal_scalebar_length,
 )
+from .image_overlay import (
+    SCALING_MODES as OVERLAY_SCALING_MODES,
+    BLEND_MODES as OVERLAY_BLEND_MODES,
+    GRAYSCALE_COLORS as OVERLAY_GRAYSCALE_COLORS,
+    IMAGE_EXTENSIONS as OVERLAY_IMAGE_EXTENSIONS,
+    load_overlay_image,
+    count_image_pages,
+    overlay_extent,
+    overlay_to_qimage,
+    draw_image_overlay,
+    composite_behind,
+)
 from .scene import (
     N_GROUP_COLORS,
     solid_to_lut,
@@ -116,6 +129,7 @@ from .scene import (
     get_colors_from_colormap,
     get_group_color,
     render_scene,
+    color_range,
     _render_channels,
     _contrast_limits,
     _resolve_cmap,
@@ -226,6 +240,16 @@ __all__ = [
     "draw_rotation_angles",
     "rgb_to_qimage",
     "optimal_scalebar_length",
+    "OVERLAY_SCALING_MODES",
+    "OVERLAY_BLEND_MODES",
+    "OVERLAY_GRAYSCALE_COLORS",
+    "OVERLAY_IMAGE_EXTENSIONS",
+    "load_overlay_image",
+    "count_image_pages",
+    "overlay_extent",
+    "overlay_to_qimage",
+    "draw_image_overlay",
+    "composite_behind",
     # scene
     "N_GROUP_COLORS",
     "solid_to_lut",
@@ -233,6 +257,7 @@ __all__ = [
     "get_colors_from_colormap",
     "get_group_color",
     "render_scene",
+    "color_range",
     "_render_channels",
     "_contrast_limits",
     "_resolve_cmap",

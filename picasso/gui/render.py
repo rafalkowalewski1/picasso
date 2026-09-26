@@ -7923,6 +7923,496 @@ class DisplaySettingsDialog(lib.Dialog):
         self.window.view.update_scene(use_cache=True)
 
 
+class ImageOverlayDialog(lib.Dialog):
+    """Overlay an image (PNG or TIFF, grayscale or RGB) on the rendered
+    localizations, e.g., a widefield or brightfield image of the same
+    field of view. A page of a multi-page TIFF (e.g., a frame of a
+    movie) can be chosen.
+
+    The image is placed on the camera chip given by the localizations'
+    metadata (``"Width"`` and ``"Height"``), see
+    ``picasso.render.image_overlay``. The dialog shows both sizes and
+    how the image is scaled, also when the sizes match.
+
+    ...
+
+    Attributes
+    ----------
+    alpha : np.ndarray or None
+        Alpha channel of the loaded image, None if it is opaque.
+    blend : QComboBox
+        How the overlay is composited with the localizations.
+    color : QComboBox
+        Color that a grayscale image is displayed in.
+    data : np.ndarray or None
+        The loaded image, grayscale ``(height, width)`` or RGB
+        ``(height, width, 3)``. None if no image is loaded.
+    maximum, minimum : QDoubleSpinBox
+        Contrast limits of a grayscale image.
+    n_pages : int
+        Number of pages of the loaded image (TIFF), 1 for PNG.
+    opacity : QSpinBox
+        Opacity of the overlay in percent.
+    page : QSpinBox
+        Page (1-based) of a multi-page TIFF that is shown.
+    path : str or None
+        Path of the loaded image.
+    pixel_size : QDoubleSpinBox
+        Image pixel size in nm, used by the ``"Image pixel size"``
+        scaling.
+    scaling : QComboBox
+        How the image is scaled onto the camera chip.
+    show_check : QCheckBox
+        Shows or hides the overlay without unloading it.
+    shift_x, shift_y : QDoubleSpinBox
+        Shift of the image in camera pixels.
+    window : QMainWindow
+        Instance of the main window.
+    """
+
+    DOCS_URL = (
+        "https://picassosr.readthedocs.io/en/latest/render.html"
+        "#overlay-image"
+    )
+
+    def __init__(self, window: QtWidgets.QMainWindow) -> None:
+        super().__init__(window)
+        self.window = window
+        self.setWindowTitle("Overlay image")
+        self.setModal(False)
+        self.data = None
+        self.alpha = None
+        self.path = None
+        self.n_pages = 1
+        self._qimage = None  # overlay converted for drawing, see _refresh
+
+        vbox = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        vbox.addLayout(top)
+        top.addWidget(lib.HelpButton(self.DOCS_URL))
+        load_button = QtWidgets.QPushButton("Load image...")
+        load_button.clicked.connect(self.open_image_dialog)
+        top.addWidget(load_button)
+        self.remove_button = QtWidgets.QPushButton("Remove")
+        self.remove_button.clicked.connect(self.remove_image)
+        top.addWidget(self.remove_button)
+        top.addStretch()
+        self.path_label = QtWidgets.QLabel("No image loaded.")
+        vbox.addWidget(self.path_label)
+        page_row = QtWidgets.QHBoxLayout()
+        vbox.addLayout(page_row)
+        self.page_label = QtWidgets.QLabel("Page:")
+        page_row.addWidget(self.page_label)
+        self.page = QtWidgets.QSpinBox()
+        self.page.setMinimum(1)
+        self.page.setToolTip("Page of the TIFF, e.g., a frame of a movie")
+        self.page.valueChanged.connect(self._on_page_changed)
+        page_row.addWidget(self.page)
+        page_row.addStretch()
+
+        # sizes and scaling
+        self.scaling_box = QtWidgets.QGroupBox("Scaling")
+        vbox.addWidget(self.scaling_box)
+        scaling_vbox = QtWidgets.QVBoxLayout(self.scaling_box)
+        self.sizes_label = QtWidgets.QLabel()
+        scaling_vbox.addWidget(self.sizes_label)
+        grid = QtWidgets.QGridLayout()
+        scaling_vbox.addLayout(grid)
+        grid.addWidget(QtWidgets.QLabel("Scale image:"), 1, 0)
+        self.scaling = QtWidgets.QComboBox()
+        self.scaling.addItems(render.OVERLAY_SCALING_MODES)
+        self.scaling.setToolTip(
+            "Fit to camera: largest uniform scaling that fits the image on\n"
+            "the camera chip, centered.\n"
+            "Stretch to camera: scales width and height independently so\n"
+            "that the image covers the chip; distorts the image if the\n"
+            "aspect ratios differ.\n"
+            "Image pixel size: each image pixel covers its pixel size;\n"
+            "the top left corners of the image and the chip coincide."
+        )
+        self.scaling.currentIndexChanged.connect(self._on_scaling_changed)
+        grid.addWidget(self.scaling, 1, 1)
+        self.pixel_size_label = QtWidgets.QLabel("Image pixel size (nm):")
+        grid.addWidget(self.pixel_size_label, 2, 0)
+        self.pixel_size = QtWidgets.QDoubleSpinBox()
+        self.pixel_size.setRange(0.01, 1e6)
+        self.pixel_size.setDecimals(2)
+        self.pixel_size.setValue(130)
+        self.pixel_size.valueChanged.connect(self._on_geometry_changed)
+        grid.addWidget(self.pixel_size, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("Shift x (camera px):"), 3, 0)
+        self.shift_x = QtWidgets.QDoubleSpinBox()
+        self.shift_y = QtWidgets.QDoubleSpinBox()
+        for spin in (self.shift_x, self.shift_y):
+            spin.setRange(-1e6, 1e6)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
+            spin.valueChanged.connect(self._on_geometry_changed)
+        grid.addWidget(self.shift_x, 3, 1)
+        grid.addWidget(QtWidgets.QLabel("Shift y (camera px):"), 4, 0)
+        grid.addWidget(self.shift_y, 4, 1)
+        self.result_label = QtWidgets.QLabel()
+        scaling_vbox.addWidget(self.result_label)
+
+        # display
+        self.display_box = QtWidgets.QGroupBox("Display")
+        vbox.addWidget(self.display_box)
+        grid = QtWidgets.QGridLayout(self.display_box)
+        self.show_check = QtWidgets.QCheckBox("Show overlay")
+        self.show_check.setChecked(True)
+        self.show_check.stateChanged.connect(self._update_scene)
+        grid.addWidget(self.show_check, 0, 0, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Opacity (%):"), 1, 0)
+        self.opacity = QtWidgets.QSpinBox()
+        self.opacity.setRange(0, 100)
+        self.opacity.setValue(50)
+        self.opacity.valueChanged.connect(self._update_scene)
+        grid.addWidget(self.opacity, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Blending:"), 2, 0)
+        self.blend = QtWidgets.QComboBox()
+        self.blend.addItems(render.OVERLAY_BLEND_MODES)
+        self.blend.setToolTip(
+            "Additive: image and localizations are summed.\n"
+            "Over localizations: the image is painted over the"
+            " localizations.\n"
+            "Behind localizations: the localizations are painted over"
+            " the image; the dimmer they are, the more the image shows"
+            " through.\n"
+            "Multiply: image and localizations are multiplied."
+        )
+        self.blend.currentIndexChanged.connect(self._update_scene)
+        grid.addWidget(self.blend, 2, 1)
+        # grayscale only
+        self.color_label = QtWidgets.QLabel("Color:")
+        grid.addWidget(self.color_label, 3, 0)
+        self.color = QtWidgets.QComboBox()
+        self.color.addItems(render.OVERLAY_GRAYSCALE_COLORS)
+        self.color.currentIndexChanged.connect(self._refresh)
+        grid.addWidget(self.color, 3, 1)
+        self.minimum_label = QtWidgets.QLabel("Min. intensity:")
+        grid.addWidget(self.minimum_label, 4, 0)
+        self.minimum = QtWidgets.QDoubleSpinBox()
+        self.maximum_label = QtWidgets.QLabel("Max. intensity:")
+        grid.addWidget(self.maximum_label, 5, 0)
+        self.maximum = QtWidgets.QDoubleSpinBox()
+        for spin in (self.minimum, self.maximum):
+            spin.setDecimals(0)
+            spin.valueChanged.connect(self._refresh)
+        grid.addWidget(self.minimum, 4, 1)
+        grid.addWidget(self.maximum, 5, 1)
+        self.reset_contrast_button = QtWidgets.QPushButton("Reset contrast")
+        self.reset_contrast_button.clicked.connect(self.reset_contrast)
+        grid.addWidget(self.reset_contrast_button, 6, 1)
+
+        vbox.addStretch()
+        self._update_widgets()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self._update_labels()  # the loaded localizations may have changed
+
+    @property
+    def is_grayscale(self) -> bool:
+        """True if the loaded image is grayscale."""
+        return self.data is not None and self.data.ndim == 2
+
+    @property
+    def active(self) -> bool:
+        """True if an image is loaded and shown."""
+        return self.data is not None and self.show_check.isChecked()
+
+    def open_image_dialog(self) -> None:
+        """Ask for a PNG or TIFF image and load it."""
+        directory = (
+            os.path.dirname(self.window.view.locs_paths[0])
+            if self.window.view.locs_paths
+            else ""
+        )
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load image to overlay",
+            directory,
+            filter="Images (*.png *.tif *.tiff)",
+        )
+        if path:
+            self.load_image(path)
+
+    def load_image(self, path: str) -> None:
+        """Load an image (the first page of a multi-page TIFF), reset
+        its contrast and show the dialog, so that the image and camera
+        sizes and the scaling are seen.
+
+        Parameters
+        ----------
+        path : str
+            Path to a PNG or TIFF image.
+        """
+        try:
+            n_pages = render.count_image_pages(path)
+            data, alpha = render.load_overlay_image(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Overlay image", f"Could not load {path}:\n{e}"
+            )
+            return
+        self.data, self.alpha, self.path = data, alpha, path
+        self.n_pages = n_pages
+        self.page.blockSignals(True)
+        self.page.setMaximum(n_pages)
+        self.page.setValue(1)
+        self.page.setSuffix(f" of {n_pages}")
+        self.page.blockSignals(False)
+        self.path_label.setText(os.path.basename(path))
+        self.path_label.setToolTip(path)
+        self.pixel_size.blockSignals(True)
+        self.pixel_size.setValue(self.window.view.pixelsize)
+        self.pixel_size.blockSignals(False)
+        self.show_check.blockSignals(True)
+        self.show_check.setChecked(True)
+        self.show_check.blockSignals(False)
+        self._update_widgets()
+        self.reset_contrast()  # also redraws
+        self.show()
+        self.raise_()
+
+    def _on_page_changed(self, page: int) -> None:
+        """Show another page of the TIFF, keeping the contrast so that
+        frames of a movie can be compared."""
+        try:
+            data, alpha = render.load_overlay_image(self.path, page - 1)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Overlay image", f"Could not load page {page}:\n{e}"
+            )
+            return
+        kept = self.data is not None and (
+            data.shape == self.data.shape and data.dtype == self.data.dtype
+        )
+        self.data, self.alpha = data, alpha
+        self._update_widgets()
+        if kept:
+            self._refresh()
+        else:
+            self.reset_contrast()
+
+    def remove_image(self) -> None:
+        """Unload the image."""
+        self.data = self.alpha = self.path = self._qimage = None
+        self.n_pages = 1
+        self.path_label.setText("No image loaded.")
+        self.path_label.setToolTip("")
+        self._update_widgets()
+        self._update_scene()
+
+    def reset_contrast(self) -> None:
+        """Set the contrast of a grayscale image to its full range."""
+        if self.is_grayscale:
+            finite = self.data[np.isfinite(self.data)]
+            lo = float(finite.min()) if finite.size else 0.0
+            hi = float(finite.max()) if finite.size else 1.0
+            if np.issubdtype(self.data.dtype, np.integer):
+                limits = np.iinfo(self.data.dtype)
+                bottom, top, decimals = limits.min, limits.max, 0
+            else:  # floats: enough decimals to resolve the range
+                span = max(hi - lo, 1e-12)
+                bottom, top = -1e12, 1e12
+                decimals = int(np.clip(3 - np.floor(np.log10(span)), 0, 12))
+            for spin, value in ((self.minimum, lo), (self.maximum, hi)):
+                spin.blockSignals(True)
+                spin.setDecimals(decimals)
+                spin.setRange(float(bottom), float(top))
+                spin.setSingleStep(10.0**-decimals if decimals else 1.0)
+                spin.setValue(value)
+                spin.blockSignals(False)
+        self._refresh()
+
+    def _update_widgets(self) -> None:
+        """Show only the widgets that apply to the loaded image and the
+        selected scaling."""
+        loaded = self.data is not None
+        self.remove_button.setEnabled(loaded)
+        self.scaling_box.setEnabled(loaded)
+        self.display_box.setEnabled(loaded)
+        multi_page = loaded and self.n_pages > 1
+        self.page_label.setVisible(multi_page)
+        self.page.setVisible(multi_page)
+        pixel_mode = self.scaling.currentText() == "Image pixel size"
+        self.pixel_size_label.setVisible(pixel_mode)
+        self.pixel_size.setVisible(pixel_mode)
+        for widget in (
+            self.color_label,
+            self.color,
+            self.minimum_label,
+            self.minimum,
+            self.maximum_label,
+            self.maximum,
+            self.reset_contrast_button,
+        ):
+            widget.setVisible(self.is_grayscale)
+        self._update_labels()
+
+    def _movie_size(self) -> tuple[float, float] | None:
+        """Height and width of the camera chip, None if no
+        localizations are loaded."""
+        if not self.window.view.infos:
+            return None
+        return self.window.view.movie_size()
+
+    def _update_labels(self) -> None:
+        """Describe the image and camera sizes and the scaling."""
+        if self.data is None:
+            self.sizes_label.setText("")
+            self.result_label.setText("")
+            return
+        image_height, image_width = self.data.shape[:2]
+        kind = "grayscale" if self.is_grayscale else "RGB"
+        if self.is_grayscale:
+            dtype = self.data.dtype
+            kind += f", {dtype.itemsize * 8}-bit"
+            if np.issubdtype(dtype, np.floating):
+                kind += " float"
+            elif np.issubdtype(dtype, np.signedinteger):
+                kind += " signed"
+        text = f"Image: {image_width} x {image_height} px ({kind})."
+        movie_size = self._movie_size()
+        if movie_size is None:
+            self.sizes_label.setText(
+                text + "\nLoad localizations to place the image."
+            )
+            self.result_label.setText("")
+            return
+        movie_height, movie_width = movie_size
+        text += (
+            f"\nCamera (localizations' metadata): {movie_width:g} x "
+            f"{movie_height:g} px."
+        )
+        if (image_width, image_height) == (movie_width, movie_height):
+            text += "\nThe sizes match."
+        else:
+            text += "\nThe sizes differ; choose how to scale the image."
+        self.sizes_label.setText(text)
+        x, y, width, height = self.extent()
+        pixelsize = self.window.view.pixelsize
+        sx = width / image_width
+        sy = height / image_height
+        self.result_label.setText(
+            f"One image pixel = {sx:.4g} x {sy:.4g} camera px\n"
+            f"({sx * pixelsize:.4g} x {sy * pixelsize:.4g} nm).\n"
+            f"Top left corner at x = {x:.4g}, y = {y:.4g} camera px\n"
+            "(the chip's corner is at -0.5, -0.5)."
+        )
+        self.result_label.setToolTip(
+            "A localization at x = 0 lies at the center of the first "
+            "camera pixel, so the camera chip starts at -0.5."
+        )
+
+    def extent(self) -> tuple[float, float, float, float] | None:
+        """``(x, y, width, height)`` of the image in camera pixels, None
+        if no image or no localizations are loaded."""
+        movie_size = self._movie_size()
+        if self.data is None or movie_size is None:
+            return None
+        return render.overlay_extent(
+            self.data.shape,
+            movie_size,
+            self.scaling.currentText(),
+            scale=self.pixel_size.value() / self.window.view.pixelsize,
+            shift=(self.shift_x.value(), self.shift_y.value()),
+        )
+
+    def _on_scaling_changed(self, *args) -> None:
+        self._update_widgets()
+        self._update_scene()
+
+    def _on_geometry_changed(self, *args) -> None:
+        self._update_labels()
+        self._update_scene()
+
+    def _refresh(self, *args) -> None:
+        """Convert the image for drawing (after a contrast or color
+        change) and redraw."""
+        if self.data is None:
+            self._qimage = None
+        else:
+            contrast = None
+            color = (1.0, 1.0, 1.0)
+            if self.is_grayscale:
+                contrast = (self.minimum.value(), self.maximum.value())
+                color = render.OVERLAY_GRAYSCALE_COLORS[
+                    self.color.currentText()
+                ]
+            self._qimage = render.overlay_to_qimage(
+                self.data, self.alpha, contrast=contrast, color=color
+            )
+        self._update_scene()
+
+    def _update_scene(self, *args) -> None:
+        self.window.view.update_scene(use_cache=True)
+
+    def draw(
+        self,
+        image: QtGui.QImage,
+        viewport: tuple[tuple[float, float], tuple[float, float]],
+    ) -> QtGui.QImage:
+        """Draw the overlay onto rendered localizations if it is shown.
+
+        Parameters
+        ----------
+        image : QImage
+            Image containing rendered localizations.
+        viewport : tuple
+            Field of view shown in ``image``, ``((y_min, x_min),
+            (y_max, x_max))``.
+
+        Returns
+        -------
+        image : QImage
+            Image with the drawn overlay.
+        """
+        extent = self.extent()
+        if not self.active or self._qimage is None or extent is None:
+            return image
+        return render.draw_image_overlay(
+            image,
+            viewport,
+            self._qimage,
+            extent,
+            opacity=self.opacity.value() / 100,
+            blend=self.blend.currentText(),
+            color_range=self.window.view._color_range,
+        )
+
+    def export_info(self) -> dict:
+        """Settings of the shown overlay for the metadata of an exported
+        image; empty if no overlay is shown."""
+        extent = self.extent()
+        if not self.active or extent is None:
+            return {}
+        mode = self.scaling.currentText()
+        info = {
+            "Overlay image": self.path,
+        }
+        if self.n_pages > 1:
+            info["Overlay image page"] = self.page.value()
+        info["Overlay scaling"] = mode
+        if mode == "Image pixel size":
+            info["Overlay image pixel size (nm)"] = self.pixel_size.value()
+        info["Overlay shift (x, y; camera px)"] = [
+            self.shift_x.value(),
+            self.shift_y.value(),
+        ]
+        info["Overlay extent (X, Y, Width, Height; camera px)"] = [
+            float(_) for _ in extent
+        ]
+        info["Overlay opacity (%)"] = self.opacity.value()
+        info["Overlay blending"] = self.blend.currentText()
+        if self.is_grayscale:
+            info["Overlay color"] = self.color.currentText()
+            info["Overlay min. intensity"] = self.minimum.value()
+            info["Overlay max. intensity"] = self.maximum.value()
+        return info
+
+
 class SlicerDialog(lib.Dialog):
     """Customize slicing 3D data in z axis.
 
@@ -8580,6 +9070,13 @@ class View(QtWidgets.QLabel):
         # and its viewport: every displayed frame is composed from it
         self._blit_image = None
         self._blit_viewport = None
+        # colors of pixels without localizations and at the maximum
+        # contrast in the last requested render, see
+        # _remember_color_range
+        self._color_range = (
+            np.zeros(3, dtype=np.uint8),
+            np.full(3, 255, dtype=np.uint8),
+        )
         self._image_viewport = None  # viewport of the raw-image cache
         self._current_request_interactive = False
         self._refine_timer = QtCore.QTimer(self)
@@ -10414,6 +10911,9 @@ class View(QtWidgets.QLabel):
         painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawImage(dest, source)
         painter.end()
+        target = self.window.image_overlay_dialog.draw(
+            target, self._viewport_key()
+        )
         # overlays go on the visible crop, so they keep their corner
         # positions regardless of the render margin
         target = self.draw_scalebar(target)
@@ -10500,6 +11000,9 @@ class View(QtWidgets.QLabel):
         vmin = self.window.display_settings_dlg.minimum.value()
         vmax = self.window.display_settings_dlg.maximum.value()
         contrast = None if autoscale else (vmin, vmax)
+        colors = self.read_colors()
+        relative_intensities = self.read_relative_intensities()
+        self._remember_color_range(locs, colors, relative_intensities, cmap)
         return (
             dict(
                 locs=locs,
@@ -10516,12 +11019,33 @@ class View(QtWidgets.QLabel):
                 ),
                 background_color=self.window.dataset_dialog.background_color,
                 single_channel_colormap=cmap,
-                colors=self.read_colors(),
-                relative_intensities=self.read_relative_intensities(),
+                colors=colors,
+                relative_intensities=relative_intensities,
                 return_contrast_limits=True,
                 return_raw_image=True,
             ),
             rendered_viewport,
+        )
+
+    def _remember_color_range(
+        self,
+        locs: pd.DataFrame | list[pd.DataFrame],
+        colors: list,
+        relative_intensities: list[float],
+        cmap: str | np.ndarray,
+    ) -> None:
+        """Store the colors of pixels without localizations and at the
+        maximum contrast in the render about to be made, from the same
+        inputs; the image overlay needs them to draw behind the
+        localizations."""
+        dataset_dialog = self.window.dataset_dialog
+        self._color_range = render.color_range(
+            None if isinstance(locs, pd.DataFrame) else len(locs),
+            colors=colors,
+            relative_intensities=relative_intensities,
+            invert_colors=dataset_dialog.wbackground.isChecked(),
+            background_color=dataset_dialog.background_color,
+            single_channel_colormap=cmap,
         )
 
     def _user_settings(self) -> dict:
@@ -10865,12 +11389,18 @@ class View(QtWidgets.QLabel):
         """When a file is dropped onto the window, if the file ends with
         ``.hdf5``, try loading localizations. If it ends with ``.txt``,
         try loading a fov file. If it ends with ``.yaml``, try loading
-        pick regions."""
+        pick regions. If it is a single ``.png`` or ``.tif`` image,
+        overlay it (see ``ImageOverlayDialog``)."""
         urls = event.mimeData().urls()
         paths = [_.toLocalFile() for _ in urls]
         extensions = [os.path.splitext(_)[1].lower() for _ in paths]
         if extensions == [".txt"]:  # just one txt dropped
             self.load_single_txt(paths[0])
+        # just one image dropped, overlay it
+        image_ext = render.OVERLAY_IMAGE_EXTENSIONS
+        if len(paths) == 1 and extensions[0] in image_ext:
+            self.window.image_overlay_dialog.load_image(paths[0])
+            return
         if extensions == [".yaml"]:  # just one yaml dropped
             with open(paths[0], "r") as f:
                 file = yaml.full_load(f)
@@ -13476,6 +14006,9 @@ class View(QtWidgets.QLabel):
         vmax = self.window.display_settings_dlg.maximum.value()
         contrast = None if autoscale else (vmin, vmax)
         raw_image = self.image if use_cache else None
+        colors = self.read_colors()
+        relative_intensities = self.read_relative_intensities()
+        self._remember_color_range(locs, colors, relative_intensities, cmap)
 
         qimage, n_locs, (vmin, vmax), raw_image = render.render_scene(
             locs=locs,
@@ -13489,8 +14022,8 @@ class View(QtWidgets.QLabel):
             invert_colors=self.window.dataset_dialog.wbackground.isChecked(),
             background_color=self.window.dataset_dialog.background_color,
             single_channel_colormap=cmap,
-            colors=self.read_colors(),
-            relative_intensities=self.read_relative_intensities(),
+            colors=colors,
+            relative_intensities=relative_intensities,
             raw_image_cache=raw_image,
             return_contrast_limits=True,
             return_raw_image=True,
@@ -14991,6 +15524,7 @@ class Window(QtWidgets.QMainWindow):
         self.info_dialog = InfoDialog(self)
         self.metadata_dialog = lib.MetadataDialog(self)
         self.dataset_dialog = DatasetDialog(self)
+        self.image_overlay_dialog = ImageOverlayDialog(self)
         self.window_rot = RotationWindow(self)
         self.test_clusterer_dialog = TestClustererDialog(self)
         self.user_settings_dialog = lib.UserSettingsDialog(self)
@@ -14998,6 +15532,7 @@ class Window(QtWidgets.QMainWindow):
         self.dialogs = [
             self.display_settings_dlg,
             self.dataset_dialog,
+            self.image_overlay_dialog,
             self.info_dialog,
             self.info_dialog.change_fov,
             self.metadata_dialog,
@@ -15123,6 +15658,8 @@ class Window(QtWidgets.QMainWindow):
         dataset_action = view_menu.addAction("Files...")
         dataset_action.setShortcut("Ctrl+F")
         dataset_action.triggered.connect(self.dataset_dialog.show)
+        overlay_action = view_menu.addAction("Overlay image...")
+        overlay_action.triggered.connect(self.open_image_overlay)
 
         view_menu.addSeparator()
         to_left_action = view_menu.addAction("Left")
@@ -15589,6 +16126,7 @@ class Window(QtWidgets.QMainWindow):
             info["Render property max."] = d.maximum_render.value()
             info["Render property colors"] = d.color_step.value()
             info["Colormap property"] = d.colormap_prop.currentText()
+        info.update(self.image_overlay_dialog.export_info())
         if path is not None:
             path, ext = os.path.splitext(path)
             path = path + ".yaml"
@@ -15617,6 +16155,7 @@ class Window(QtWidgets.QMainWindow):
             movie_height, movie_width = self.view.movie_size()
             viewport = [(0, 0), (movie_height, movie_width)]
             qimage = self.view.render_scene(cache=False, viewport=viewport)
+            qimage = self.image_overlay_dialog.draw(qimage, viewport)
             dpi = None
             if path.endswith(".pdf"):
                 dpi, ok = QtWidgets.QInputDialog.getInt(
@@ -15670,6 +16209,7 @@ class Window(QtWidgets.QMainWindow):
         max_spin.setValue(new_max)
 
         qimage = self.view.render_scene(cache=False, **kwargs)
+        qimage = self.image_overlay_dialog.draw(qimage, kwargs["viewport"])
         dpi = None
         if path.endswith(".pdf"):
             dpi, ok = QtWidgets.QInputDialog.getInt(
@@ -16504,6 +17044,14 @@ class Window(QtWidgets.QMainWindow):
         for dialog in self.dialogs:
             dialog.close()
         self.initUI(plugins_loaded=True)
+
+    def open_image_overlay(self) -> None:
+        """Open the image overlay dialog; ask for an image right away if
+        none is loaded."""
+        self.image_overlay_dialog.show()
+        self.image_overlay_dialog.raise_()
+        if self.image_overlay_dialog.data is None:
+            self.image_overlay_dialog.open_image_dialog()
 
     def show_metadata(self) -> None:
         """Open the metadata dialog with current infos."""

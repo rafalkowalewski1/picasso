@@ -777,6 +777,72 @@ def _render_single_channel(
     return n_locs, rgb, contrast_limits, raw_image
 
 
+def color_range(
+    n_channels: int | None,
+    colors: list | None = None,
+    relative_intensities: list[float] | None = None,
+    invert_colors: bool = False,
+    background_color: tuple[float, float, float] | None = None,
+    single_channel_colormap: str | lib.FloatArray2D = "magma",
+) -> tuple[lib.IntArray1D, lib.IntArray1D]:
+    """Colors that ``render_scene`` gives pixels without localizations
+    and pixels where every channel is at the maximum contrast, e.g., to
+    tell localizations apart from the background.
+
+    The multi-channel path renormalizes each image by its maximum; the
+    colors are those of an image containing both kinds of pixels, as a
+    typical view does.
+
+    Parameters
+    ----------
+    n_channels : int or None
+        Number of rendered channels; None for single-channel rendering
+        (``locs`` passed as a DataFrame).
+    colors, relative_intensities, invert_colors, background_color, \
+single_channel_colormap
+        As in ``render_scene``.
+
+    Returns
+    -------
+    empty : IntArray1D
+        RGB color (uint8) of shape ``(3,)`` of pixels without
+        localizations.
+    full : IntArray1D
+        RGB color (uint8) of shape ``(3,)`` of pixels at the maximum
+        contrast.
+    """
+    if n_channels is None:
+        raw = np.array([[0.0, 1.0]], dtype=np.float32)
+        _, rgb, _, _ = _render_single_channel(
+            None,
+            None,
+            disp_px_size=1.0,
+            contrast=(0.0, 1.0),
+            invert_colors=invert_colors,
+            single_channel_colormap=single_channel_colormap,
+            raw_image_cache=raw,
+        )
+    elif n_channels == 0:  # render_scene draws an empty black image
+        black = np.zeros(3, dtype=np.uint8)
+        return black, black.copy()
+    else:
+        raw = np.zeros((n_channels, 1, 2), dtype=np.float32)
+        raw[:, 0, 1] = 1.0
+        _, rgb, _, _ = _render_multi_channel(
+            None,
+            None,
+            disp_px_size=1.0,
+            colors=colors,
+            contrast=(0.0, 1.0),
+            relative_intensities=relative_intensities,
+            invert_colors=invert_colors,
+            background_color=background_color,
+            raw_image_cache=raw,
+        )
+    rgb = np.asarray(rgb, dtype=np.uint8)
+    return rgb[0, 0].copy(), rgb[0, 1].copy()
+
+
 def scale_contrast(
     image: lib.FloatArray2D | lib.FloatArray3D,
     vmin: float | None = None,

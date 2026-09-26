@@ -460,6 +460,24 @@ Passing a list of LUTs to ``render_scene`` selects the per-channel
 colormap path; passing a list of plain RGB triplets (legacy) still works
 and is equivalent to ``solid_to_lut`` per channel.
 
+Overlay image
+^^^^^^^^^^^^^
+Overlays a PNG or TIFF image (``.png``, ``.tif``, ``.tiff``), e.g., a widefield or brightfield image of the same field of view, on the rendered localizations. Grayscale images of any data type (e.g., 8- or 16-bit integers or 32-bit floats) and RGB images are supported, with or without an alpha channel; RGB images with more than 8 bits per channel are scaled to 8 bits. For a multi-page TIFF, e.g., a raw movie, the first page is shown and the *Page* box selects another one; the contrast is kept when changing pages. Opening the dialog without a loaded image asks for one right away; an image can also be dropped onto the Render window.
+
+The dialog shows the size of the image and the size of the camera chip given by the localizations' metadata (``Width`` and ``Height``), states whether they match, and reports the resulting size of one image pixel in camera pixels and nm. The image is placed on the camera chip using one of the following scalings:
+
+* **Fit to camera (keep aspect ratio)** (default) - the largest uniform scaling at which the whole image fits on the chip; the image is centered. For an image with the chip's size, this places each image pixel onto one camera pixel.
+* **Stretch to camera** - width and height are scaled independently so that the image covers the whole chip. The image is distorted if its aspect ratio differs from the chip's.
+* **Image pixel size** - each image pixel is scaled to the given pixel size (nm); the top left corners of the image and the chip coincide.
+
+In every mode, the image can additionally be shifted by a given number of camera pixels in x and y, e.g., to correct a known offset between the cameras.
+
+The placement follows the localization coordinates: a localization at ``x = 0`` lies at the center of the first camera pixel, so the chip spans from -0.5 to ``Width`` - 0.5 camera pixels. An image acquired on the same camera region thus registers with the localizations to the sub-pixel level.
+
+Under *Display*, the overlay can be hidden, its opacity is set, and the blending with the localizations is chosen: *Additive* (default) sums image and localizations; *Over localizations* paints the image over the localizations; *Behind localizations* paints the localizations over the image, so that the image shows where there are no localizations and shows through dim ones (a pixel is opaque at the maximum contrast and transparent without localizations; in between, its opacity is its color's distance from the color of empty pixels relative to the color at the maximum contrast, both given by the colormap, the background color and whether the background is white); and *Multiply* multiplies them (for a white background). A grayscale image is shown in the chosen color between the minimum and maximum intensity (by default, the image's full range; *Reset contrast* restores it). RGB images are shown with their own colors.
+
+The API functions are available as ``picasso.render.load_overlay_image``, ``overlay_extent``, ``overlay_to_qimage`` and ``draw_image_overlay``.
+
 Left / Right / Up / Down
 ^^^^^^^^^^^^^^^^^^^^^^^^
 Moves the current field of view in a particular direction. Also possible by using the arrow keys.
