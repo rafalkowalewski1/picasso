@@ -6980,8 +6980,14 @@ class ToolsSettingsDialog(lib.Dialog):
         move_grid.addWidget(move_label, 0, 0)
         # whether each loaded channel is dragged, see move_channels
         self._move_selection = []
-        self.move_channels_label = QtWidgets.QLabel()
-        move_grid.addWidget(self.move_channels_label, 0, 1)
+        self.move_channels_label = lib.WrappingLabel(max_chars=30)
+        move_grid.addWidget(
+            self.move_channels_label,
+            0,
+            1,
+            alignment=QtCore.Qt.AlignmentFlag.AlignLeft,
+        )
+        move_grid.setColumnStretch(1, 1)
         self.move_channels_button = QtWidgets.QPushButton("Select...")
         self.move_channels_button.clicked.connect(self.select_move_channels)
         move_grid.addWidget(self.move_channels_button, 0, 2)
@@ -7154,9 +7160,10 @@ class ToolsSettingsDialog(lib.Dialog):
 
     def _update_move_channels_label(self) -> None:
         """Summarize the Move tool's selection next to its button, with
-        the full list in the tooltip."""
+        the full paths of the selected channels in the tooltip."""
         channels = self.move_channels()
-        names = [os.path.basename(p) for p in self.window.view.locs_paths]
+        paths = self.window.view.locs_paths
+        names = [os.path.basename(p) for p in paths]
         n_channels = len(self._move_selection)
         if not n_channels:
             text = "No channels loaded"
@@ -7168,7 +7175,7 @@ class ToolsSettingsDialog(lib.Dialog):
             text = f"{len(channels)} of {n_channels} channels"
         self.move_channels_label.setText(text)
         self.move_channels_label.setToolTip(
-            "\n".join(names[i] for i in channels if i < len(names))
+            "\n".join(paths[i] for i in channels if i < len(paths))
         )
 
     def update_move_undo(self) -> None:

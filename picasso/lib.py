@@ -120,6 +120,7 @@ _QT_NAMES = (
     "CollapsibleGroupBox",
     "ScrollableGroupBox",
     "LogDoubleSpinBox",
+    "WrappingLabel",
     "RangeSlider",
     "DensityContrastSlider",
     "GenericPlotWindow",

@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import math
 import os
+import re
 import sys
 import time
 import traceback
@@ -25,6 +26,7 @@ from typing import Any, TypeAlias
 
 import yaml
 import matplotlib.pyplot as plt
+
 from PyQt6 import QtCore, QtWidgets, QtGui, sip
 from playsound3 import playsound
 
@@ -1875,6 +1877,148 @@ class LogDoubleSpinBox(QtWidgets.QDoubleSpinBox):
                 self.setValue(self.value() * (self._factor**steps))
         elif steps < 0:
             self.setValue(self.value() / (self._factor ** abs(steps)))
+
+
+class WrappingLabel(QtWidgets.QLabel):
+    """Word-wrapped QLabel for file names, which tend to be long and to
+    use ``_``, ``-`` and ``.`` instead of spaces.
+
+    The text may break after these characters, too, and a stretch
+    without any of them that is wider than the label is split where it
+    reaches the edge. A layout inside a scroll area or a fixed-size window does not always give a wrapped
+    label the height its lines need, so the label sets its minimum
+    height for its current width itself.
+
+    Parameters
+    ----------
+    text : str, optional
+        Text to be displayed. Default is an empty string.
+    parent : QWidget, optional
+        Parent widget. Default is None.
+    max_chars : int, optional
+        Wrap after about this many characters (of the font's average
+        width), even if the layout leaves more room. As lines break
+        at spaces and after ``_``, ``-`` and ``.`` where possible, they
+        may be shorter. Default is None, i.e., the label's width is set by the
+        layout alone.
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        parent: QtWidgets.QWidget | None = None,
+        max_chars: int | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.max_chars = max_chars
+        self.setWordWrap(True)
+        self._fit_max_width()
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        """Set the text, allowing breaks after ``_``, ``-`` and ``.``
+        and inside stretches wider than the label (a zero-width space
+        is inserted, which is not displayed).
+
+        Parameters
+        ----------
+        text : str
+            Text to be displayed.
+        """
+        self._text = text
+        self._update_display_text()
+
+    def text(self) -> str:
+        """The text as set, without the inserted zero-width spaces."""
+        return self._text
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        """Rewrap the text and refit the height at the new width."""
+        super().resizeEvent(event)
+        self._update_display_text()
+
+    def _update_display_text(self) -> None:
+        """Insert a zero-width space after each ``_``, ``-``, ``.`` and
+        whitespace, and inside each stretch between them that does not
+        fit into the label's width, which QLabel's word wrap would
+        otherwise clip."""
+        width = self.contentsRect().width()
+        metrics = self.fontMetrics()
+        pieces = []
+        for piece in re.split(r"(?<=[_\-.\s])", self._text):
+            while width > 0 and metrics.horizontalAdvance(piece) > width:
+                # longest head that fits, at least one character
+                n = 1
+                while (
+                    n < len(piece)
+                    and metrics.horizontalAdvance(piece[: n + 1]) <= width
+                ):
+                    n += 1
+                pieces.append(piece[:n])
+                piece = piece[n:]
+            pieces.append(piece)
+        text = "\u200b".join(p for p in pieces if p)
+        if text != super().text():
+            super().setText(text)
+        self._fit_height()
+
+    def sizeHint(self) -> QtCore.QSize:
+        """Ask for the width of the unwrapped text, up to ``max_chars``
+        characters, rather than QLabel's narrow default for wrapped
+        text, so that a label aligned within its layout cell is not
+        wrapped more than needed."""
+        hint = super().sizeHint()
+        if self.max_chars is None:
+            return hint
+        margins = self.contentsMargins()
+        text_width = max(
+            (
+                self.fontMetrics().horizontalAdvance(line)
+                for line in self._text.splitlines()
+            ),
+            default=0,
+        )
+        width = min(
+            text_width + margins.left() + margins.right(),
+            self.maximumWidth(),
+        )
+        return QtCore.QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        """Allow shrinking to about ten characters: QLabel's minimum is
+        its longest unbreakable stretch, which would keep the label at
+        the width the stretches were split for (see
+        ``_update_display_text``)."""
+        margins = self.contentsMargins()
+        width = min(
+            10 * self.fontMetrics().averageCharWidth()
+            + margins.left()
+            + margins.right(),
+            self.maximumWidth(),
+        )
+        return QtCore.QSize(width, super().minimumSizeHint().height())
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:
+        """Refit the maximum width when the font changes, e.g., with
+        the theme."""
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.FontChange:
+            self._fit_max_width()
+
+    def _fit_max_width(self) -> None:
+        """Cap the width at ``max_chars`` characters, if set."""
+        if self.max_chars is not None:
+            char_width = self.fontMetrics().averageCharWidth()
+            margins = self.contentsMargins()
+            self.setMaximumWidth(
+                self.max_chars * char_width + margins.left() + margins.right()
+            )
+
+    def _fit_height(self) -> None:
+        """Set the minimum height to that of the wrapped lines."""
+        height = self.heightForWidth(self.width())
+        if height > 0 and height != self.minimumHeight():
+            self.setMinimumHeight(height)
 
 
 class RangeSlider(QtWidgets.QWidget):
