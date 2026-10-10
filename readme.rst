@@ -34,76 +34,40 @@ Picasso
    :alt: Picasso logo
    :width: 400
 
-Collection of tools for painting super-resolution images. The Picasso software is complemented by our `Nature Protocols publication <https://www.nature.com/nprot/journal/v12/n6/abs/nprot.2017.024.html>`__.
+A collection of tools for painting super-resolution images, covering single-molecule localization microscopy (SMLM) analysis from raw movies to localization, rendering and quantification. Picasso is complemented by our `Nature Protocols publication <https://doi.org/10.1038/nprot.2017.024>`__.
 
-A comprehensive documentation can be found here: `Read the Docs <https://picassosr.readthedocs.io/en/latest/?badge=latest>`__.
-
-To see all changes introduced across releases, see `the changelog <https://github.com/jungmannlab/picasso/blob/master/changelog.md>`_.
-
-Picasso 0.11
-------------
-This release substantially expands Picasso: Localize. Localization can now be performed with an experimentally measured PSF (cubic-spline model), jointly across several channels (e.g. biplane 3D), and with a pixel-dependent sCMOS noise model; rotated and spherical 2D Gaussian models were added as well. All GPU fitting was reimplemented in Numba CUDA, removing the dependency on Gpufit. Localize also reads a much wider range of data directly - ``.tif`` and OME-TIFF stacks (including movies split across several folders), MicroManager single-image acquisitions, Zeiss ``.czi`` and Leica ``.lif`` - so Picasso: ToRaw is no longer required and has been removed. Further additions include a temporal median filter for spot identification, affine calibrations for astigmatism and chromatic aberration correction, localization metadata embedded in the ``.hdf5`` files, a revised plugin system with an online plugin browser, and various performance and usability improvements throughout Localize, Render and SPINNA. We encourage all users to acquaint themselves with the new features in the `Localize documentation <https://picassosr.readthedocs.io/en/latest/localize.html>`_. See the `changelog <https://github.com/jungmannlab/picasso/blob/master/changelog.md>`_ for the complete list.
+**Documentation:** `picassosr.readthedocs.io <https://picassosr.readthedocs.io/en/latest/>`__ - `Installation <https://picassosr.readthedocs.io/en/latest/getting-started/installation.html>`__, `First steps <https://picassosr.readthedocs.io/en/latest/getting-started/workflow.html>`__, `Python API <https://picassosr.readthedocs.io/en/latest/api/index.html>`__, `Changelog <https://github.com/jungmannlab/picasso/blob/master/changelog.md>`__.
 
 Installation
 ------------
 
-Check out the `Picasso release page <https://github.com/jungmannlab/picasso/releases/>`__ to download and run the latest compiled one-click installer for Windows or MacOS (the latter is experimental and feedback is welcome). Here you will also find the Nature Protocols legacy version (v0.1.0).
+- **One-click installer** (Windows, macOS): download it from the `release page <https://github.com/jungmannlab/picasso/releases/>`__.
+- **PyPI**: ``pip install picassosr``, then start a module with ``picasso render``, ``picasso localize``, etc.
 
-For Windows, two one-click installers are provided: a default build and a **CUDA** build. Both render on the graphics card in Picasso: Render (via ``wgpu``, any vendor). The CUDA build additionally bundles the CUDA runtime so that CUDA-accelerated (numba.cuda) code can run, for example localization fitting. It is larger and requires an NVIDIA (CUDA-capable) GPU; on machines without one, CUDA-only options are simply hidden. Choose the CUDA installer only if you have a compatible NVIDIA GPU and want to use the accelerated fitting tools. Picasso uses CUDA 12 in the one-click installer.
-
-Python is also distributed as a PyPI package that is platform-independent (``pip install picassosr``) which grants not only GUI but also access to Picasso’s internal routines in custom Python programs. For more details, see the `Via PyPI <https://github.com/jungmannlab/picasso#via-pypi>`__ section below. For examples of how to use Picasso in Python scripts, see the section `Example Usage <https://github.com/jungmannlab/picasso#example-usage>`__ below.
-
-
-Via PyPI
-^^^^^^^^
-
-1. Open the console/terminal and create a new conda environment: ``conda create --name picasso python=3.14``. Note you can use other Python versions as well.
-2. Activate the environment: ``conda activate picasso``.
-3. Install Picasso package using: ``pip install picassosr``.
-4. You can now run any Picasso function directly from the console/terminal by running: ``picasso render``, ``picasso localize``, etc, or import Picasso functions in your own Python scripts.
-5. To update Picasso (you should get a notification about available updates since v0.10.0) run ``pip install --upgrade picassosr``.
-6. You can optionally install dependencies for .czi and .lif formats by passing ``pip install picassosr[czi]`` or ``pip install picassosr[lif]``.
-7. To enable GPU-accelerated (numba.cuda) code and GPU rendering, install the GPU dependencies with ``pip install picassosr[gpu]``. This requires an NVIDIA (CUDA-capable) GPU. The ``gpu`` extra targets CUDA toolkit 12.x; for other toolkits use ``pip install picassosr[cuda11]`` or ``pip install picassosr[cuda13]`` instead. For GPU rendering only (any recent graphics card), use ``pip install picassosr[wgpu]``. Without these extras, Picasso runs fine on the CPU and GPU-only options are hidden.
-
-For Developers (local, editable installation)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-If you wish to use your local version of Picasso with your own modifications:
-
-1. Open the console/terminal and create a new conda environment: ``conda create --name picasso python=3.14``. Note you can use other Python versions as well.
-2. Activate the environment: ``conda activate picasso``.
-3. Change to the directory of choice using ``cd``.
-4. Clone this GitHub repository by running ``git clone https://github.com/jungmannlab/picasso``. Alternatively, `download <https://github.com/jungmannlab/picasso/archive/master.zip>`__ the zip file and unzip it.
-5. Open the Picasso directory: ``cd picasso``.
-6. You can modify Picasso code in this directory.
-7. To create a *local* Picasso package to use it in other Python scripts, run ``pip install -e ".[dev]"``. When you change the code in the ``picasso`` directory, the changes will be reflected in the package.
-8. You can install other extensions, such as ``".[gpu]"``, etc. The whole list of optional dependencies can be found in ``pyproject.toml``.
-9. You can now run any Picasso module directly from the console/terminal by running: ``picasso render``, ``picasso localize``, etc, or import Picasso functions in your own Python scripts.
-10. *Optional, Windows only:* to create shortcuts for the modules, run ``powershell -ExecutionPolicy Bypass -File picasso\gui\createShortcuts.ps1`` from the repository with the environment activated. The shortcuts appear in the repository folder and can be dragged to the Desktop, Start Menu or Task Bar.
+Optional extras (file formats, GPU support) and the developer installation are described in the `installation guide <https://picassosr.readthedocs.io/en/latest/getting-started/installation.html>`__.
 
 Example Usage
 -------------
 
-Besides using the GUI, you can use picasso like any other Python module. Consider the following example:::
+Besides the GUI, Picasso can be used like any other Python package::
 
   from picasso import io, postprocess
 
-  path = 'testdata_locs.hdf5'
-  locs, info = io.load_locs(path)
-  
+  locs, info = io.load_locs("testdata_locs.hdf5")
+
   # Link localizations and calculate dark times
-  linked_locs = postprocess.link(picked_locs, info, r_max=0.05, max_dark_time=1)
+  linked_locs = postprocess.link(locs, info, r_max=0.05, max_dark_time=1)
   linked_locs_dark = postprocess.compute_dark_times(linked_locs)
 
   print(f"Average bright time {linked_locs_dark['n'].mean():.2f} frames")
   print(f"Average dark time {linked_locs_dark['dark'].mean():.2f} frames")
 
-For more examples, visit the `sample notebooks <https://github.com/jungmannlab/picasso/tree/master/samples>`__.
+For more examples, see the `sample notebooks <https://github.com/jungmannlab/picasso/tree/master/samples>`__ and the `Python API documentation <https://picassosr.readthedocs.io/en/latest/api/index.html>`__.
 
 Contributing
 ------------
 
-If you have a feature request or a bug report, please post it as an issue on the GitHub issue tracker. If you want to contribute, put a pull request (PR) for it. You can find more guidelines for contributing `here <https://github.com/jungmannlab/picasso/blob/master/CONTRIBUTING.rst>`__. We will gladly guide you through the codebase and credit you accordingly.  You can also contact us via picasso@jungmannlab.org.
+Please post feature requests and bug reports on the `issue tracker <https://github.com/jungmannlab/picasso/issues>`__; pull requests are welcome (see the `contributing guidelines <https://github.com/jungmannlab/picasso/blob/master/CONTRIBUTING.rst>`__). You can also contact us via picasso@jungmannlab.org.
 
 .. SYNC-START: contributions
 
