@@ -55,6 +55,23 @@ HSV-spaced colors for as long as it's ticked. ``Save colors`` /
 ``Load colors`` write / read a one-identifier-per-line ``.txt`` file — any
 name from the three dropdown sections (or a hex code) is valid.
 
+``Background color`` sets the color of pixels without localizations in
+multichannel images (black by default). ``Invert colors / white background``
+gives multichannel images a white background and inverts the colormap of a
+single channel.
+
+The color, relative intensity and automatic coloring apply only when several
+channels are loaded. With a single channel they are grayed out, and a note at
+the bottom of the dialog says how the channel is rendered instead:
+
+- Without a ``group`` column and without rendering by property, it is drawn
+  with the colormap from :ref:`Display settings <render-colormap-setting>`,
+  so the background color does not apply either.
+- With a ``group`` column, the groups are colored automatically, all with
+  the same intensity.
+- When rendering by property (see :ref:`render-coloring`), the localizations
+  are colored with the property colormap.
+
 .. _render-custom-colormaps:
 
 Edit custom colormaps

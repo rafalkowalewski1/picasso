@@ -1,10 +1,10 @@
 # Changelog
 
-Last change: 10-OCT-2026 CEST
+Last change: 11-OCT-2026 CEST
 
-## 0.12.0
+## 1.0.0
 
-**TODO**: Describe the general overview - fast render, etc.
+**TODO**: Describe the general overview - fast render, documentation etc.
 
 ### General
 - New [documentation](https://picassosr.readthedocs.io/en/latest) that is user-friendly, intuitive and thoroughly explains every Picasso functionality. Quick start page was added with minimal introduction to Picasso. Python API can now be found by a simple browser search in the documentation.
@@ -35,6 +35,7 @@ Last change: 10-OCT-2026 CEST
 - The View menu no longer lists Left/Right/Up/Down and Zoom in/out (their keyboard shortcuts still work); *Filter picks by number of localizations* is now *Filter picks by count*.
 - Long operations run in the background and can be canceled: undrifting (AIM, RCC, from picked), DBSCAN, HDBSCAN, SMLM clusterer, G5M, RESI, NeNA, FRC in ROIs, pick statistics and saving pick properties. The windows keep repainting while they run.
 - Link localizations can be run on all channels sequentially.
+- Files dialogs widgets are grayed out if they do not apply at the given moment.
 - Fixed: 3D histogram rendering scaled z unnecessarily.
 - Fixed NeNA (and FRC) overwriting group columns of localizations.
 - Fixed: DBSCAN, HDBSCAN and SMLM clusterer saved the cluster areas as `*_centers_areas.csv` instead of `*_areas.csv` when the cluster centers were saved, too.

@@ -607,6 +607,14 @@ class DatasetDialog(lib.Dialog):
         self.scroll_area.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._scroll, 4, 0, 1, 3)
 
+        # explains the grayed-out widgets when a single channel is
+        # loaded (see set_single_channel_mode)
+        self._single_channel_mode = None
+        self.single_channel_note = QtWidgets.QLabel()
+        self.single_channel_note.setWordWrap(True)
+        self.single_channel_note.setVisible(False)
+        layout.addWidget(self.single_channel_note, 5, 0, 1, 3)
+
         self.checks = []
         self.title = []
         self.closebuttons = []
@@ -812,6 +820,59 @@ class DatasetDialog(lib.Dialog):
         self.scroll_area.addWidget(p, currentline, 5)
 
         self._fit_scroll_width()
+
+    def set_single_channel_mode(self, mode: str | None) -> None:
+        """Gray out the widgets that the rendering of a single loaded
+        channel ignores and show a note saying why; enable them again
+        when several channels are loaded.
+
+        A single channel never uses the per-channel color, relative
+        intensity or automatic coloring. Without groups or rendering
+        by property it is drawn with the Display settings colormap, so
+        the background color is ignored as well.
+
+        Parameters
+        ----------
+        mode : {"colormap", "group", "property"} or None
+            How the single channel is rendered: with the colormap,
+            split by its ``group`` column or by a property. None if
+            several channels are loaded.
+        """
+        if mode == self._single_channel_mode:
+            return
+        self._single_channel_mode = mode
+        unused = " Color, relative intensity and automatic coloring "
+        notes = {
+            "colormap": (
+                "A single channel is rendered with the colormap from "
+                "Display settings (Ctrl+D)." + unused + "and the "
+                "background color apply only to several channels; "
+                "'Invert colors' inverts the colormap."
+            ),
+            "group": (
+                "The groups of this channel are colored automatically, "
+                "all with the same intensity." + unused + "apply only "
+                "to several channels."
+            ),
+            "property": (
+                "Rendering by property colors the localizations with the "
+                "property colormap from Display settings (Ctrl+D)."
+                + unused
+                + "apply only to several channels."
+            ),
+        }
+        multichannel = mode is None
+        for widget in [
+            self.auto_colors,
+            *self.colorselection,
+            *self.colorpreviews,
+            *self.intensitysettings,
+        ]:
+            widget.setEnabled(multichannel)
+        for widget in [self.background_button, self.background_swatch]:
+            widget.setEnabled(mode != "colormap")
+        self.single_channel_note.setText(notes.get(mode, ""))
+        self.single_channel_note.setVisible(not multichannel)
 
     def _relayout_channels(self) -> None:
         """Re-add all channel widgets to the scroll area so that the
@@ -15005,6 +15066,19 @@ class View(QtWidgets.QLabel):
             infos = infos[0]
         return locs, infos
 
+    def _single_channel_mode(self) -> str | None:
+        """How a single loaded channel is rendered: "property" (render
+        by property), "group" (split by its group column) or
+        "colormap" (the Display settings colormap); None if several
+        channels are loaded."""
+        if len(self.locs) != 1:
+            return None
+        if self.window.display_settings_dlg.render_check.isChecked():
+            return "property"
+        if "group" in self.locs[0].columns:
+            return "group"
+        return "colormap"
+
     def _prepare_locs_for_rendering(
         self,
         viewport: (
@@ -15040,6 +15114,9 @@ class View(QtWidgets.QLabel):
         # if multiple channels are loaded, selected only the ones which
         # are checked in the Dataset Dialog
         locs, infos = self._filter_checked_channels(locs, infos)
+        self.window.dataset_dialog.set_single_channel_mode(
+            self._single_channel_mode()
+        )
         return locs, infos
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
