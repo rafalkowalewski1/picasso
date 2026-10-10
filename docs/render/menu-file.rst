@@ -281,7 +281,7 @@ Export images
 
 The rendered image can be saved as ``.png``, ``.tif``, ``.pdf`` or ``.svg``
 (``.pdf`` asks for the resolution in DPI). Next to every image, a ``.yaml``
-file records the field of view, the zoom, the display pixel size, the blur
+file records the field of view, the zoom, the display pixel size, the render
 method, the contrast, the colormap and the scale bar length. When rendering by property, the color bar is saved
 as well (see :ref:`render-colorbar-format`).
 
@@ -294,7 +294,7 @@ as well (see :ref:`render-colorbar-format`).
    size.
 ``Export view manually...``
    Renders a region typed in (top-left corner, width and height in camera
-   pixels) with a chosen display pixel size, minimum blur and blur method,
+   pixels) with a chosen display pixel size, minimum blur and render method,
    independent of the window. The contrast is scaled to the new pixel size.
 ``Export channels in grayscale...``
    Saves the current view of every channel as a separate grayscale image,

@@ -6,7 +6,7 @@ Display Settings and Info
 This page describes two dialogs of the ``View`` menu:
 
 - :ref:`Display settings <render-display-settings>` (:kbd:`Ctrl+D`) control
-  how the localizations are rendered: zoom, contrast and colormap, blur
+  how the localizations are rendered: zoom, contrast and colormap, render
   method, scale bar and rendering by property.
 - :ref:`Info <render-show-info>` (:kbd:`Ctrl+I`) reports on the loaded data:
   the current field of view, the localization precision and NeNA, the FRC
@@ -66,11 +66,13 @@ the ``Render`` section of ``~/.picasso/settings.yaml`` (see
 
 .. _render-blur:
 
-Blur
-~~~~
+Render method
+~~~~~~~~~~~~~
 
-Select a blur method. ``Min. blur (nm)`` sets the smallest Gaussian width the
-precision-based methods draw. Available options are:
+Select how the localizations are drawn into the image: as a histogram,
+blurred with a Gaussian, adaptively binned or triangulated. ``Min. blur (nm)``
+sets the smallest Gaussian width the precision-based methods draw. Available
+options are:
 
 None
    Each localization adds one count to the display pixel it falls in (a
@@ -110,7 +112,7 @@ Adaptive Histogram (Quad-Tree)
    - A bin is never smaller than one display pixel. When zoomed out, a
      display pixel often holds more localizations than the leaf capacity, so
      most bins are single pixels and the image approaches the plain histogram
-     (blur ``None`` above).
+     (``None`` above).
    - The mode renders on the CPU from the spatial index of each channel (see
      :ref:`files <spatial-index>`), which makes it fast at any zoom.
    - In the 3D view the same method is applied to the projected
@@ -149,7 +151,7 @@ Jittered Triangulation
    :icon: code
    :class-container: api-example
 
-   The blur methods are the ``blur_method`` of ``render.render``;
+   The render methods are the ``blur_method`` of ``render.render``;
    ``min_blur_width`` is in camera pixels.
 
    .. code-block:: python

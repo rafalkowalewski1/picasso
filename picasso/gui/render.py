@@ -7682,7 +7682,7 @@ class DisplaySettingsDialog(lib.Dialog):
         self.colormap.currentIndexChanged.connect(self.on_cmap_changed)
 
         # Blur
-        blur_groupbox = QtWidgets.QGroupBox("Blur")
+        blur_groupbox = QtWidgets.QGroupBox("Render method")
         blur_grid = QtWidgets.QGridLayout(blur_groupbox)
         self.blur_buttongroup = QtWidgets.QButtonGroup()
         points_button = QtWidgets.QRadioButton("None")

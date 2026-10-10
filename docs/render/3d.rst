@@ -13,7 +13,7 @@ with ``View > 3D view`` (:kbd:`Ctrl+Shift+R`):
 - Pressed again with nothing changed, it only brings the window to the front,
   keeping the rotation; a new pick or a new field of view reloads it.
 
-Some of the display settings (blur method, colormap, etc.) are taken
+Some of the display settings (render method, colormap, etc.) are taken
 over from the main window, see :ref:`render-3d-display-settings`.
 
 The arrow keys move the shown region. In the pick mode, they move the pick
@@ -171,13 +171,13 @@ Display settings
 
 The display settings of the 3D view are separate from the main window's, so
 the 3D view can be tuned without changing the main image. When the 3D view is
-opened or reloaded, the blur method, the colormap and the settings of the
+opened or reloaded, the render method, the colormap and the settings of the
 adaptive histogram and of the jittered triangulation are taken over from the
 main window; everything else is set here:
 
 - the display pixel size (with ``dynamic``) and the contrast (``Min. density``,
   ``Max. density``) and colormap;
-- the blur method, with ``Min. Blur (nm)``, the adaptive histogram's
+- the render method, with ``Min. blur (nm)``, the adaptive histogram's
   ``Leaf capacity`` and the jittered triangulation's ``Passes``, ``Jitter``
   and ``Max. localizations`` (see :ref:`render-display-settings`);
 - the scale bar: its length, ``Automatic length`` and ``Print scale bar

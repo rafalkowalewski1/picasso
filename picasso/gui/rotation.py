@@ -176,7 +176,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self.colormap.currentIndexChanged.connect(self.render_scene)
 
         # blur
-        blur_groupbox = QtWidgets.QGroupBox("Blur")
+        blur_groupbox = QtWidgets.QGroupBox("Render method")
         blur_grid = QtWidgets.QGridLayout(blur_groupbox)
         self.blur_buttongroup = QtWidgets.QButtonGroup()
         points_button = QtWidgets.QRadioButton("None")
@@ -184,14 +184,14 @@ class DisplaySettingsRotationDialog(lib.Dialog):
             "No blur applied; each localization is rendered as a point."
         )
         self.blur_buttongroup.addButton(points_button)
-        smooth_button = QtWidgets.QRadioButton("One-pixel blur")
+        smooth_button = QtWidgets.QRadioButton("One-Pixel-Blur")
         smooth_button.setToolTip(
             "Each localization is Gaussian blurred with a \u03c3 of one "
             "rendered pixel."
         )
         self.blur_buttongroup.addButton(smooth_button)
         convolve_button = QtWidgets.QRadioButton(
-            "Global localization precision"
+            "Global Localization Precision"
         )
         convolve_button.setToolTip(
             "Each localization is Gaussian blurred with a \u03c3 equal to\n"
@@ -199,7 +199,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         )
         self.blur_buttongroup.addButton(convolve_button)
         gaussian_button = QtWidgets.QRadioButton(
-            "Individual localization precision"
+            "Individual Localization Precision"
         )
         gaussian_button.setToolTip(
             "Each localization is Gaussian blurred with a \u03c3 equal to\n"
@@ -207,7 +207,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         )
         self.blur_buttongroup.addButton(gaussian_button)
         gaussian_iso_button = QtWidgets.QRadioButton(
-            "Individual localization precision, iso"
+            "Individual Localization Precision, iso"
         )
         gaussian_iso_button.setToolTip(
             "Each localization is Gaussian blurred with a \u03c3 equal to\n"
@@ -217,7 +217,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         # the same buttons as the main window's dialog, in the same
         # order (the windows sync by button id)
         quadtree_button = QtWidgets.QRadioButton(
-            "Adaptive histogram (quad-tree)"
+            "Adaptive Histogram (Quad-Tree)"
         )
         quadtree_button.setToolTip(
             "Histogram whose bins split while they hold more than the\n"
@@ -226,7 +226,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
             "built from the projected localizations for every orientation."
         )
         self.blur_buttongroup.addButton(quadtree_button)
-        triangulation_button = QtWidgets.QRadioButton("Jittered triangulation")
+        triangulation_button = QtWidgets.QRadioButton("Jittered Triangulation")
         triangulation_button.setToolTip(
             "Delaunay triangles drawn with an intensity inverse to their\n"
             "area, averaged over triangulations of the localizations\n"
@@ -252,7 +252,7 @@ class DisplaySettingsRotationDialog(lib.Dialog):
         self.min_blur_widgets = QtWidgets.QWidget()
         min_blur_grid = QtWidgets.QGridLayout(self.min_blur_widgets)
         min_blur_grid.setContentsMargins(0, 0, 0, 0)
-        min_blur_label = QtWidgets.QLabel("Min. Blur (nm):")
+        min_blur_label = QtWidgets.QLabel("Min. blur (nm):")
         min_blur_label.setToolTip(
             "Minimum blur applied to all localizations in nm."
         )

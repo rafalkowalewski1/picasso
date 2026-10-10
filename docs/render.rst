@@ -199,7 +199,7 @@ Topics
       :link: render/display-settings
       :link-type: doc
 
-      Contrast, colormaps, blur methods, scale bar, render by property and the
+      Contrast, colormaps, render methods, scale bar, render by property and the
       info dialog.
 
    .. grid-item-card:: :octicon:`git-compare;1.5em;sd-mr-1` Drift correction

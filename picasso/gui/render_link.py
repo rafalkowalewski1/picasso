@@ -28,7 +28,7 @@ Navigation
     are linked separately, and windows of different sizes show the
     same center at the same scale.
 Rendering
-    Render settings (blur method and its parameters, display pixel
+    Render settings (render method and its parameters, display pixel
     size), contrast (including automatic contrast adjustments),
     colormap and render by property.
 Display
@@ -143,7 +143,7 @@ CATEGORIES = (
         "render_settings",
         "Render settings",
         "Rendering",
-        "Blur method and its parameters, display pixel size.",
+        "Render method and its parameters, display pixel size.",
     ),
     LinkCategory(
         "contrast",

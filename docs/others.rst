@@ -255,7 +255,7 @@ Top level
      - Target number of localizations rendered during live pan/zoom previews. See :ref:`render-cpu-usage`.
    * - ``max_blur_width``
      - ``100`` (nm)
-     - Localizations whose precision (``lpx``/``lpy``) exceeds this are skipped by the per-localization blur methods. See :ref:`render-cpu-usage`.
+     - Localizations whose precision (``lpx``/``lpy``) exceeds this are skipped by the per-localization render methods. See :ref:`render-cpu-usage`.
    * - ``gpu: enabled``
      - ``auto``
      - Whether/when rendering uses the GPU backend - ``auto``, ``on`` or ``off``. See :ref:`render-gpu-rendering`.

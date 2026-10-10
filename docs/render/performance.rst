@@ -52,7 +52,7 @@ time. The budget is set in the user settings file ``~/.picasso/settings.yaml``
    - ``0`` or ``off`` disables previews so every frame renders at full
      quality.
 ``max_blur_width`` (nm)
-   Applies to the two blur methods that use each localization's own precision
+   Applies to the two render methods that use each localization's own precision
    (*Individual loc. prec.* and its isotropic variant): localizations whose
    ``lpx`` or ``lpy`` exceeds this value are **not rendered** at all.
 
@@ -178,7 +178,7 @@ When ``View > Show info`` says CPU, check in this order:
 How the GPU path compares to the CPU
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- All blur methods render on the GPU, in 2D and in the 3D view, except the
+- All render methods run on the GPU, in 2D and in the 3D view, except the
   :ref:`adaptive histogram and the jittered triangulation <render-blur>`,
   which always render on the CPU.
 - Zoomed-in views use the same spatial index as the CPU path: once the field
