@@ -21,6 +21,10 @@ DefaultGroupName=Picasso{#VARIANT}
 OutputBaseFilename="Picasso-Windows-64bit{#VARIANT}-{#APP_VERSION}"
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Picasso icon for the installer, the uninstaller and the "Installed apps"
+; entry (picasso.exe carries the same icon, see create_installer_windows.bat)
+SetupIconFile=..\logos\picasso.ico
+UninstallDisplayIcon={app}\picasso.exe
 
 [Files]
 Source: "{#DISTDIR}\picasso\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
