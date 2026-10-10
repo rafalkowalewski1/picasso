@@ -6,8 +6,7 @@ Picasso
 .. raw:: html
 
    <div class="hero">
-     <img class="only-light" src="_static/picasso-logo.png" alt="Picasso"
-          onerror="this.outerHTML='&lt;p class=&quot;hero-name&quot;&gt;Picasso&lt;/p&gt;'">
+     <img class="only-light" src="_static/picasso-logo.png" alt="Picasso">
      <img class="only-dark" src="_static/picasso-logo-dark.png" alt="Picasso">
      <p class="tagline">
        A collection of tools for painting super-resolution images, covering

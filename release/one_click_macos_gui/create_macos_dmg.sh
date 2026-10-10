@@ -75,7 +75,7 @@ pyinstaller "$PYINSTALLER_FILE" \
     --copy-metadata imageio \
     --collect-submodules matplotlib.backends \
     --name picasso \
-    --icon ../logos/localize.icns \
+    --icon ../logos/picasso.icns \
     --osx-bundle-identifier org.jungmannlab.picasso \
     --distpath "$DIST_DIR" \
     --workpath "$BUILD_DIR" \
@@ -291,7 +291,7 @@ rm -f "${DMG_NAME}.dmg" rw.*."${DMG_NAME}.dmg"
 # (create-dmg >= 1.3.0) and the hdiutil retries.
 create-dmg \
     --volname "$APP_NAME $VERSION" \
-    --volicon "../logos/localize.icns" \
+    --volicon "../logos/picasso.icns" \
     --window-pos 200 120 \
     --window-size 800 500 \
     --icon-size 80 \

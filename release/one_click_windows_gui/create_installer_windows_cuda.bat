@@ -74,7 +74,7 @@ call pyinstaller "../pyinstaller/picasso_pyinstaller.py" ^
     --copy-metadata streamlit ^
     --copy-metadata imageio ^
     --name picasso ^
-    --icon "../../logos/localize.ico" ^
+    --icon "../../logos/picasso.ico" ^
     --noconfirm
 call pyinstaller "../pyinstaller/picasso_pyinstaller.py" ^
     --onedir ^
@@ -98,7 +98,7 @@ call pyinstaller "../pyinstaller/picasso_pyinstaller.py" ^
     --copy-metadata streamlit ^
     --copy-metadata imageio ^
     --name picassow ^
-    --icon "../../logos/localize.ico" ^
+    --icon "../../logos/picasso.ico" ^
     --noconfirm
 
 REM Spec files were written to build_cuda (via --specpath); they are removed with

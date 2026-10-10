@@ -131,21 +131,14 @@ html_css_files = ["custom.css"]
 html_js_files = ["anchor-redirects.js"]
 html_show_sourcelink = False
 
-# The Picasso logo. Until the image is added to _static, the navbar shows
-# the project name as text.
-_LOGO_LIGHT = "picasso-logo.png"
-_LOGO_DARK = "picasso-logo-dark.png"
-_logo = {"text": "Picasso"}
-if os.path.exists(os.path.join(_HERE, "_static", _LOGO_LIGHT)):
-    _logo = {"image_light": f"_static/{_LOGO_LIGHT}", "alt_text": "Picasso"}
-    if os.path.exists(os.path.join(_HERE, "_static", _LOGO_DARK)):
-        _logo["image_dark"] = f"_static/{_LOGO_DARK}"
-    else:
-        _logo["image_dark"] = f"_static/{_LOGO_LIGHT}"
-    html_favicon = f"_static/{_LOGO_LIGHT}"
+html_favicon = "_static/picasso-logo.png"
 
 html_theme_options = {
-    "logo": _logo,
+    "logo": {
+        "image_light": "_static/picasso-logo.png",
+        "image_dark": "_static/picasso-logo-dark.png",
+        "alt_text": "Picasso",
+    },
     "navbar_align": "left",
     "header_links_before_dropdown": 6,
     "show_toc_level": 2,
