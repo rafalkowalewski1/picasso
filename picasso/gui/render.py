@@ -630,9 +630,6 @@ class DatasetDialog(lib.Dialog):
             "Set the relative intensity for each dataset."
         )
         self.scroll_area.addWidget(intensity_label, 0, 4)
-        close_label = QtWidgets.QLabel("Close")
-        close_label.setToolTip("Close the datasets.")
-        self.scroll_area.addWidget(close_label, 0, 5)
 
         self.default_colors = [
             "red",
@@ -704,7 +701,8 @@ class DatasetDialog(lib.Dialog):
         t = QtWidgets.QPushButton("#")
         t.setToolTip("Change the displayed name of this dataset.")
         t.setObjectName(channel_id)
-        p = QtWidgets.QPushButton("x")
+        p = QtWidgets.QPushButton()
+        p.setIcon(theme.icon("delete"))
         p.setToolTip("Close this dataset.")
         p.setObjectName(channel_id)
 
