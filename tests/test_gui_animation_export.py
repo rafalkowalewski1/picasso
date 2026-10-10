@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from PyQt6 import QtWidgets
 
-from picasso import lib
+from picasso import io, lib
 from picasso.gui import render as gui_render
 from picasso.gui import rotation
 
@@ -193,3 +193,29 @@ def test_help_button_links_to_the_animation_docs(dialog):
     buttons = dialog.findChildren(lib.HelpButton)
     assert [b.help_url for b in buttons] == [dialog.DOCS_URL]
     assert dialog.DOCS_URL.endswith("render/3d.html#render-animation")
+
+
+@pytest.mark.parametrize("shown", [True, False])
+def test_scale_bar_is_drawn_and_saved_when_selected(dialog, qapp, shown):
+    """The scale bar of the display settings appears in the frames and
+    its length in the settings file only when it is selected."""
+    disp_dlg = dialog.window.display_settings_dlg
+    disp_dlg.scalebar_groupbox.setChecked(shown)
+    disp_dlg.optimal_scalebar_check.setChecked(False)
+    disp_dlg.scalebar.setValue(int(5 * PIXELSIZE))
+    disp_dlg.scalebar_text.setChecked(False)
+    dialog.width_px.setValue(96)
+    dialog.height_px.setValue(64)
+    dialog.build_animation()
+    _wait_until(qapp, lambda: dialog._build_thread is None, timeout=60.0)
+    assert dialog.warnings == []
+    settings = io.load_info(str(dialog.output.with_suffix(".yaml")))[0]
+    if shown:
+        assert settings["Scale bar length (nm)"] == int(5 * PIXELSIZE)
+        assert settings["Scale bar length displayed"] is False
+    else:
+        assert settings["Scale bar length (nm)"] is None
+    # the bar sits 20 px above the bottom and 35 px from the right edge
+    frame = imageio.mimread(str(dialog.output))[-1]
+    patch = frame[64 - 25 : 64 - 22, 96 - 40 : 96 - 37].astype(int)
+    assert (patch.min() > 200) == shown

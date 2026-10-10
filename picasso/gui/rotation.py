@@ -961,6 +961,12 @@ class AnimationDialog(lib.Dialog):
             relative_intensities=intensities,
             fps=self.fps.value(),
             adjust_pixel_size=adjust_display_pixel,
+            scalebar_length_nm=(
+                disp_dlg.scalebar.value()
+                if disp_dlg.scalebar_groupbox.isChecked()
+                else None
+            ),
+            scalebar_display_length=disp_dlg.scalebar_text.isChecked(),
         )
         self._start_build(path, locs, infos, kwargs, n_frames)
 

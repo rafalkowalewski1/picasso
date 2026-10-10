@@ -206,6 +206,12 @@ The frames are rendered in the background, at the resolution set in the
 animation dialog (``Resolution (px)``, by default the window's size), so the
 windows stay usable while the video is built.
 
+If the scale bar is shown in the display settings, it is drawn into every
+frame with the length set there. The length stays fixed in nm, so the bar
+grows and shrinks as the animation zooms in and out. The ``.yaml`` file saved
+next to the video records the positions, durations, transition and the scale
+bar's length (if drawn).
+
 While the video is built, a progress dialog shows how many frames have been
 rendered. ``Cancel`` stops the build and deletes the unfinished video file.
 

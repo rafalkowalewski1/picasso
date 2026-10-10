@@ -21,14 +21,16 @@ from tqdm import tqdm
 
 from .. import io, lib, __version__
 from .geometry import viewport_width
+from .overlays_qt import draw_scalebar
 from .scene import render_scene
 
 if TYPE_CHECKING:
-    from PyQt6 import QtCore
+    from PyQt6 import QtCore, QtGui
 else:
     # PyQt6 is imported on first attribute access so that importing
     # picasso.render does not require PyQt6.
     QtCore = lib._LazyQtModule("PyQt6.QtCore")
+    QtGui = lib._LazyQtModule("PyQt6.QtGui")
 
 
 def _normalize_animation_positions(
@@ -377,6 +379,8 @@ def build_animation(
     relative_intensities: list[float] | None = None,
     fps: int = 30,
     adjust_pixel_size: bool = True,
+    scalebar_length_nm: int | float | None = None,
+    scalebar_display_length: bool = True,
     progress_callback: (
         Callable[[int], None] | Literal["console"] | None
     ) = None,
@@ -495,6 +499,14 @@ def build_animation(
         display pixels remains the same if the viewport is zoomed in or
         out. If False, disp_px_size remains the same across the
         animation.
+    scalebar_length_nm : int or float, optional
+        Length of the scale bar drawn into every frame (nm). The length
+        is fixed, so the bar grows and shrinks as the animation zooms
+        in and out. The bar is white, or black if 'invert_colors' is
+        True. If None, no scale bar is drawn. Default is None.
+    scalebar_display_length : bool, optional
+        If True, the scale bar's length is printed above it. Only used
+        if 'scalebar_length_nm' is given. Default is True.
     progress_callback : callable, "console", or None, optional
         If a callable, it is called with the current frame number as an
         argument after each frame is rendered. If "console", a progress
@@ -604,6 +616,14 @@ def build_animation(
     assert isinstance(
         adjust_pixel_size, bool
     ), "adjust_pixel_size must be a bool."
+    if scalebar_length_nm is not None:
+        assert (
+            isinstance(scalebar_length_nm, (int, float))
+            and scalebar_length_nm > 0
+        ), "scalebar_length_nm must be a positive number or None."
+    assert isinstance(
+        scalebar_display_length, bool
+    ), "scalebar_display_length must be a bool."
     assert (
         progress_callback is None
         or progress_callback == "console"
@@ -633,6 +653,8 @@ def build_animation(
         relative_intensities=relative_intensities,
         fps=fps,
         adjust_pixel_size=adjust_pixel_size,
+        scalebar_length_nm=scalebar_length_nm,
+        scalebar_display_length=scalebar_display_length,
         progress_callback=progress_callback,
         cancel=cancel,
     )
@@ -662,6 +684,8 @@ def _build_animation(
     relative_intensities: list[float] | None,
     fps: int,
     adjust_pixel_size: bool,
+    scalebar_length_nm: int | float | None,
+    scalebar_display_length: bool,
     progress_callback: Callable[[int], None] | Literal["console"] | None,
     cancel: Callable[[], bool] | None = None,
 ) -> bool:
@@ -680,6 +704,14 @@ def _build_animation(
     width, height = image_size
     width = ((width + 15) // 16) * 16
     height = ((height + 15) // 16) * 16
+
+    if scalebar_length_nm is not None:
+        # camera pixel size (nm) maps the bar's length onto the viewport
+        channel_info = info[0] if isinstance(info[0], list) else info
+        pixelsize = lib.get_from_metadata(
+            channel_info, "Pixelsize", raise_error=True
+        )
+        scalebar_color = QtGui.QColor("black" if invert_colors else "white")
 
     # render all frames and save in RAM
     video_writer = imageio.get_writer(path, fps=fps)
@@ -731,6 +763,20 @@ def _build_animation(
             height,
             QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
         )
+        if scalebar_length_nm is not None:
+            # the frame is stretched to the output size, so its width
+            # spans the viewport's width; match the aspect ratio so that
+            # draw_scalebar keeps that horizontal scale
+            (y_min, x_min), (_, x_max) = viewports[i]
+            y_max = y_min + (x_max - x_min) * height / width
+            qimage = draw_scalebar(
+                image=qimage,
+                viewport=((y_min, x_min), (y_max, x_max)),
+                scalebar_length_nm=scalebar_length_nm,
+                pixelsize=pixelsize,
+                display_length=scalebar_display_length,
+                color=scalebar_color,
+            )
 
         # convert to a np.array and append
         ptr = qimage.bits()
@@ -770,7 +816,10 @@ def _build_animation(
         "Viewports at checkpoints (camera pixels)": viewports_yaml,
         "Durations (s)": durations,
         "Transition": transition,
+        "Scale bar length (nm)": scalebar_length_nm,
     }
+    if scalebar_length_nm is not None:
+        anim_settings["Scale bar length displayed"] = scalebar_display_length
     info_path = os.path.splitext(path)[0] + ".yaml"
     io.save_info(info_path, [anim_settings])
     return True
