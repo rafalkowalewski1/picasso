@@ -45,7 +45,7 @@ import dask.array as da
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 import matplotlib.gridspec as gridspec
 from scipy.ndimage import gaussian_filter
 from scipy.optimize import curve_fit
@@ -9438,9 +9438,54 @@ def db_filename() -> str:
 
 def _save_file_summary(summary: dict) -> None:
     """Save the summary of a localization file to a SQLite database."""
+    save_file_summaries(pd.Series(summary, index=summary.keys()).to_frame().T)
+
+
+def save_file_summaries(summaries: pd.DataFrame) -> None:
+    """Append localization file summaries to the ``files`` table of the
+    database (see ``db_filename``).
+
+    A table created by an older Picasso version lacks the columns added
+    since, for example new localization columns, which would make the
+    insert fail. These columns are added to the table first and are
+    empty (NULL) for the rows already in it.
+
+    Parameters
+    ----------
+    summaries : pd.DataFrame
+        One row per file, with the keys of :func:`get_file_summary` as
+        columns.
+    """
     engine = create_engine("sqlite:///" + db_filename(), echo=False)
-    s = pd.Series(summary, index=summary.keys()).to_frame().T
-    s.to_sql("files", con=engine, if_exists="append", index=False)
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        if inspector.has_table("files"):
+            existing = {c["name"] for c in inspector.get_columns("files")}
+            for column, values in summaries.items():
+                if column in existing:
+                    continue
+                # a summary row built from a dict has object dtype, so the
+                # type is inferred from the values; an all-empty column is
+                # taken as numeric, as are all statistics columns
+                kind = pd.api.types.infer_dtype(values, skipna=True)
+                if kind.startswith("datetime"):
+                    sql_type = "TIMESTAMP"
+                elif kind in (
+                    "empty",
+                    "floating",
+                    "integer",
+                    "mixed-integer-float",
+                ):
+                    sql_type = "FLOAT"
+                else:
+                    sql_type = "TEXT"
+                name = column.replace('"', '""')
+                connection.execute(
+                    text(f'ALTER TABLE files ADD COLUMN "{name}" {sql_type}')
+                )
+        summaries.to_sql(
+            "files", con=connection, if_exists="append", index=False
+        )
 
 
 def add_file_to_db(

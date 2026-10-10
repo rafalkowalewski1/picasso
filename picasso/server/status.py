@@ -2,7 +2,6 @@ import streamlit as st
 from helper import fetch_db
 from picasso import localize
 import pandas as pd
-from sqlalchemy import create_engine
 import os
 
 
@@ -129,16 +128,8 @@ def status():  # noqa: C901
                     if st.button(
                         "Add to database", icon=":material/database:"
                     ):
-                        engine = create_engine(
-                            "sqlite:///" + localize.db_filename(), echo=False
-                        )
-                        pd.DataFrame(
-                            summary.values(), summary.keys()
-                        ).T.to_sql(
-                            "files",
-                            con=engine,
-                            if_exists="append",
-                            index=False,
+                        localize.save_file_summaries(
+                            pd.DataFrame(summary.values(), summary.keys()).T
                         )
                         st.success("Submitted to DB. Please refresh page.")
             else:
@@ -183,15 +174,7 @@ def status():  # noqa: C901
 
                     st.write(stack)
 
-                    engine = create_engine(
-                        "sqlite:///" + localize.db_filename(), echo=False
-                    )
-                    stack.to_sql(
-                        "files",
-                        con=engine,
-                        if_exists="append",
-                        index=False,
-                    )
+                    localize.save_file_summaries(stack)
 
                     st.success(f"Submitted {len(stack)} entries to the DB.")
                     st.success("Submitted to DB. Please refresh page.")

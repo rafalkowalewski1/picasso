@@ -46,6 +46,7 @@ Last change: 10-OCT-2026 CEST
 - New column `reduced_chi_square` for MLE and least-squares fits: the goodness of fit normalized for the box size and the photon counts, about 1 for a good fit (`picasso.localize.reduced_chi_square`).
 - Fixed: ratiometric multichannel spline fitting ignored the per-pixel sCMOS variance of the camera calibration.
 - Fixed: `Height` and `Width` were swapped in the metadata of non-square `.ims` movies.
+- Fixed drift estimation when adding to database + database building.
 
 ### **Backward incompatible changes:**
 - *Tools > Fast rendering* is removed: with GPU rendering and other speed improvements it no longer serves a purpose.

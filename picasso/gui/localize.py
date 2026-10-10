@@ -5562,7 +5562,7 @@ class ParametersDialog(lib.Dialog):
             self.window.locs,
             self.window.info,
             self.window.movie_path,
-            self.pixelsize,
+            self.pixelsize.value(),
         )
         self.q_worker.progressMade.connect(self.quality_progress)
         self.q_worker.finished.connect(self.quality_progress_finished)
@@ -14986,11 +14986,14 @@ class QualityWorker(QtCore.QThread):
         locs: pd.DataFrame,
         info: list[dict],
         path: str,
-        pixelsize: QtWidgets.QDoubleSpinBox,
+        pixelsize: float,
     ) -> None:
         super().__init__()
         self.locs = locs
-        self.info = info
+        # The movie's metadata has no pixel size until the localizations
+        # are saved (see ``Window.save_locs``), but undrifting needs it,
+        # so take it from the Parameters dialog.
+        self.info = info + [{"Pixelsize": pixelsize}]
         self.path = path
         self.pixelsize = pixelsize
 
@@ -15014,7 +15017,7 @@ class QualityWorker(QtCore.QThread):
             )
 
         nena_px = localize.check_nena(sane_locs, self.info, nena_callback)
-        nena_nm = float(self.pixelsize.value() * nena_px)
+        nena_nm = float(self.pixelsize * nena_px)
         self.progressMade.emit("", 1, f"{nena_px:.2f} px / {nena_nm:.2f} nm")
 
         # Drift
