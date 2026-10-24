@@ -125,6 +125,9 @@ while picking or measuring, so the tool need not be changed to look around.
   fraction of the window.
 - **Fit**: ``View > Fit image to window`` (:kbd:`Ctrl+W` or :kbd:`Home`)
   shows the whole image; a triple click with the Zoom tool does the same.
+- **Return to a region**: ``View > Save FOV...`` (:kbd:`Ctrl+Shift+B`)
+  saves the current field of view as a ``.txt`` file and ``View > Load
+  FOV...`` (:kbd:`Ctrl+B`) shows it again, see :ref:`render-save-load-fov`.
 
 The shortcuts for moving and zooming with the keyboard work anywhere in the window (the arrow keys or
 :kbd:`W`/:kbd:`A`/:kbd:`S`/:kbd:`D`, :kbd:`Ctrl` +/-).

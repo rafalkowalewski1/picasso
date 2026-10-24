@@ -354,6 +354,8 @@ Display
    was saved before Picasso 1.0, in camera pixels, and is converted with the
    pixel size of the first channel when it is loaded. A saved ``.txt`` file can also be
    dropped onto the main window.
+   Also in the View menu (:kbd:`Ctrl+Shift+B` and :kbd:`Ctrl+B`), see
+   :ref:`render-save-load-fov`.
 
 .. _render-info-precision:
 
