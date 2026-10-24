@@ -19668,6 +19668,16 @@ class Window(QtWidgets.QMainWindow):
         fit_in_view_action.setShortcuts(["Ctrl+W", "Home"])
         fit_in_view_action.triggered.connect(self.view.fit_in_view)
         view_menu.addAction(fit_in_view_action)
+        save_fov_action = view_menu.addAction("Save FOV...")
+        save_fov_action.setShortcut("Ctrl+Shift+B")
+        save_fov_action.setToolTip(
+            "Save the current field of view as a .txt file (nm)"
+        )
+        save_fov_action.triggered.connect(self.save_fov)
+        load_fov_action = view_menu.addAction("Load FOV...")
+        load_fov_action.setShortcut("Ctrl+B")
+        load_fov_action.setToolTip("Load a field of view from a .txt file")
+        load_fov_action.triggered.connect(self.info_dialog.change_fov.load_fov)
 
         view_menu.addSeparator()
         info_action = view_menu.addAction("Show info...")
@@ -20972,6 +20982,14 @@ class Window(QtWidgets.QMainWindow):
             )
         self.window_rot.view_rot.load_saved_rotation(info)
         self.rot_win()
+
+    def save_fov(self) -> None:
+        """Save the current FOV as a .txt file (see
+        ``ChangeFOV.save_fov``)."""
+        # the dialog's boxes follow the view once it is displayed; sync
+        # them in case a render is still pending
+        self.update_info()
+        self.info_dialog.change_fov.save_fov()
 
     def resize_view_to_fov(self, w: float, h: float) -> None:
         """Resize the main window so that ``view`` has aspect ratio w/h.
