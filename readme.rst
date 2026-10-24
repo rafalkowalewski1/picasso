@@ -45,10 +45,16 @@ A collection of tools for painting super-resolution images, covering single-mole
 Installation
 ------------
 
-- **One-click installer** (Windows, macOS): download it from the `release page <https://github.com/jungmannlab/picasso/releases/>`__.
-- **PyPI**: ``pip install picassosr``, then start a module with ``picasso render``, ``picasso localize``, etc.
+**Just the GUI** (Windows, macOS): download the one-click installer from the `latest release <https://github.com/jungmannlab/picasso/releases/latest>`__.
 
-Optional extras (file formats, GPU support) and the developer installation are described in the `installation guide <https://picassosr.readthedocs.io/en/latest/getting-started/installation.html>`__.
+**As a Python package** (Windows, macOS, Linux):
+
+.. code-block:: bash
+
+   pip install picassosr
+   picasso render  # or localize, filter, design, ...
+
+For GPU support, extra file formats or a developer setup, see the `installation guide <https://picassosr.readthedocs.io/en/latest/getting-started/installation.html>`__.
 
 Example Usage
 -------------
