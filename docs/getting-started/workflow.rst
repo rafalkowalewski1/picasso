@@ -407,7 +407,9 @@ DNA origami, or single binding sites, for closer inspection and further analysis
 
 1. Select ``Tools > Pick``. The cursor becomes a circle.
 2. In ``Tools > Tools settings...``, set the ``Diameter (nm)`` of the circle
-   so that it covers what you want to pick (the default is 100 nm).
+   so that it covers what you want to pick (the default is 100 nm). Set it
+   before clicking: each pick keeps the diameter it was drawn with, and
+   ``Apply to all`` gives the existing picks the new value.
 3. Left-click on the structures you want to pick. A right click inside a pick
    removes it.
 4. (Optional) ``Tools > Pick similar`` picks all other structures that look

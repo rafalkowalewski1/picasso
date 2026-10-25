@@ -1,6 +1,6 @@
 # Changelog
 
-Last change: 23-OCT-2026 CEST
+Last change: 25-OCT-2026 CEST
 
 ## 1.0.0
 
@@ -34,6 +34,7 @@ Last change: 23-OCT-2026 CEST
 - `View > 3D view` (Ctrl+Shift+R, replacing *Update rotation window*) opens the rotation window on the single selected pick or, without a pick, on the current field of view, so any region can be inspected in 3D by zooming to it; pressed again on unchanged content it only raises the window.
 - Linked windows that share user-selected attributes, see [documentation](https://picassosr.readthedocs.io/en/latest/render/menu-view.html#render-new-linked-window).
 - New blur methods *Adaptive Histogram (Quad-Tree)* and *Jittered Triangulation* (Baddeley, Cannell & Soeller, *Microsc. Microanal.* 2010). See the [blur documentation](https://picassosr.readthedocs.io/en/latest/render/display-settings.html#render-blur).
+- Picks of different sizes and shapes allowed, see the [documentation](https://picassosr.readthedocs.io/en/latest/render/picking.html#render-pick-sizes).
 - The display settings (main and 3D window) show the minimum blur only for the Gaussian blur methods that use it.
 - New action to move xy positions of localizations with a mouse. See the [documentation](https://picassosr.readthedocs.io/en/latest/render/tools.html#render-move).
 - Apply expression to localizations expands the canvas (metadata's `Height` and `Width`) if x and y positions are out of range.
@@ -145,7 +146,7 @@ The [migration guide](https://picassosr.readthedocs.io/en/latest/migration.html)
 - **Renamed in files:** `picasso hdf2csv` writes no row numbers; drift and field-of-view .txt files start with comment lines; nanoTRON's export pick files, Render's cluster areas and several metadata keys are renamed. See the [guide](https://picassosr.readthedocs.io/en/latest/migration.html#migration-files-written).
 - Deprecation warnings are `FutureWarning`s instead of `DeprecationWarning`s, so that scripts show them.
 - Picasso Server only accepts connections from the computer it runs on; `picasso server --network` allows other computers. Previously, anyone who could reach the computer could use it, including the watcher's custom command. It is an optional extra of the Python package: `pip install "picassosr[server]"`.
-- For plugins: Render's `View.pixelsize` is replaced by the read-only `View.pixelsizes` (one per channel), `DatasetDialog.intensitysettings` by `contrast_low` and `contrast_high`, and `View.read_relative_intensities` by `View.read_channel_contrast`. Plugins that change `View.locs` call `View.invalidate_locs_index`, and plugin commands cannot take the names of the new commands.
+- For plugins: Render's `View.pixelsize` is replaced by the read-only `View.pixelsizes` (one per channel), `DatasetDialog.intensitysettings` by `contrast_low` and `contrast_high`, and `View.read_relative_intensities` by `View.read_channel_contrast`. `View._pick_shape` and `_pick_size` are the shape and size of new picks; those of each pick are in `View._pick_shapes` and `_pick_sizes`. Plugins that change `View.locs` call `View.invalidate_locs_index`, and plugin commands cannot take the names of the new commands.
 
 ### Others
 - Many plots are now customizable.

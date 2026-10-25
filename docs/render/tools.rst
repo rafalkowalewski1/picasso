@@ -38,11 +38,15 @@ dialog; see :ref:`render-pick-shapes` for all shapes.
 
 - The default shape is Circle with the diameter to be set.
 - For rectangles, the user draws the length, while the width is controlled via
-  a parameter for all drawn rectangles, similar to the diameter for circular
-  picks.
+  a parameter, similar to the diameter for circular picks.
+- The size set in the dialog applies to the next picks; picks already drawn
+  keep theirs, and picks of different shapes can be mixed (see
+  :ref:`render-pick-sizes`).
+- A right click removes the pick under the cursor, whatever its shape (see
+  :ref:`render-pick-shapes`).
 - For a polygonal pick, the user clicks with the left button to draw the
-  desired polygon. The right button deletes the last selected vertex. The
-  polygon can be closed by clicking with the left button on the starting
+  desired polygon. The right button deletes the last selected vertex instead.
+  The polygon can be closed by clicking with the left button on the starting
   vertex.
 
 .. _render-measure:
@@ -135,8 +139,10 @@ Define the settings of the tools:
 
 - The **Pick** section sets:
 
-  - the pick shape and its size (``Diameter``, ``Width``, ``Side length`` or
-    ``Stroke width``, see :ref:`render-pick-shapes`);
+  - the shape and size of the next picks (``Diameter``, ``Width``,
+    ``Side length`` or ``Stroke width``, see :ref:`render-pick-shapes`);
+    ``Apply to all`` gives all picks of the shape the current size (see
+    :ref:`render-pick-sizes`);
   - ``Pick similar +/- range (std)`` (2 by default), the tolerance of
     :ref:`Pick similar <render-pick-similar>`. That tool computes the number of
     localizations and their RMSD from the center of mass in each of your

@@ -342,12 +342,12 @@ def check_picks(f: Callable) -> Callable:
 
 
 def check_pick_shapes(*shapes: str) -> Callable:
-    """Decorator factory verifying that the current pick shape is one of
+    """Decorator factory verifying that every pick has one of
     ``shapes``."""
 
     def decorator(f: Callable) -> Callable:
         def wrapper(*args):
-            if args[0]._pick_shape not in shapes:
+            if any(shape not in shapes for shape in args[0]._pick_shapes):
                 QtWidgets.QMessageBox.warning(
                     args[0],
                     "Pick Error",
@@ -364,6 +364,18 @@ def check_pick_shapes(*shapes: str) -> Callable:
 
 #: Decorator verifying if the picks are circular.
 check_circular_picks = check_pick_shapes("Circle")
+
+
+def _describe_pick_shapes(shape: str | list[str]) -> str:
+    """Name the shape of picks in a message, e.g., "rectangular picks"
+    or "picks of different shapes"; ``shape`` is one shape or one per
+    pick, see ``io.load_picks``."""
+    if isinstance(shape, str):
+        return f"{shape.lower()} picks"
+    shapes = sorted(set(shape))
+    if len(shapes) == 1:
+        return f"{shapes[0].lower()} picks"
+    return "picks of different shapes (" + ", ".join(shapes).lower() + ")"
 
 
 class FloatEdit(QtWidgets.QLineEdit):
@@ -4770,7 +4782,7 @@ class TestClustererDialog(lib.Dialog):
         """Check if region of interest has changed since the last
         rendering."""
         pick = self.window.view._picks[0]
-        pick_size = self.window.view._pick_size
+        pick_size = self.window.view._pick_sizes[0]
         if pick != self.pick or pick_size != self.pick_size:
             self.pick = pick
             self.pick_size = pick_size
@@ -7518,7 +7530,10 @@ class PickToolCircleSettings(QtWidgets.QWidget):
         self.grid = QtWidgets.QGridLayout(self)
         self.window = window
         diameter_label = QtWidgets.QLabel("Diameter (nm):")
-        diameter_label.setToolTip("Diameter of the circular pick.")
+        diameter_label.setToolTip(
+            "Diameter of new circular picks. Every pick keeps the\n"
+            "diameter it was drawn with."
+        )
         self.grid.addWidget(diameter_label, 0, 0)
         self.pick_diameter = QtWidgets.QDoubleSpinBox()
         self.pick_diameter.setRange(0.1, 99999999)
@@ -7530,6 +7545,12 @@ class PickToolCircleSettings(QtWidgets.QWidget):
             tools_settings_dialog.on_pick_dimension_changed
         )
         self.grid.addWidget(self.pick_diameter, 0, 1)
+        self.apply_to_all = QtWidgets.QPushButton("Apply to all")
+        self.apply_to_all.setToolTip("Give all circular picks this diameter.")
+        self.apply_to_all.clicked.connect(
+            lambda: window.view.resize_picks("Circle")
+        )
+        self.grid.addWidget(self.apply_to_all, 0, 2)
         self.grid.setRowStretch(1, 1)
 
 
@@ -7545,7 +7566,10 @@ class PickToolRectangleSettings(QtWidgets.QWidget):
         self.window = window
         self.grid = QtWidgets.QGridLayout(self)
         width_label = QtWidgets.QLabel("Width (nm):")
-        width_label.setToolTip("Width of the rectangular pick.")
+        width_label.setToolTip(
+            "Width of new rectangular picks. Every pick keeps the\n"
+            "width it was drawn with."
+        )
         self.grid.addWidget(width_label, 0, 0)
         self.pick_width = QtWidgets.QDoubleSpinBox()
         self.pick_width.setRange(0.1, 99999999.0)
@@ -7557,6 +7581,12 @@ class PickToolRectangleSettings(QtWidgets.QWidget):
             tools_settings_dialog.on_pick_dimension_changed
         )
         self.grid.addWidget(self.pick_width, 0, 1)
+        self.apply_to_all = QtWidgets.QPushButton("Apply to all")
+        self.apply_to_all.setToolTip("Give all rectangular picks this width.")
+        self.apply_to_all.clicked.connect(
+            lambda: window.view.resize_picks("Rectangle")
+        )
+        self.grid.addWidget(self.apply_to_all, 0, 2)
         self.grid.setRowStretch(1, 1)
 
 
@@ -7572,7 +7602,10 @@ class PickToolSquareSettings(QtWidgets.QWidget):
         self.window = window
         self.grid = QtWidgets.QGridLayout(self)
         side_label = QtWidgets.QLabel("Side length (nm):")
-        side_label.setToolTip("Side lengths of the square pick.")
+        side_label.setToolTip(
+            "Side length of new square picks. Every pick keeps the\n"
+            "side length it was drawn with."
+        )
         self.grid.addWidget(side_label, 0, 0)
         self.pick_side_length = QtWidgets.QDoubleSpinBox()
         self.pick_side_length.setRange(0.1, 99999999.0)
@@ -7584,6 +7617,12 @@ class PickToolSquareSettings(QtWidgets.QWidget):
             tools_settings_dialog.on_pick_dimension_changed
         )
         self.grid.addWidget(self.pick_side_length, 0, 1)
+        self.apply_to_all = QtWidgets.QPushButton("Apply to all")
+        self.apply_to_all.setToolTip("Give all square picks this side length.")
+        self.apply_to_all.clicked.connect(
+            lambda: window.view.resize_picks("Square")
+        )
+        self.grid.addWidget(self.apply_to_all, 0, 2)
         self.grid.setRowStretch(1, 1)
 
 
@@ -7737,19 +7776,19 @@ class ToolsSettingsDialog(lib.Dialog):
     pick_annotation : QCheckBox
         Tick to display picks' indeces.
     pick_diameter : QDoubleSpinBox
-        Contains the diameter of circular picks (nm)).
+        Contains the diameter of new circular picks (nm).
     pick_shape : QComboBox
-        Contains the str with the shape of picks (circle, rectangle,
-        polygon, square, box or brush).
+        Contains the str with the shape of new picks (circle,
+        rectangle, polygon, square, box or brush).
     pick_side_length : QDoubleSpinBox
-        Contains the side length of square picks (nm).
+        Contains the side length of new square picks (nm).
     pick_similar_range : QDoubleSpinBox
         Contains the standard deviation range used by Pick similar.
     pick_style : OverlayStyleWidget
         Appearance of the picks, including the color of a pick being
         drawn.
     pick_width : QDoubleSpinBox
-        Contains the width of rectangular picks (nm).
+        Contains the width of new rectangular picks (nm).
     point_picks : QCheckBox
         Tick to display circular picks as 3-pixels-wide points.
     """
@@ -7793,10 +7832,6 @@ class ToolsSettingsDialog(lib.Dialog):
         pick_stack = QtWidgets.QStackedWidget()
         pick_grid.addWidget(pick_stack, 1, 0, 1, 2)
         self.pick_shape.currentIndexChanged.connect(pick_stack.setCurrentIndex)
-        # the index blocks are built for the current pick shape and size
-        self.pick_shape.currentIndexChanged.connect(
-            self.on_pick_dimension_changed
-        )
 
         # Circle
         self.pick_circle_settings = PickToolCircleSettings(window, self)
@@ -7849,8 +7884,9 @@ class ToolsSettingsDialog(lib.Dialog):
             )
         )
         self.pick_shape.setToolTip(
-            "Circle and Square are placed with a single click and share\n"
-            "one size; Rectangle is a band of a fixed width drawn along\n"
+            "Shape of new picks; picks of different shapes and sizes\n"
+            "can be mixed. Circle and Square are placed with a single\n"
+            "click; Rectangle is a band of a fixed width drawn along\n"
             "its center axis; Polygon is drawn vertex by vertex; Box is\n"
             "dragged out to any size; Brush is painted freehand, and\n"
             "overlapping strokes merge into one pick."
@@ -8163,12 +8199,12 @@ class ToolsSettingsDialog(lib.Dialog):
         self.window.view.update_cursor()
 
     def on_pick_dimension_changed(self, *args) -> None:
-        """Reset index_blocks in self.window.view and update the
-        scene."""
-        self.window.view.index_blocks = [
-            None for _ in self.window.view.index_blocks
-        ]
-        self.update_scene_with_cache()
+        """Update the cursor to the new size of new picks.
+
+        Like the brush width, this does not touch the picks already
+        drawn, each of which keeps its size; see ``View.resize_picks``
+        for applying the size to all of them."""
+        self.window.view.update_cursor()
 
     def update_scene_with_cache(self, *args) -> None:
         """Quick (cached) update of the current view when picks
@@ -8613,10 +8649,10 @@ class SpatialStatisticDialog(lib.Dialog):
             or region.rectangle is not None
             or region.kind == postprocess._REGION_CIRCLE
             for region in (
-                postprocess._pick_region(
-                    pick, view._pick_shape, view._pick_size
+                postprocess._pick_region(pick, shape, size)
+                for pick, shape, size in zip(
+                    view._picks, view._pick_shapes, view._pick_sizes
                 )
-                for pick in view._picks
             )
         )
 
@@ -11436,18 +11472,25 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
     pan_start_x, pan_start_y : float
         x and y coordinates of panning's starting position.
     _picks : list
-        Contains the coordinates of current picks (nm). Each pick is
+        (Property) Contains the coordinates of current picks (nm).
+        Assigned directly, the picks take the shape and size of the pick
+        tool; ``_set_picks`` sets their own. Each pick is
         ``(x, y)`` for circles and squares, ``((x_start, y_start),
         (x_end, y_end))`` center-axis points for rectangles, a list of
         vertices for polygons, the two opposite corners
         ``((x0, y0), (x1, y1))`` for boxes, and a list of
         ``(width, path)`` strokes for brush picks.
     _pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"}
-        Current shape of picks.
+        Shape of the pick tool, i.e., of new picks.
+    _pick_shapes : list of str
+        Shape of each pick in ``_picks``.
     _pick_size : float or None
-        Size of picks in nm; None for polygonal, box and brush picks,
-        which carry their own extent. Diameter for circular picks, side
-        length for square picks and width for rectangular picks.
+        (Property) Size of new picks in nm, from ``ToolsSettingsDialog``;
+        None for polygonal, box and brush picks, which carry their own
+        extent. Diameter for circular picks, side length for square
+        picks and width for rectangular picks.
+    _pick_sizes : list of float or None
+        Size of each pick in ``_picks`` (nm), see ``_pick_size``.
     pixelsizes : list of floats
         (Property) Camera pixel size (nm) of each channel, from its
         metadata (``Pixelsize``).
@@ -11543,7 +11586,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         self._brush_last_pos = None  # last point added, in display px
         self._size_hint = (768, 768)
         self.n_locs = 0
-        self._picks = []
+        self._pick_list = []  # see ``_picks``
+        self._pick_shapes = []  # shape of each pick
+        self._pick_sizes = []  # size (nm) of each pick, None if sizeless
         self._points = []
         self._point_sets = []  # finalized measurement sets
         self._measure_following = True  # cursor followed live while True
@@ -12265,21 +12310,166 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             self._load_thread.quit()
             self._load_thread.wait()
 
+    @property
+    def _picks(self) -> list:
+        """The coordinates of the picks (nm), see ``_pick_shapes`` and
+        ``_pick_sizes`` for their shapes and sizes."""
+        return self._pick_list
+
+    @_picks.setter
+    def _picks(self, picks: list) -> None:
+        # assigned directly, the picks take the shape and size of the
+        # pick tool; ``_set_picks`` gives them their own
+        self._set_picks(picks)
+
     def add_pick(
         self,
         position: tuple[float, float],
         update_scene: bool = True,
+        shape: str | None = None,
+        size: float | None = None,
     ) -> None:
-        """Add a pick at a given position."""
+        """Add a pick at a given position.
+
+        Parameters
+        ----------
+        position : tuple
+            Coordinates of the pick (nm) in the format of its shape.
+        update_scene : bool, optional
+            Whether to draw the new pick. Default is True.
+        shape : str, optional
+            Shape of the pick. Default is None, i.e., the shape of the
+            pick tool (``_pick_shape``).
+        size : float, optional
+            Size of the pick in nm, ignored for shapes without a size.
+            Default is None, i.e., the size set for new picks of that
+            shape in ``ToolsSettingsDialog``.
+        """
+        if shape is None:
+            shape = self._pick_shape
+        if shape in lib.PICK_SHAPES_WITHOUT_SIZE:
+            size = None
+        elif size is None:
+            size = self._tool_pick_size(shape)
         self._picks.append(position)
+        self._pick_shapes.append(shape)
+        self._pick_sizes.append(size)
         self.update_pick_info_short()
         if update_scene:
             self.update_scene(picks_only=True)
 
-    def add_picks(self, positions: list[tuple[float, float]]) -> None:
-        """Add several picks."""
-        for position in positions:
-            self.add_pick(position, update_scene=False)
+    def add_picks(
+        self,
+        positions: list[tuple[float, float]],
+        shape: str | None = None,
+        size: float | list[float] | None = None,
+    ) -> None:
+        """Add several picks of one shape, see ``add_pick``; ``size``
+        may hold the size of each pick."""
+        sizes = size if np.ndim(size) else [size] * len(positions)
+        for position, size_ in zip(positions, sizes):
+            self.add_pick(position, False, shape, size_)
+        self.update_scene(picks_only=True)
+
+    def _set_picks(
+        self,
+        picks: list,
+        shape: str | list[str] | None = None,
+        size: float | list[float | None] | None = None,
+    ) -> None:
+        """Replace all picks.
+
+        Parameters
+        ----------
+        picks : list
+            New picks (nm).
+        shape : str or list of str, optional
+            Shape of the picks, or of each pick. Default is None, i.e.,
+            the shape of the pick tool.
+        size : float or list, optional
+            Size of the picks (nm), or of each pick, see
+            ``lib.pick_shapes_and_sizes``. Default is None, i.e., the
+            size set for new picks.
+        """
+        if shape is None:
+            shape = self._pick_shape
+        if size is None and isinstance(shape, str):
+            size = self._tool_pick_size(shape)
+        shapes, sizes = lib.pick_shapes_and_sizes(picks, shape, size)
+        self._pick_list = list(picks)
+        self._pick_shapes = shapes
+        self._pick_sizes = sizes
+
+    def _keep_picks(self, indices: list[int]) -> None:
+        """Keep only the picks at ``indices``, in this order."""
+        self._pick_list = [self._pick_list[i] for i in indices]
+        self._pick_shapes = [self._pick_shapes[i] for i in indices]
+        self._pick_sizes = [self._pick_sizes[i] for i in indices]
+
+    def _remove_picks_at(self, indices: list[int]) -> None:
+        """Remove the picks at ``indices``."""
+        removed = set(indices)
+        self._keep_picks(
+            [i for i in range(len(self._picks)) if i not in removed]
+        )
+
+    def _pick_args(self, indices: list[int] | None = None) -> dict:
+        """Picks with their shapes and sizes, as the arguments
+        ``picks``, ``pick_shape`` and ``pick_size`` of the functions
+        that take picks (e.g., ``postprocess.picked_locs``): one shape
+        (size) if all picks share it, else one per pick.
+
+        Parameters
+        ----------
+        indices : list of int, optional
+            Picks to describe. Default is None, i.e., all picks.
+
+        Returns
+        -------
+        args : dict
+            ``picks`` (a new list), ``pick_shape`` and ``pick_size``.
+            Without picks, the shape and size of the pick tool.
+        """
+        if indices is None:
+            indices = range(len(self._picks))
+        picks = [self._picks[i] for i in indices]
+        shape, size = lib._compact_pick_shapes_and_sizes(
+            [self._pick_shapes[i] for i in indices],
+            [self._pick_sizes[i] for i in indices],
+        )
+        if shape is None:  # no picks
+            shape, size = self._pick_shape, self._pick_size
+        return dict(picks=picks, pick_shape=shape, pick_size=size)
+
+    def _picks_have_shapes(self, *shapes: str) -> bool:
+        """Whether there are picks and all have one of ``shapes``."""
+        return bool(self._picks) and all(
+            shape in shapes for shape in self._pick_shapes
+        )
+
+    def _circle_pick_index(
+        self, channel: int
+    ) -> spatial_index.RenderIndexPyramid | tuple | None:
+        """The spatial index for the circular picks in ``channel`` (see
+        ``_pick_index``), None without circular picks."""
+        if "Circle" in self._pick_shapes:
+            return self._pick_index(channel)
+        return None
+
+    def resize_picks(self, shape: str) -> None:
+        """Give all picks of ``shape`` the size set for new picks in
+        ``ToolsSettingsDialog``.
+
+        Parameters
+        ----------
+        shape : {"Circle", "Rectangle", "Square"}
+            Shape of the picks to resize.
+        """
+        size = self._tool_pick_size(shape)
+        self._pick_sizes = [
+            size if shape_ == shape else size_
+            for shape_, size_ in zip(self._pick_shapes, self._pick_sizes)
+        ]
         self.update_scene(picks_only=True)
 
     def add_box_pick(self, end_position: QtCore.QPoint) -> None:
@@ -12339,9 +12529,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         """Finish the brush stroke being painted and merge it into the
         picks.
 
-        The strokes of every pick the new one touches are pulled into a
-        single pick, which is appended last. A press and release without
-        a drag paints a dot.
+        The strokes of every brush pick the new one touches are pulled
+        into a single pick, which is appended last. A press and release
+        without a drag paints a dot.
 
         Parameters
         ----------
@@ -12360,18 +12550,18 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         width, X, Y = lib.brush_stroke_arrays(stroke)
         merged = []
         kept = []
-        for pick in self._picks:
-            overlaps = any(
+        for i, (pick, shape) in enumerate(zip(self._picks, self._pick_shapes)):
+            overlaps = shape == "Brush" and any(
                 lib.brush_strokes_overlap(X, Y, X_, Y_, (width + width_) / 2)
                 for width_, X_, Y_ in map(lib.brush_stroke_arrays, pick)
             )
             if overlaps:
                 merged.extend(pick)
             else:
-                kept.append(pick)
+                kept.append(i)
         merged.append(stroke)
-        kept.append(merged)
-        self._picks = kept
+        self._keep_picks(kept)
+        self.add_pick(merged, update_scene=False, shape="Brush")
 
         self.update_pick_info_short()
         self.update_scene(picks_only=True)
@@ -12393,8 +12583,8 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
     ) -> None:
         """Add a new point to the polygon or closes the current
         polygon."""
-        if len(self._picks) == 0:
-            self._picks.append([point_movie])
+        if not len(self._picks) or self._pick_shapes[-1] != "Polygon":
+            self.add_pick([point_movie], update_scene=False, shape="Polygon")
         else:
             # check if the polygon is to be closed or if a new point is
             # to be added
@@ -12402,7 +12592,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 self._picks[-1].append(point_movie)
             # if the last polygon has been closed, start a new pick
             elif self._picks[-1][0] == self._picks[-1][-1]:
-                self._picks.append([point_movie])
+                self.add_pick(
+                    [point_movie], update_scene=False, shape="Polygon"
+                )
             else:
                 # check the distance between the current point and the
                 # starting point of the currently drawn polygon
@@ -12451,23 +12643,17 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         """Align channels by RCC or from picked localizations."""
         locs, infos = self.locs, self.infos
         if len(self._picks) > 0:  # shift from picked
-            if self._pick_shape == "Circle":
-                index_blocks = [
-                    self._pick_index(c) for c in range(len(self.locs))
-                ]
-            else:
-                index_blocks = None
-            picks = self._picks
-            pick_shape, pick_size = self._pick_shape, self._pick_size
+            index_blocks = [
+                self._circle_pick_index(c) for c in range(len(self.locs))
+            ]
+            pick_args = self._pick_args()
 
             def align():
                 return postprocess.align(
                     locs,
                     infos,
                     method="picked",
-                    picks=picks,
-                    pick_shape=pick_shape,
-                    pick_size=pick_size,
+                    **pick_args,
                     index_blocks=index_blocks,
                 )
 
@@ -12503,10 +12689,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
 
         See ``self.link`` for more info."""
         channel = self.get_channel()
-        if self._pick_shape == "Circle":
-            index_blocks = self._pick_index(channel)
-        else:
-            index_blocks = None
+        index_blocks = self._circle_pick_index(channel)
         progress = lib.ProgressDialog(
             "Combining localizations in picks", 0, 0, self
         )
@@ -12515,9 +12698,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 postprocess.combine_locs_in_picks(
                     self.locs[channel],
                     self.infos[channel],
-                    picks=self._picks,
-                    pick_shape=self._pick_shape,
-                    pick_size=self._pick_size,
+                    **self._pick_args(),
                     index_blocks=index_blocks,
                     progress=progress,
                 )
@@ -13335,7 +13516,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
     @check_pick
     def clear_picks(self) -> None:
         """Delete all picks."""
-        self._picks = []
+        self._set_picks([], [])
         self.window.info_dialog.n_picks.setText(str(len(self._picks)))
         self.update_scene(picks_only=True)
 
@@ -13364,8 +13545,8 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             image=image,
             viewport=self.viewport,
             picks=self._picks,
-            pick_shape=self._pick_shape,
-            pick_size=self._pick_size,
+            pick_shape=self._pick_shapes,
+            pick_size=self._pick_sizes,
             point_picks=t_dialog.point_picks.isChecked(),
             annotate_picks=t_dialog.pick_annotation.isChecked(),
             style=t_dialog.pick_overlay_style(),
@@ -13775,6 +13956,8 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             full-quality render once the gesture pauses. Default is
             False.
         """
+        if picks_only and getattr(self, "qimage_no_picks", None) is None:
+            picks_only = False  # nothing rendered yet to draw picks over
         if not picks_only:
             # make sure viewport has the same shape as the main window
             self.viewport = self.adjust_viewport_to_view(viewport)
@@ -14389,7 +14572,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 self.load_screenshot(file, paths[0])
             # load pick regions
             loaded_shape = file.get("Shape", None)
-            if loaded_shape in lib.PICK_SHAPES:
+            if loaded_shape in lib.PICK_SHAPES + (io._MIXED_PICKS_SHAPE,):
                 self.load_picks(paths[0])
         if extensions == [".csv"]:  # just one csv dropped, thunderstorm
             self.add_multiple(paths)
@@ -14429,7 +14612,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 raise ValueError("Pick number provided too high")
             else:  # calculate new viewport
                 x_min, x_max, y_min, y_max = lib.pick_bounds(
-                    self._picks[pick_no], self._pick_shape, self._pick_size
+                    self._picks[pick_no],
+                    self._pick_shapes[pick_no],
+                    self._pick_sizes[pick_no],
                 )
                 margin_x = MOVE_TO_PICK_MARGIN * (x_max - x_min)
                 margin_y = MOVE_TO_PICK_MARGIN * (y_max - y_min)
@@ -14911,20 +15096,23 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         if loaded is None:  # canceled
             return
         tools_dlg = self.window.tools_settings_dialog
-        self._picks = []
-        self._pick_shape = None
-        self._picks, self._pick_shape, size = loaded
-        tools_dlg.pick_shape.setCurrentText(self._pick_shape)
-        if self._pick_shape == "Circle":
-            tools_dlg.pick_diameter.setValue(size)
-        elif self._pick_shape == "Rectangle":
-            tools_dlg.pick_width.setValue(size)
-        elif self._pick_shape == "Square":
-            tools_dlg.pick_side_length.setValue(size)
-        elif self._pick_shape == "Brush" and len(self._picks):
+        picks, shape, size = loaded
+        self._set_picks(picks, shape, size)
+        # every pick keeps its shape and size; with one shape, the pick
+        # tool takes it, and the size if shared, so new picks match
+        if isinstance(shape, str):
+            tools_dlg.pick_shape.setCurrentText(shape)
+            if np.ndim(size) == 0 and size is not None:
+                self._size_spin_box(shape).setValue(size)
+        brushes = [
+            pick
+            for pick, shape_ in zip(self._picks, self._pick_shapes)
+            if shape_ == "Brush"
+        ]
+        if brushes:
             # brush strokes keep their own widths; seed the spin box
             # with the widest one so the next stroke matches the picks
-            widest = max(stroke[0] for pick in self._picks for stroke in pick)
+            widest = max(stroke[0] for pick in brushes for stroke in pick)
             tools_dlg.brush_width.setValue(widest)
 
         # update Info Dialog
@@ -15035,9 +15223,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             dataset_dialog.update_channel_contrast()
 
     def subtract_picks(self, path: str) -> None:
-        """Clear selected picks that cover the picks loaded from path.
-        Only circular picks can be subtracted; for other shapes, a
-        warning is shown.
+        """Clear selected picks whose centers lie in the picks loaded
+        from path. Only circular picks can be subtracted; for other
+        shapes, a warning is shown.
 
         Parameters
         ----------
@@ -15046,7 +15234,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         """
         # not with the check_circular_picks decorator, which would drop
         # the path
-        if self._pick_shape != "Circle":
+        if not self._picks_have_shapes("Circle"):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Pick Error",
@@ -15057,29 +15245,26 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         loaded = self._read_picks_file(path)
         if loaded is None:  # canceled
             return
-        picks, shape, diameter = loaded
+        picks, shape, diameters = loaded
         if shape != "Circle":
             QtWidgets.QMessageBox.warning(
                 self,
                 "Pick Error",
                 "Only circular picks can be subtracted; the file holds "
-                f"{shape.lower()} picks.",
+                f"{_describe_pick_shapes(shape)}.",
             )
             return
-        oldpicks = self._picks.copy()
-
-        # calculate which picks are to stay
-        distances = (
-            np.sum(
-                (euclidean_distances(oldpicks, picks) < diameter / 2) * 1,
-                axis=1,
-            )
-            >= 1
+        if not len(picks):
+            return
+        # each loaded pick covers the centers within its own radius
+        radii = np.broadcast_to(np.asarray(diameters) / 2, (len(picks),))
+        covered = np.any(
+            euclidean_distances(self._picks, picks) < radii[np.newaxis, :],
+            axis=1,
         )
-        self._picks = [i for (i, v) in zip(oldpicks, distances) if not v]
+        self._keep_picks(np.flatnonzero(~covered).tolist())
 
         self.update_pick_info_short()
-        self.window.tools_settings_dialog.pick_diameter.setValue(diameter)
         self.update_scene(picks_only=True)
 
     def map_to_movie(self, position: QtCore.QPoint) -> QtCore.QPoint:
@@ -15436,8 +15621,10 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
     def _translate_overlays(self, dx: float, dy: float) -> None:
         """Move picks and measured points by ``(dx, dy)`` nm along with
         the localizations."""
-        self._picks = lib.translate_picks(
-            self._picks, self._pick_shape, dx, dy
+        self._set_picks(
+            lib.translate_picks(self._picks, self._pick_shapes, dx, dy),
+            self._pick_shapes,
+            self._pick_sizes,
         )
         self._points = [(x + dx, y + dy) for x, y in self._points]
         self._point_sets = [
@@ -16062,8 +16249,10 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         locs = self.locs[channel]
         info = self.infos[channel]
         if params["region"] == "picks":
-            picks = list(self._picks)
-            pick_shape, pick_size = self._pick_shape, self._pick_size
+            pick_args = self._pick_args()
+            picks = pick_args["picks"]
+            pick_shape = pick_args["pick_shape"]
+            pick_size = pick_args["pick_size"]
         elif params["region"] == "view":
             (y_min, x_min), (y_max, x_max) = self.viewport
             picks = [((x_min, y_min), (x_max, y_max))]
@@ -16470,7 +16659,6 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 )
                 # modify the plot slighly
                 fig.canvas.manager.set_window_title("Trace")
-                pick = self._picks[i]
                 fig.axes[0].set_title(
                     "Scatterplot of Pick "
                     + str(i + 1)
@@ -16511,7 +16699,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 msgBox.exec()
                 reply = msgBox.clickedButton().text()
                 removelist, i = self._handle_pick_selection_reply(
-                    reply, pick, removelist, i
+                    reply, i, removelist, i
                 )
                 plt.close(fig)
                 if i is None:  # cancel
@@ -16519,8 +16707,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 i += 1
 
         # remove picks
-        for pick in removelist:
-            self._picks.remove(pick)
+        self._remove_picks_at(removelist)
 
         self.n_picks = len(self._picks)
 
@@ -16528,7 +16715,8 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         self.update_scene()
 
     def _handle_pick_selection_reply(self, reply, pick, removelist, i):
-        """Handle the reply from the pick selection message box."""
+        """Handle the reply from the pick selection message box; ``pick``
+        identifies the shown pick in ``removelist``, e.g., its index."""
         if reply == "Accept":
             if pick in removelist:
                 removelist.remove(pick)
@@ -16546,23 +16734,31 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         return removelist, i
 
     @property
-    def _pick_size(self) -> float:
-        """Return the size of the pick in nm. For circle this is the
-        diameter. For square this is the side length. For rectangle this
-        is the width (perpendicular to the drawing direction). For
-        polygon, box and brush this is None: they carry their own
-        extent. For the width of the next brush stroke, see
-        ``_brush_width``."""
+    def _pick_size(self) -> float | None:
+        """Return the size of new picks of the pick tool's shape in nm,
+        see ``_tool_pick_size``. Every pick keeps its own size, see
+        ``_pick_sizes``."""
+        return self._tool_pick_size(self._pick_shape)
+
+    def _tool_pick_size(self, shape: str) -> float | None:
+        """Return the size of new picks of ``shape`` in nm, as set in
+        ``ToolsSettingsDialog``. For circle this is the diameter. For
+        square this is the side length. For rectangle this is the width
+        (perpendicular to the drawing direction). For polygon, box and
+        brush this is None: they carry their own extent. For the width
+        of the next brush stroke, see ``_brush_width``."""
+        spin_box = self._size_spin_box(shape)
+        return None if spin_box is None else spin_box.value()
+
+    def _size_spin_box(self, shape: str) -> QtWidgets.QDoubleSpinBox | None:
+        """The spin box in ``ToolsSettingsDialog`` with the size of new
+        picks of ``shape``, None for shapes without a size."""
         tools_dialog = self.window.tools_settings_dialog
-        if self._pick_shape == "Circle":
-            pick_size = tools_dialog.pick_diameter.value()
-        elif self._pick_shape == "Square":
-            pick_size = tools_dialog.pick_side_length.value()
-        elif self._pick_shape == "Rectangle":
-            pick_size = tools_dialog.pick_width.value()
-        else:
-            pick_size = None
-        return pick_size
+        return {
+            "Circle": tools_dialog.pick_diameter,
+            "Rectangle": tools_dialog.pick_width,
+            "Square": tools_dialog.pick_side_length,
+        }.get(shape)
 
     @property
     def _brush_width(self) -> float:
@@ -16611,7 +16807,6 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 params = {"t0": time.time()}
                 i = 0
                 while i < len(self._picks):
-                    pick = self._picks[i]
                     fig = plt.figure(figsize=(5, 5), constrained_layout=True)
                     fig.canvas.manager.set_window_title("Scatterplot of Pick")
                     ax = fig.add_subplot(111)
@@ -16626,7 +16821,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                         ax, all_picked_locs, i, colors, channel, is_multi
                     )
                     x_min, x_max, y_min, y_max = lib.pick_bounds(
-                        pick, self._pick_shape, self._pick_size
+                        self._picks[i],
+                        self._pick_shapes[i],
+                        self._pick_sizes[i],
                     )
                     ax.set_xlabel("X [nm]")
                     ax.set_ylabel("Y [nm]")
@@ -16651,14 +16848,13 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                     msgBox.exec()
                     reply = msgBox.clickedButton().text()
                     removelist, i = self._handle_pick_selection_reply(
-                        reply, pick, removelist, i
+                        reply, i, removelist, i
                     )
                     plt.close(fig)
                     if i is None:  # cancel
                         break
                     i += 1
-        for pick in removelist:
-            self._picks.remove(pick)
+        self._remove_picks_at(removelist)
         self.n_picks = len(self._picks)
         self.update_pick_info_short()
         self.update_scene()
@@ -16670,12 +16866,12 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         colors: list,
         DialogClass,
     ) -> list:
-        """Iterate over picks, show DialogClass for each, return picks to
-        remove."""
+        """Iterate over picks, show DialogClass for each, return the
+        indices of the picks to remove."""
         removelist = []
         flag = 0 if is_multi else 1
         color_arg = colors if is_multi else 1
-        for i, pick in enumerate(self._picks):
+        for i in range(len(self._picks)):
             reply = DialogClass.getParams(
                 all_picked_locs, i, len(self._picks), flag, color_arg
             )
@@ -16684,7 +16880,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             elif reply == 2:
                 break
             else:
-                removelist.append(pick)
+                removelist.append(i)
         return removelist
 
     @check_pick
@@ -16707,8 +16903,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 removelist = self._iterate_plot_dialog_picks(
                     all_picked_locs, is_multi, colors, PlotDialog
                 )
-        for pick in removelist:
-            self._picks.remove(pick)
+        self._remove_picks_at(removelist)
         self.n_picks = len(self._picks)
         self.update_pick_info_short()
         self.update_scene()
@@ -16736,8 +16931,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 removelist = self._iterate_plot_dialog_picks(
                     all_picked_locs, is_multi, colors, PlotDialogIso
                 )
-        for pick in removelist:
-            self._picks.remove(pick)
+        self._remove_picks_at(removelist)
         self.n_picks = len(self._picks)
         self.update_pick_info_short()
         self.update_scene()
@@ -16757,7 +16951,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         )
         if not ok:
             return removelist, saved_locs, clustered_locs
-        for i, pick in enumerate(self._picks):
+        for i in range(len(self._picks)):
             reply = 3
             while reply == 3:
                 if "z" in all_picked_locs[0].columns:
@@ -16781,7 +16975,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             elif reply == 2:
                 break
             else:
-                removelist.append(pick)
+                removelist.append(i)
         return removelist, saved_locs, clustered_locs
 
     def _save_cluster_results(
@@ -16805,7 +16999,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         saved_locs = pd.concat(saved_locs, ignore_index=True)
         pick_info = {
             **lib.step_info("Render"),
-            "Pick Shape": self._pick_shape,
+            "Pick Shape": self._pick_shape_info(),
         }
         # writes the size entry the current shape actually has, in nm;
         # polygons and boxes carry their own extent
@@ -16877,8 +17071,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             )
         if saved_locs:
             self._save_cluster_results(saved_locs, clustered_locs, channel)
-        for pick in removelist:
-            self._picks.remove(pick)
+        self._remove_picks_at(removelist)
         self.n_picks = len(self._picks)
         self.update_pick_info_short()
         self.update_scene()
@@ -16920,19 +17113,19 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
     def _find_picks_outside_range(
         self, loccount, channels: list, minlocs: int, maxlocs: int
     ) -> list:
-        """Return picks whose localization count falls outside
-        [minlocs, maxlocs] in any channel."""
+        """Return the indices of picks whose localization count falls
+        outside [minlocs, maxlocs] in any channel."""
         progress = lib.ProgressDialog(
             "Removing picks..", 0, len(self._picks) - 1, self
         )
         progress.set_value(0)
         progress.show()
         removelist = []
-        for i, pick in enumerate(self._picks):
+        for i in range(len(self._picks)):
             for channel_idx, channel in enumerate(channels):
                 n_locs = loccount[channel_idx, i]
                 if n_locs > maxlocs or n_locs < minlocs:
-                    removelist.append(pick)
+                    removelist.append(i)
                     break
             progress.set_value(i)
         progress.close()
@@ -16978,8 +17171,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                 removelist = self._find_picks_outside_range(
                     loccount, channels, minlocs, maxlocs
                 )
-                for pick in removelist:
-                    self._picks.remove(pick)
+                self._remove_picks_at(removelist)
                 self.n_picks = len(self._picks)
                 self.update_pick_info_short()
         self.update_scene()
@@ -16992,49 +17184,68 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         3x3 block neighborhood around each pick; every other shape is
         counted through ``picked_locs``.
         """
-        if self._pick_shape != "Circle":
-            picked_locs = self.picked_locs(channel, add_group=False)
-            if len(picked_locs) == len(self._picks):
-                return np.array([len(_) for _ in picked_locs], dtype=int)
+        loccount = np.zeros(len(self._picks), dtype=int)
+        circles = [
+            i for i, shape in enumerate(self._pick_shapes) if shape == "Circle"
+        ]
+        others = [
+            i for i, shape in enumerate(self._pick_shapes) if shape != "Circle"
+        ]
+        if others:
+            progress = lib.ProgressDialog(
+                "Creating localization list", 0, 0, self
+            )
+            try:
+                picked_locs = postprocess.picked_locs(
+                    self.locs[channel],
+                    self.infos[channel],
+                    **self._pick_args(others),
+                    add_group=False,
+                    progress=progress,
+                )
+            finally:
+                progress.close()
             # ``picked_locs`` skips polygons that are not closed yet;
             # those hold no localizations
-            is_closed = np.array(
-                [
-                    lib.get_pick_polygon_corners(pick)[0] is not None
-                    for pick in self._picks
-                ]
-            )
-            loccount = np.zeros(len(self._picks), dtype=int)
-            loccount[is_closed] = [len(_) for _ in picked_locs]
+            counted = [
+                i
+                for i in others
+                if self._pick_shapes[i] != "Polygon"
+                or lib.get_pick_polygon_corners(self._picks[i])[0] is not None
+            ]
+            loccount[counted] = [len(_) for _ in picked_locs]
+        if not circles:
             return loccount
 
         progress = lib.ProgressDialog(
-            "Counting in picks..", 0, len(self._picks) - 1, self
+            "Counting in picks..", 0, len(circles) - 1, self
         )
         progress.set_value(0)
         progress.show()
-        r = self._pick_size / 2
-        loccount = np.zeros(len(self._picks), dtype=int)
         index = self._pick_index(channel)
         if isinstance(index, spatial_index.RenderIndexPyramid):
             xs = self.locs[channel]["x"].to_numpy()
             ys = self.locs[channel]["y"].to_numpy()
-            for i, (x, y) in enumerate(self._picks):
+            for k, i in enumerate(circles):
+                x, y = self._picks[i]
+                r = self._pick_sizes[i] / 2
                 loccount[i] = len(
                     spatial_index.query_circle(index, xs, ys, x, y, r)
                 )
-                progress.set_value(i)
+                progress.set_value(k)
             progress.close()
             return loccount
         # no pyramid for the channel: pick-size specific index blocks
         index_blocks = index
+        block_size = index_blocks[1]
         locs_xy = index_blocks[0][["x", "y"]].to_numpy().T
-        for i, pick in enumerate(self._picks):
-            x, y = pick
+        for k, i in enumerate(circles):
+            x, y = self._picks[i]
+            r = self._pick_sizes[i] / 2
             # extract locs at a given region - numba version
             block_locs_xy = postprocess.get_block_locs_at(
-                int(x / r),
-                int(y / r),
+                int(x / block_size),
+                int(y / block_size),
                 locs_xy,
                 index_blocks[4],
                 index_blocks[5],
@@ -17043,13 +17254,27 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             )
             pick_locs_xy = lib.locs_in_circle(x, y, block_locs_xy, r)
             loccount[i] = pick_locs_xy.shape[1]
-            progress.set_value(i)
+            progress.set_value(k)
         progress.close()
         return loccount
 
+    def _index_block_size(self) -> float | None:
+        """The block size of the index for picking: half the size of the
+        largest circular or square pick (of the pick tool without such
+        picks), None if neither the picks nor the tool need one."""
+        halves = [
+            size / 2
+            for shape, size in zip(self._pick_shapes, self._pick_sizes)
+            if shape in ("Circle", "Square")
+        ]
+        if not halves and self._pick_shape in ("Circle", "Square"):
+            halves = [self._pick_size / 2]
+        return max(halves) if halves else None
+
     def index_locs(self, channel: int) -> None:
         """Indexes localizations from a given channel in a grid with
-        grid size equal to half the pick size.
+        grid size equal to half the size of the largest pick, see
+        ``_index_block_size``.
 
         Only circular and square picks are indexed: both reach at most
         half their size in x and y, so the 3x3 block neighborhood around
@@ -17058,11 +17283,11 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         This is the fallback of ``_pick_index``: channels with a render
         pyramid are picked through it and never indexed here.
         """
-        if self._pick_shape not in ("Circle", "Square"):
+        size = self._index_block_size()
+        if size is None:
             return None
         locs = self.locs[channel]
         info = self.infos[channel]
-        size = self._pick_size / 2
         index_blocks = lib.run_with_status(
             lambda: postprocess.get_index_blocks(locs, info, size),
             "Indexing localizations...",
@@ -17071,9 +17296,14 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         self.index_blocks[channel] = index_blocks
 
     def get_index_blocks(self, channel: int) -> tuple:
-        """Call ``self.index_locs`` if not calculated earlier. Return
-        indexed localizations from a given channel."""
-        if self.index_blocks[channel] is None:
+        """Call ``self.index_locs`` if not calculated earlier or if the
+        blocks are smaller than the picks need. Return indexed
+        localizations from a given channel."""
+        index_blocks = self.index_blocks[channel]
+        size = self._index_block_size()
+        if index_blocks is None or (
+            size is not None and index_blocks[1] < size
+        ):
             self.index_locs(channel)
         return self.index_blocks[channel]
 
@@ -17166,10 +17396,11 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         Returns
         -------
         areas : FloatArray1D
-            Areas of all picks. For circular and square picks all values
-            are the same.
+            Areas of all picks, without polygons that are not closed.
         """
-        areas = lib.pick_areas(self._picks, self._pick_shape, self._pick_size)
+        areas = lib.pick_areas(
+            self._picks, self._pick_shapes, self._pick_sizes
+        )
         return areas * 1e-6  # nm^2 to um^2
 
     def pick_fiducials(self) -> None:
@@ -17179,10 +17410,6 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         if channel is None:
             return
 
-        if self._pick_shape != "Circle":
-            message = "Please select circular pick before picking fiducials."
-            QtWidgets.QMessageBox.warning(self, "Warning", message)
-            return
         if len(self._picks):
             message = "Please remove all picks before picking fiducials."
             QtWidgets.QMessageBox.warning(self, "Warning", message)
@@ -17201,13 +17428,15 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             QtWidgets.QMessageBox.warning(self, "Warning", message)
             return
 
-        # the box (nm) found around the fiducials becomes the diameter
+        # the box (nm) found around the fiducials becomes the diameter,
+        # also of the next circular picks
+        self.window.tools_settings_dialog.pick_shape.setCurrentText("Circle")
         self.window.tools_settings_dialog.pick_diameter.setValue(box)
-        self.add_picks(picks)
+        self.add_picks(picks, shape="Circle", size=box)
 
     def plot_profile(self) -> None:
         """Plot the profile of the current rectangular pick."""
-        if self._pick_shape != "Rectangle" or len(self._picks) != 1:
+        if len(self._picks) != 1 or self._pick_shapes[0] != "Rectangle":
             message = "Please select one rectangular pick to plot the profile."
             QtWidgets.QMessageBox.warning(self, "Warning", message)
             return
@@ -17230,9 +17459,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             picked_locs = postprocess.picked_locs(
                 self.locs[channel],
                 self.infos[channel],
-                picks=self._picks,
-                pick_shape=self._pick_shape,
-                pick_size=self._pick_size,
+                **self._pick_args(),
             )[0]
             self.profiles.append(picked_locs["y_pick_rot"].to_numpy())
 
@@ -17342,40 +17569,56 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         localizations they contain and all take the median length of the
         current picks; their similarity is judged by the RMSD along and
         across that axis. Box picks all take the median width and height
-        of the current picks. Std is defined in ``ToolsSettingsDialog``.
+        of the current picks. Circular, square and rectangular picks of
+        different sizes are searched for with their median size, which
+        the new picks take. Std is defined in ``ToolsSettingsDialog``.
         """
+        if len(set(self._pick_shapes)) > 1:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Pick Error",
+                "Pick similar needs picks of one shape.",
+            )
+            return
         channel = self.get_channel("Pick similar")
         if channel is not None:
             std_range = (
                 self.window.tools_settings_dialog.pick_similar_range.value()
             )
+            pick_shape = self._pick_shapes[0]
             # rectangular and box picks need index blocks of a size
             # that depends on the pick extent, so they are built in
             # pick_similar
             index_blocks = (
                 None
-                if self._pick_shape in ("Rectangle", "Box")
+                if pick_shape in ("Rectangle", "Box")
                 else self._pick_index(channel)
             )
             locs, info = self.locs[channel], self.infos[channel]
-            picks = self._picks
-            pick_shape, pick_size = self._pick_shape, self._pick_size
+            pick_args = self._pick_args()
             new_picks = lib.run_with_status(
                 lambda: postprocess.pick_similar(
                     locs=locs,
                     info=info,
-                    picks=picks,
-                    pick_shape=pick_shape,
-                    pick_size=pick_size,
+                    **pick_args,
                     std_range=std_range,
                     index_blocks=index_blocks,
                 ),
                 "Picking similar...",
                 self.window,
             )
-            # add picks
-            self._picks = []
-            self.add_picks(new_picks)
+            # the current picks come first and keep their sizes, the new
+            # ones take the median size
+            n_picks = len(self._picks)
+            sizes = list(self._pick_sizes)
+            if pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE:
+                median = float(np.median(sizes))
+                sizes += [median] * (len(new_picks) - n_picks)
+            else:
+                sizes += [None] * (len(new_picks) - n_picks)
+            self._set_picks(new_picks, pick_shape, sizes)
+            self.update_pick_info_short()
+            self.update_scene(picks_only=True)
 
     def _display_indices(
         self,
@@ -17498,17 +17741,12 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         this runs on the GUI thread; the picking itself can then run on
         a worker thread, see ``lib.run_task``.
         """
-        index_blocks = None
-        if self._pick_shape == "Circle":
-            index_blocks = self._pick_index(channel)
         return dict(
             locs=self.locs[channel],
             info=self.infos[channel],
-            picks=list(self._picks),
-            pick_shape=self._pick_shape,
-            pick_size=self._pick_size,
+            **self._pick_args(),
             add_group=add_group,
-            index_blocks=index_blocks,
+            index_blocks=self._circle_pick_index(channel),
         )
 
     def remove_picks(self, position: tuple[float, float]) -> None:
@@ -17520,32 +17758,21 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             Specifies x and y coordinates.
         """
         x, y = position
-        if self._pick_shape == "Circle":
-            # circles are removed when clicked within one diameter of
-            # their center rather than strictly inside them, which keeps
-            # small picks clickable when zoomed out
-            d2 = self._pick_size**2
-            new_picks = [
-                pick
-                for pick in self._picks
-                if (x - pick[0]) ** 2 + (y - pick[1]) ** 2 > d2
-            ]
-        else:
-            new_picks = [
-                pick
-                for pick in self._picks
-                if not lib.point_in_pick(
-                    x, y, pick, self._pick_shape, self._pick_size
-                )
-            ]
-
-        # delete picks and add new_picks
-        self._picks = []
-        if len(new_picks) == 0:  # no picks left
-            self.update_pick_info_short()
-            self.update_scene(picks_only=True)
-        else:
-            self.add_picks(new_picks)
+        hit = []
+        for i, (pick, shape, size) in enumerate(
+            zip(self._picks, self._pick_shapes, self._pick_sizes)
+        ):
+            if shape == "Circle":
+                # circles are removed when clicked within one diameter of
+                # their center rather than strictly inside them, which
+                # keeps small picks clickable when zoomed out
+                if (x - pick[0]) ** 2 + (y - pick[1]) ** 2 <= size**2:
+                    hit.append(i)
+            elif lib.point_in_pick(x, y, pick, shape, size):
+                hit.append(i)
+        self._remove_picks_at(hit)
+        self.update_pick_info_short()
+        self.update_scene(picks_only=True)
 
     @check_pick
     def remove_picked_locs(self) -> None:
@@ -17573,30 +17800,30 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             postprocess.remove_locs_in_picks(
                 self.locs[channel],
                 self.infos[channel],
-                picks=self._picks,
-                pick_shape=self._pick_shape,
-                pick_size=self._pick_size,
-                index_blocks=self._pick_index(channel),
+                **self._pick_args(),
+                index_blocks=self._circle_pick_index(channel),
             )
         )
         self.update_scene(resample_locs=True)
 
     def remove_polygon_point(self) -> None:
         """Remove the last point from the last polygon. If there is
-        only one point in the polygon, the whole polygon is removed."""
-        if len(self._picks) == 0:
+        only one point in the polygon, the whole polygon is removed.
+        Nothing happens if the last pick is not a polygon."""
+        if not len(self._picks) or self._pick_shapes[-1] != "Polygon":
             return
         else:  # if a polygon is present
+            last = len(self._picks) - 1
             # if no point are present in the last polygon, remove the
             # point from the last polygon
             if len(self._picks[-1]) == 0:
-                self._picks.pop()  # remove the last polygon
+                self._remove_picks_at([last])  # remove the last polygon
                 # remove the last point of the previous polygon:
-                if len(self._picks):
+                if len(self._picks) and self._pick_shapes[-1] == "Polygon":
                     self._picks[-1].pop()
             # if there is only one point, remove the polygon
             elif len(self._picks[-1]) == 1:
-                self._picks.pop()
+                self._remove_picks_at([last])
             else:  # remove the last point only
                 self._picks[-1].pop()
             self.update_pick_info_short()
@@ -17964,36 +18191,54 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         """Defines what happens when window is resized."""
         self.update_scene()
 
-    def _add_shape_specific_info(self, pick_info: dict) -> None:
-        """Add shape-specific information to pick_info dictionary.
+    def _pick_shape_info(
+        self, indices: list[int] | None = None
+    ) -> str | list[str]:
+        """The shape of the picks (all, or those at ``indices``) for the
+        metadata: one shape if they share it, else one per pick."""
+        return self._pick_args(indices)["pick_shape"]
+
+    def _add_shape_specific_info(
+        self, pick_info: dict, indices: list[int] | None = None
+    ) -> None:
+        """Add shape-specific information to pick_info dictionary: the
+        size of the picks, one value if they share it, else one per
+        pick (the size of picks of different shapes is "Pick Size
+        (nm)").
 
         Parameters
         ----------
         pick_info : dict
             Dictionary to update with shape-specific info.
+        indices : list of int, optional
+            Picks described. Default is None, i.e., all picks.
         """
-        picksize_nm = self._pick_size  # None for polygons, boxes, brush
-        if self._pick_shape == "Circle":
-            pick_info["Pick Diameter (nm)"] = picksize_nm
-        elif self._pick_shape == "Rectangle":
-            pick_info["Pick Width (nm)"] = picksize_nm
-        elif self._pick_shape == "Square":
-            pick_info["Pick Side Length (nm)"] = picksize_nm
+        args = self._pick_args(indices)
+        shape, size = args["pick_shape"], args["pick_size"]
+        if shape == "Circle":
+            pick_info["Pick Diameter (nm)"] = size
+        elif shape == "Rectangle":
+            pick_info["Pick Width (nm)"] = size
+        elif shape == "Square":
+            pick_info["Pick Side Length (nm)"] = size
+        elif not isinstance(shape, str) and size is not None:
+            pick_info["Pick Size (nm)"] = size
         # if polygon pick and the last not closed, ignore the last pick
         if (
             "Number of picks" in pick_info
-            and self._pick_shape == "Polygon"
+            and len(self._picks)
+            and self._pick_shapes[-1] == "Polygon"
             and self._picks[-1][0] != self._picks[-1][-1]
         ):
             pick_info["Number of picks"] -= 1
 
-    def _picks_dict(self, picks: list | None = None) -> dict:
+    def _picks_dict(self, indices: list[int] | None = None) -> dict:
         """The dictionary describing pick regions (nm), in the format of
         the picks .yaml files, see ``io.picks_dict``.
 
         Parameters
         ----------
-        picks : list, optional
+        indices : list of int, optional
             Picks to describe. Default is None, i.e., all current picks.
 
         Returns
@@ -18001,12 +18246,13 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         regions : dict
             Pick shape, size (in nm) and positions.
         """
-        if picks is None:
-            picks = self._picks
-        return io.picks_dict(picks, self._pick_shape, self._pick_size)
+        args = self._pick_args(indices)
+        return io.picks_dict(
+            args["picks"], args["pick_shape"], args["pick_size"]
+        )
 
     def _add_picks_to_info(
-        self, pick_info: dict, picks: list | None = None
+        self, pick_info: dict, indices: list[int] | None = None
     ) -> None:
         """Add the pick regions to ``pick_info`` if the user settings ask
         for it (``Save picks in metadata``, disabled by default).
@@ -18015,12 +18261,12 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         ----------
         pick_info : dict
             Dictionary to update with the pick regions.
-        picks : list, optional
+        indices : list of int, optional
             Picks to save. Default is None, i.e., all current picks.
         """
         if not io._save_picks_in_metadata():
             return
-        pick_info["Picks"] = self._picks_dict(picks)
+        pick_info["Picks"] = self._picks_dict(indices)
 
     def _build_base_pick_info(
         self, channels_combined: list | None = None
@@ -18038,13 +18284,17 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             Base pick_info dictionary.
         """
         areas = self.pick_areas()
-        if self._pick_shape in ["Circle", "Square"]:
+        args = self._pick_args()
+        if (
+            args["pick_shape"] in ("Circle", "Square")
+            and np.ndim(args["pick_size"]) == 0
+        ):
             areas_ = [areas[0]]  # save only one value (repeated)
         else:
             areas_ = areas
         pick_info = {
             **lib.step_info("Render : Pick"),
-            "Pick Shape": self._pick_shape,
+            "Pick Shape": args["pick_shape"],
             "Pick Areas (um^2)": [float(_) for _ in areas_],
             "Area (um^2)": float(np.sum(areas)),
             "Number of picks": len(self._picks),
@@ -18095,11 +18345,11 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             for i, pick_locs in enumerate(locs):
                 pick_info = {
                     **lib.step_info("Render : Pick"),
-                    "Pick Shape": self._pick_shape,
+                    "Pick Shape": self._pick_shape_info([i]),
                     "Area (um^2)": float(areas[i]),
                 }
-                self._add_shape_specific_info(pick_info)
-                self._add_picks_to_info(pick_info, [self._picks[i]])
+                self._add_shape_specific_info(pick_info, [i])
+                self._add_picks_to_info(pick_info, [i])
                 io.save_locs(
                     os.path.splitext(path)[0] + f"_{i}.hdf5",
                     pick_locs,
@@ -18157,12 +18407,12 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             for i, pick_locs in enumerate(locs):
                 pick_info = {
                     **lib.step_info("Render : Pick"),
-                    "Pick Shape": self._pick_shape,
+                    "Pick Shape": self._pick_shape_info([i]),
                     "Area (um^2)": float(areas[i]),
                     "Channels combined": self.locs_paths,
                 }
-                self._add_shape_specific_info(pick_info)
-                self._add_picks_to_info(pick_info, [self._picks[i]])
+                self._add_shape_specific_info(pick_info, [i])
+                self._add_picks_to_info(pick_info, [i])
                 io.save_locs(
                     os.path.splitext(path)[0] + f"_{i}.hdf5",
                     pick_locs,
@@ -18263,7 +18513,10 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         """
         if len(self._picks) == 0:
             return
-        io.save_picks(path, self._picks, self._pick_shape, self._pick_size)
+        args = self._pick_args()
+        io.save_picks(
+            path, args["picks"], args["pick_shape"], args["pick_size"]
+        )
 
     def activate_render_property(self) -> None:
         """Assign localizations by color to render a chosen property."""
@@ -18353,32 +18606,26 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         self.update_cursor()
 
     def on_pick_shape_changed(self) -> None:
-        """If a new shape is chosen, ask the user to delete current
-        picks, assign attributes and update scene."""
+        """Switch the pick tool to the shape chosen in
+        ``ToolsSettingsDialog``. The picks drawn so far stay, as picks of
+        different shapes can be mixed; only a polygon that is not closed
+        yet is dropped."""
         t_dialog = self.window.tools_settings_dialog
         current_text = t_dialog.pick_shape.currentText()
         if current_text == self._pick_shape:
             return
-        if len(self._picks):
-            qm = QtWidgets.QMessageBox()
-            qm.setWindowTitle("Changing pick shape")
-            ret = qm.question(
-                self,
-                "",
-                "This action will delete any existing picks. Continue?",
-                qm.StandardButton.Yes | qm.StandardButton.No,
-            )
-            if ret == qm.StandardButton.No:
-                shape_index = t_dialog.pick_shape.findText(self._pick_shape)
-                self.window.tools_settings_dialog.pick_shape.setCurrentIndex(
-                    shape_index
-                )
-                return
         self._pick_shape = current_text
-        self._picks = []
-        # a stroke half-painted with the old shape must not survive
+        if (
+            len(self._picks)
+            and self._pick_shapes[-1] == "Polygon"
+            and lib.get_pick_polygon_corners(self._picks[-1])[0] is None
+        ):
+            self._remove_picks_at([len(self._picks) - 1])
+        # a pick half-drawn with the old shape must not survive
         self._brush_stroke_ongoing = False
         self._brush_stroke = []
+        self._rectangle_pick_ongoing = False
+        self._box_pick_ongoing = False
         self.update_cursor()
         self.update_scene(picks_only=True)
         self.update_pick_info_short()
@@ -18629,18 +18876,14 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         undrift_z : bool
             Whether to also undrift in z (ignored for 2D data).
         """
-        pick_shape, pick_size = self._pick_shape, self._pick_size
-        picks = list(self._picks)
+        pick_args = self._pick_args()
+        has_circles = "Circle" in self._pick_shapes
         jobs = [  # channel, locs, info, index
             (
                 channel,
                 self.locs[channel],
                 self.infos[channel],
-                (
-                    self._cached_render_index(channel)
-                    if pick_shape == "Circle"
-                    else None
-                ),
+                self._cached_render_index(channel) if has_circles else None,
             )
             for channel in channels
         ]
@@ -18649,7 +18892,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         def compute(progress: lib.TaskProgress) -> list[tuple]:
             results = []
             for channel, locs, info, index in jobs:
-                if pick_shape == "Circle" and index is None:
+                if has_circles and index is None:
                     index = _build_render_index_in_task(locs, info, progress)
                     built.append((channel, locs, index))
                     progress.check_canceled()
@@ -18657,9 +18900,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
                     postprocess.undrift_from_fiducials(
                         locs=locs,
                         info=info,
-                        picks=picks,
-                        pick_size=pick_size,
-                        pick_shape=pick_shape,
+                        **pick_args,
                         undrift_z=undrift_z,
                         index_blocks=index,
                         progress=progress,
@@ -18866,7 +19107,7 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         )
         if remove_group:  # discard groups and reset picks
             self.locs[0].drop(columns="group", inplace=True)
-            self._picks = []
+            self._set_picks([], [])
         self.update_scene(resample_locs=True)
         self.fit_in_view()
 
@@ -20942,7 +21183,7 @@ class Window(QtWidgets.QMainWindow):
             # no pick saved: the 3D view showed the field of view,
             # whose bounds are stored like a box pick
             # not ``clear_picks``, which warns when there are none
-            self.view._picks = []
+            self.view._set_picks([], [])
             self.info_dialog.n_picks.setText("0")
             bounds = info.get("Pick")
             if pick_shape == "Field of view" and bounds is not None:
@@ -20951,35 +21192,22 @@ class Window(QtWidgets.QMainWindow):
             self.window_rot.view_rot.load_saved_rotation(info)
             self.rot_win()
             return
-        self.view._pick_shape = pick_shape
-        if self.view._pick_shape == "Brush":
+        if pick_shape == "Brush":
             # stored as stroke dicts with widths in nm, see
             # ``RotationWindow.save_locs_rotated``
-            self.view._picks = [
-                [
-                    (stroke["Width (nm)"], stroke["Path"])
-                    for stroke in info["Pick"]
-                ]
+            pick = [
+                (stroke["Width (nm)"], stroke["Path"])
+                for stroke in info["Pick"]
             ]
         else:
-            self.view._picks = [info["Pick"]]
-        # keep the shape selector in sync; assigning _pick_shape first
-        # makes ``on_pick_shape_changed`` a no-op, so the pick survives
-        self.tools_settings_dialog.pick_shape.setCurrentText(
-            self.view._pick_shape
-        )
-        if self.view._pick_shape == "Circle":
-            self.tools_settings_dialog.pick_diameter.setValue(
-                info["Pick size (nm)"]
-            )
-        elif self.view._pick_shape == "Rectangle":
-            self.tools_settings_dialog.pick_width.setValue(
-                info["Pick size (nm)"]
-            )
-        elif self.view._pick_shape == "Square":
-            self.tools_settings_dialog.pick_side_length.setValue(
-                info["Pick size (nm)"]
-            )
+            pick = info["Pick"]
+        size = info.get("Pick size (nm)")
+        self.view._set_picks([pick], pick_shape, size)
+        # the pick tool follows, with the pick's size for new picks
+        self.tools_settings_dialog.pick_shape.setCurrentText(pick_shape)
+        spin_box = self.view._size_spin_box(pick_shape)
+        if spin_box is not None:
+            spin_box.setValue(size)
         self.window_rot.view_rot.load_saved_rotation(info)
         self.rot_win()
 
@@ -21624,7 +21852,7 @@ class Window(QtWidgets.QMainWindow):
             )
             return
         if len(self.view._picks) == 1:
-            if self.view._pick_shape == "Polygon":
+            if self.view._pick_shapes[0] == "Polygon":
                 if self.view._picks[0][0] != self.view._picks[0][-1]:
                     raise ValueError("Polygon pick not finished.")
             source = "pick"

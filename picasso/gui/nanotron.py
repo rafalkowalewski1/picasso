@@ -904,7 +904,8 @@ class train_dialog(lib.Dialog):
                 self,
                 "No pick diameter found",
                 "The metadata does not record the pick diameter. Please"
-                " load localizations picked in Picasso: Render.",
+                " load localizations picked with circular picks in"
+                " Picasso: Render.",
             )
         else:
             self.pick_diameters[file] = pick_diameter
@@ -917,12 +918,15 @@ class train_dialog(lib.Dialog):
     @staticmethod
     def parse_pick_diameter(info):
         """The pick diameter (nm) recorded in the metadata of picked
-        localizations. Files picked before Picasso 1.0 record it in
-        camera pixels ("Pick Diameter")."""
+        localizations; the largest one of picks of different diameters,
+        so that every pick fits into the images. Files picked before
+        Picasso 1.0 record it in camera pixels ("Pick Diameter")."""
         diameter = None
         for entry in info:
             if "Pick Diameter (nm)" in entry:
                 diameter = entry["Pick Diameter (nm)"]
+                if isinstance(diameter, list):
+                    diameter = max(diameter)
             elif "Pick Diameter" in entry:
                 pixelsize = lib.get_from_metadata(
                     info, "Pixelsize", raise_error=True

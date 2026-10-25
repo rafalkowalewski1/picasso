@@ -18,6 +18,7 @@ import warnings
 from collections import OrderedDict
 from copy import deepcopy
 from typing import Literal, NamedTuple
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 from threading import Thread
 
@@ -234,14 +235,11 @@ def _picked_circular_locs(
     locs: pd.DataFrame,
     info: list[dict],
     picks: list[tuple],
-    radius: float,
+    radii: list[float],
     index_blocks: tuple | None,
-    add_group: bool,
-    progress: lib.Progress,
-) -> list[pd.DataFrame]:
-    """Helper function for picking localizations using circular picks.
-    See ``picked_locs`` for more details."""
-    picked_locs = []
+) -> Iterator[pd.DataFrame]:
+    """Yield the localizations in each circular pick. See
+    ``picked_locs`` for more details."""
     if _is_pyramid(index_blocks):
         # the load-time pyramid: no pick-size specific indexing needed
         pyramid = index_blocks
@@ -249,19 +247,21 @@ def _picked_circular_locs(
         ys = locs["y"].to_numpy()
     else:
         pyramid = None
-        if index_blocks is None:
-            index_blocks = get_index_blocks(locs, info, radius)
+        # the 3x3 block neighborhood around a pick's center holds all of
+        # its localizations only if the blocks are as large as its radius
+        r_max = max(radii)
+        if index_blocks is None or index_blocks[1] < r_max:
+            index_blocks = get_index_blocks(locs, info, r_max)
+        block_size = index_blocks[1]
         locs_xy = index_blocks[0][["x", "y"]].to_numpy().T
-    for i, pick in enumerate(picks):
-        x, y = pick
+    for (x, y), radius in zip(picks, radii):
         if pyramid is not None:
             idx = spatial_index.query_circle(pyramid, xs, ys, x, y, radius)
-            group_locs = locs.iloc[idx].copy()
+            yield locs.iloc[idx].copy()
         else:
-            x_, y_ = int(x / radius), int(y / radius)
             block_locs_idx = _get_block_locs_at(
-                x_,
-                y_,
+                int(x / block_size),
+                int(y / block_size),
                 index_blocks[4],
                 index_blocks[5],
                 index_blocks[6],
@@ -271,34 +271,21 @@ def _picked_circular_locs(
             group_locs_idx = lib.is_loc_in_circle(
                 x, y, locs_xy[:, block_locs_idx], radius
             )
-            group_locs = block_locs.iloc[group_locs_idx].copy()
-
-        if add_group:
-            group_locs = lib.append_group(group_locs, i)
-        group_locs.sort_values(
-            by="frame",
-            kind="quicksort",
-            inplace=True,
-        )
-        picked_locs.append(group_locs)
-
-        progress.set_value(i + 1)
-    return picked_locs
+            yield block_locs.iloc[group_locs_idx].copy()
 
 
 def _picked_rectangular_locs(
     locs: pd.DataFrame,
     picks: list[tuple],
-    pick_size: float,
-    add_group: bool,
-    progress: lib.Progress,
-) -> list[pd.DataFrame]:
-    """Helper function for picking localizations using rectangular
-    picks. See ``picked_locs`` for more details."""
-    picked_locs = []
-    for i, pick in enumerate(picks):
+    widths: list[float],
+    rotated: bool = True,
+) -> Iterator[pd.DataFrame]:
+    """Yield the localizations in each rectangular pick, with their
+    coordinates in the pick's frame (``x_pick_rot``, ``y_pick_rot``) if
+    ``rotated``. See ``picked_locs`` for more details."""
+    for pick, width in zip(picks, widths):
         (xs, ys), (xe, ye) = pick
-        X, Y = lib.get_pick_rectangle_corners(xs, ys, xe, ye, pick_size)
+        X, Y = lib.get_pick_rectangle_corners(xs, ys, xe, ye, width)
         x_min = min(X)
         x_max = max(X)
         y_min = min(Y)
@@ -310,6 +297,9 @@ def _picked_rectangular_locs(
             & (locs["y"] < y_max)
         )
         group_locs = lib.locs_in_rectangle(locs[mask], X, Y).copy()
+        if not rotated:
+            yield group_locs
+            continue
         # store rotated coordinates in x_rot and y_rot
         angle = 0.5 * np.pi - np.arctan2((ye - ys), (xe - xs))
         x_shifted = group_locs["x"] - xs
@@ -318,28 +308,20 @@ def _picked_rectangular_locs(
         y_pick_rot = x_shifted * np.sin(angle) + y_shifted * np.cos(angle)
         group_locs["x_pick_rot"] = x_pick_rot
         group_locs["y_pick_rot"] = y_pick_rot
-        if add_group:
-            group_locs = lib.append_group(group_locs, i)
-        group_locs.sort_values(by="frame", kind="quicksort", inplace=True)
-        picked_locs.append(group_locs)
-
-        progress.set_value(i + 1)
-    return picked_locs
+        yield group_locs
 
 
 def _picked_polygonal_locs(
     locs: pd.DataFrame,
     picks: list[tuple],
-    add_group: bool,
-    progress: lib.Progress,
-):
-    """Helper function for picking localizations using polygonal picks. See
-    ``picked_locs`` for more details."""
-    picked_locs = []
-    for i, pick in enumerate(picks):
+) -> Iterator[pd.DataFrame | None]:
+    """Yield the localizations in each polygonal pick, None for a
+    polygon that is not closed. See ``picked_locs`` for more
+    details."""
+    for pick in picks:
         X, Y = lib.get_pick_polygon_corners(pick)
         if X is None:
-            progress.set_value(i + 1)
+            yield None
             continue
         mask = (
             (locs["x"] > min(X))
@@ -347,29 +329,18 @@ def _picked_polygonal_locs(
             & (locs["y"] > min(Y))
             & (locs["y"] < max(Y))
         )
-        group_locs = lib.locs_in_polygon(locs[mask], X, Y).copy()
-        if add_group:
-            group_locs = lib.append_group(group_locs, i)
-        group_locs.sort_values(by="frame", kind="quicksort", inplace=True)
-        picked_locs.append(group_locs)
-
-        progress.set_value(i + 1)
-    return picked_locs
+        yield lib.locs_in_polygon(locs[mask], X, Y).copy()
 
 
 def _picked_square_locs(
     locs: pd.DataFrame,
     picks: list[tuple],
-    pick_size: float,
-    add_group: bool,
-    progress: lib.Progress,
-) -> list[pd.DataFrame]:
-    """Helper function for picking localizations using square picks. See
+    side_lengths: list[float],
+) -> Iterator[pd.DataFrame]:
+    """Yield the localizations in each square pick. See
     ``picked_locs`` for more details."""
-    picked_locs = []
-    for i, pick in enumerate(picks):
-        x, y = pick
-        half_a = pick_size / 2
+    for (x, y), side_length in zip(picks, side_lengths):
+        half_a = side_length / 2
         x_min = x - half_a
         x_max = x + half_a
         y_min = y - half_a
@@ -380,26 +351,16 @@ def _picked_square_locs(
             & (locs["y"] > y_min)
             & (locs["y"] < y_max)
         )
-        group_locs = locs[mask].copy()
-        if add_group:
-            group_locs = lib.append_group(group_locs, i)
-        group_locs.sort_values(by="frame", kind="quicksort", inplace=True)
-        picked_locs.append(group_locs)
-
-        progress.set_value(i + 1)
-    return picked_locs
+        yield locs[mask].copy()
 
 
 def _picked_box_locs(
     locs: pd.DataFrame,
     picks: list[tuple],
-    add_group: bool,
-    progress: lib.Progress,
-) -> list[pd.DataFrame]:
-    """Helper function for picking localizations using box picks. See
-    ``picked_locs`` for more details."""
-    picked_locs = []
-    for i, pick in enumerate(picks):
+) -> Iterator[pd.DataFrame]:
+    """Yield the localizations in each box pick. See ``picked_locs``
+    for more details."""
+    for pick in picks:
         (x0, y0), (x1, y1) = pick
         x_min, x_max = (x0, x1) if x0 <= x1 else (x1, x0)
         y_min, y_max = (y0, y1) if y0 <= y1 else (y1, y0)
@@ -409,26 +370,16 @@ def _picked_box_locs(
             & (locs["y"] > y_min)
             & (locs["y"] < y_max)
         )
-        group_locs = locs[mask].copy()
-        if add_group:
-            group_locs = lib.append_group(group_locs, i)
-        group_locs.sort_values(by="frame", kind="quicksort", inplace=True)
-        picked_locs.append(group_locs)
-
-        progress.set_value(i + 1)
-    return picked_locs
+        yield locs[mask].copy()
 
 
 def _picked_brush_locs(
     locs: pd.DataFrame,
     picks: list[tuple],
-    add_group: bool,
-    progress: lib.Progress,
-) -> list[pd.DataFrame]:
-    """Helper function for picking localizations using brush picks. See
-    ``picked_locs`` for more details."""
-    picked_locs = []
-    for i, pick in enumerate(picks):
+) -> Iterator[pd.DataFrame]:
+    """Yield the localizations in each brush pick. See ``picked_locs``
+    for more details."""
+    for pick in picks:
         x_min, x_max, y_min, y_max = lib.pick_bounds(pick, "Brush", None)
         mask = (
             (locs["x"] > x_min)
@@ -436,14 +387,33 @@ def _picked_brush_locs(
             & (locs["y"] > y_min)
             & (locs["y"] < y_max)
         )
-        group_locs = lib.locs_in_brush(locs[mask], pick).copy()
-        if add_group:
-            group_locs = lib.append_group(group_locs, i)
-        group_locs.sort_values(by="frame", kind="quicksort", inplace=True)
-        picked_locs.append(group_locs)
+        yield lib.locs_in_brush(locs[mask], pick).copy()
 
-        progress.set_value(i + 1)
-    return picked_locs
+
+def _picked_locs_of_shape(
+    locs: pd.DataFrame,
+    info: list[dict],
+    shape: str,
+    picks: list[tuple],
+    sizes: list[float | None],
+    index_blocks: tuple | None,
+    rotated: bool,
+) -> Iterator[pd.DataFrame | None]:
+    """Yield the localizations in each of ``picks``, all of ``shape``
+    (None for a polygon that is not closed); ``rotated`` adds the
+    coordinates in the frame of rectangular picks."""
+    if shape == "Circle":
+        radii = [size / 2 for size in sizes]
+        return _picked_circular_locs(locs, info, picks, radii, index_blocks)
+    elif shape == "Rectangle":
+        return _picked_rectangular_locs(locs, picks, sizes, rotated)
+    elif shape == "Polygon":
+        return _picked_polygonal_locs(locs, picks)
+    elif shape == "Square":
+        return _picked_square_locs(locs, picks, sizes)
+    elif shape == "Box":
+        return _picked_box_locs(locs, picks)
+    return _picked_brush_locs(locs, picks)
 
 
 def picked_locs(
@@ -451,10 +421,11 @@ def picked_locs(
     info: list[dict],
     *,
     picks: list[tuple],
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ],
-    pick_size: float = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
+    ),
+    pick_size: float | list[float | None] | None = None,
     add_group: bool = True,
     index_blocks: tuple = None,
     progress: lib.Progress | Literal["console"] | None = None,
@@ -470,21 +441,24 @@ def picked_locs(
         Metadata of the localizations list.
     picks : list
         List of picks.
-    pick_shape : {'Circle', 'Rectangle', 'Polygon', 'Square', 'Box', 'Brush'}
-        Shape of the pick.
-    pick_size : float, optional
-        Size of the pick in nm. Diameter for the circles, width
-        for the rectangles, side length for squares, None for the
-        polygons, boxes and brush picks (they carry their own extent).
-        Default is None.
+    pick_shape : {'Circle', 'Rectangle', 'Polygon', 'Square', 'Box', \
+            'Brush'} or list of str
+        Shape of the picks, or the shape of each pick, see
+        ``lib.pick_shapes_and_sizes``.
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick. Diameter for
+        the circles, width for the rectangles, side length for squares,
+        None for the polygons, boxes and brush picks (they carry their
+        own extent). Default is None.
     add_group : boolean, optional
         True if group id should be added to locs. Each pick will be
-        assigned a different id. Default is True.
+        assigned a different id, its index in ``picks``. Default is
+        True.
     index_blocks : tuple or spatial_index.RenderIndexPyramid, optional
         Used only for circular picks. Precomputed index blocks for
-        localizations, see ``get_index_blocks`` (built with block size
-        ``pick_size / 2``, the pick radius), or the pick-size
-        independent pyramid of
+        localizations, see ``get_index_blocks`` (built with a block size
+        of at least the largest pick radius, else they are rebuilt), or
+        the pick-size independent pyramid of
         ``spatial_index.build_render_index``. If None, index blocks
         will be calculated internally. Default is None.
     progress : lib.Progress, "console" or None, optional
@@ -496,15 +470,19 @@ def picked_locs(
     Returns
     -------
     picked_locs : list of pd.DataFrames
-        List of pd.DataFrames, each containing locs from one pick.
+        List of pd.DataFrames, each containing locs from one pick, in
+        the order of ``picks``. Polygons that are not closed are left
+        out. If all picks are rectangular, the localizations carry their
+        coordinates in the frame of their pick (``x_pick_rot``,
+        ``y_pick_rot``); with other shapes among the picks they do not,
+        since the column would be undefined for the rest.
     """
-    _valid_shapes = lib.PICK_SHAPES
-    assert (
-        pick_shape in _valid_shapes
-    ), f"Invalid pick shape: {pick_shape}. Choose one of {_valid_shapes}."
+    shapes, sizes = lib.pick_shapes_and_sizes(picks, pick_shape, pick_size)
     if len(picks) == 0:
         return []
+    rotated = all(shape == "Rectangle" for shape in shapes)
 
+    picked = [None] * len(picks)
     with lib.tracked_progress(
         progress, "Picking localizations", unit="pick"
     ) as progress:
@@ -512,55 +490,32 @@ def picked_locs(
             progress, "Picking localizations", len(picks), unit="pick"
         )
         progress.set_value(0)
-        if pick_shape == "Circle":
-            picked_locs = _picked_circular_locs(
-                locs=locs,
-                info=info,
-                picks=picks,
-                radius=pick_size / 2,
-                index_blocks=index_blocks,
-                add_group=add_group,
-                progress=progress,
+        n_done = 0
+        for shape in lib.PICK_SHAPES:
+            idx = [i for i, _ in enumerate(shapes) if _ == shape]
+            if not idx:
+                continue
+            group_locs_iter = _picked_locs_of_shape(
+                locs,
+                info,
+                shape,
+                [picks[i] for i in idx],
+                [sizes[i] for i in idx],
+                index_blocks,
+                rotated,
             )
-        elif pick_shape == "Rectangle":
-            picked_locs = _picked_rectangular_locs(
-                locs=locs,
-                picks=picks,
-                pick_size=pick_size,
-                add_group=add_group,
-                progress=progress,
-            )
-        elif pick_shape == "Polygon":
-            picked_locs = _picked_polygonal_locs(
-                locs=locs,
-                picks=picks,
-                add_group=add_group,
-                progress=progress,
-            )
-        elif pick_shape == "Square":
-            picked_locs = _picked_square_locs(
-                locs=locs,
-                picks=picks,
-                pick_size=pick_size,
-                add_group=add_group,
-                progress=progress,
-            )
-        elif pick_shape == "Box":
-            picked_locs = _picked_box_locs(
-                locs=locs,
-                picks=picks,
-                add_group=add_group,
-                progress=progress,
-            )
-        elif pick_shape == "Brush":
-            picked_locs = _picked_brush_locs(
-                locs=locs,
-                picks=picks,
-                add_group=add_group,
-                progress=progress,
-            )
+            for i, group_locs in zip(idx, group_locs_iter):
+                if group_locs is not None:
+                    if add_group:
+                        group_locs = lib.append_group(group_locs, i)
+                    group_locs.sort_values(
+                        by="frame", kind="quicksort", inplace=True
+                    )
+                    picked[i] = group_locs
+                n_done += 1
+                progress.set_value(n_done)
         progress.set_value(len(picks))
-    return picked_locs
+    return [_ for _ in picked if _ is not None]
 
 
 def pick_similar(
@@ -568,8 +523,10 @@ def pick_similar(
     info: list[dict],
     *,
     picks: list[tuple],
-    pick_shape: Literal["Circle", "Rectangle", "Square", "Box"] = "Circle",
-    pick_size: float = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Square", "Box"] | list[str]
+    ) = "Circle",
+    pick_size: float | list[float] | None = None,
     std_range: float = 2.0,
     index_blocks: tuple = None,
     grid_spacing: float = None,
@@ -581,7 +538,7 @@ def pick_similar(
     the allowed range is defined by the given standard deviation range
     (``std_range``). Only picks with number of localizations and RMSD
     within these ranges are returned. The input picks are always part of
-    the output.
+    the output, first and in their order.
 
     A grid of overlapping candidate picks covering the field of view is
     scanned and each candidate is shifted towards the center of mass of
@@ -592,7 +549,11 @@ def pick_similar(
     median width and height of the input picks. Candidates overlapping
     an already accepted pick are discarded.
 
-    Not implemented for polygonal picks, which have no size or
+    All picks must have the same shape. Circular, square and
+    rectangular picks of different sizes are measured and searched for
+    with their median size, which the new picks take as well.
+
+    Not implemented for polygonal and brush picks, which have no size or
     canonical form to replicate.
 
     Parameters
@@ -606,12 +567,13 @@ def pick_similar(
         picks, ``((x_start, y_start), (x_end, y_end))`` center-axis
         points for rectangular picks, and the two opposite corners
         ``((x0, y0), (x1, y1))`` for box picks.
-    pick_shape : {'Circle', 'Rectangle', 'Square', 'Box'}, optional
-        Shape of the picks. Default is 'Circle'.
-    pick_size : float, optional
-        Size of the pick in nm. Diameter for circles, side length for
-        squares, width for rectangles. Ignored for boxes,
-        which carry their own extent. Default is None.
+    pick_shape : {'Circle', 'Rectangle', 'Square', 'Box'} or list of str
+        Shape of the picks; a list (one shape per pick) must hold one
+        shape only. Default is 'Circle'.
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick. Diameter for
+        circles, side length for squares, width for rectangles. Ignored
+        for boxes, which carry their own extent. Default is None.
     std_range : float, optional
         Standard deviation range for picking similar localizations.
         Default is 2.0.
@@ -630,7 +592,16 @@ def pick_similar(
     -------
     new_picks : list of tuples
         List of similar picks, in the same format as ``picks``.
+
+    Raises
+    ------
+    ValueError
+        If the picks have different shapes, a shape is not supported or
+        a size is missing.
     """
+    pick_shape, pick_size = _pick_similar_shape_and_size(
+        picks, pick_shape, pick_size
+    )
     _validate_pick_similar_args(pick_shape, pick_size, grid_spacing)
     if len(picks) == 0:
         return []
@@ -659,6 +630,27 @@ def pick_similar(
         return _pick_similar_rectangular(
             info, picks, pick_size, std_range, index_blocks, grid_spacing
         )
+
+
+def _pick_similar_shape_and_size(
+    picks: list[tuple],
+    pick_shape: str | list[str],
+    pick_size: float | list[float] | None,
+) -> tuple[str, float | None]:
+    """The one shape and size ``pick_similar`` works with: the median
+    size of picks of different sizes."""
+    if not isinstance(pick_shape, str):
+        shapes = set(pick_shape)
+        if len(shapes) > 1:
+            raise ValueError(
+                "Pick similar needs picks of one shape, got "
+                f"{', '.join(sorted(shapes))}."
+            )
+        pick_shape = shapes.pop() if shapes else "Circle"
+    if np.ndim(pick_size) and len(picks):
+        _, sizes = lib.pick_shapes_and_sizes(picks, pick_shape, pick_size)
+        pick_size = None if sizes[0] is None else float(np.median(sizes))
+    return pick_shape, pick_size
 
 
 def _validate_pick_similar_args(
@@ -2142,10 +2134,11 @@ def remove_locs_in_picks(
     info: list[dict],
     *,
     picks: list[tuple],
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ],
-    pick_size: float | None = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
+    ),
+    pick_size: float | list[float | None] | None = None,
     index_blocks: tuple = None,
 ) -> tuple[pd.DataFrame, list[dict]]:
     """Remove localizations in picks.
@@ -2159,13 +2152,14 @@ def remove_locs_in_picks(
     picks : list of tuples
         List of picks, each pick is a list of coordinates of the pick
         corners. See ``io.load_picks``.
-    pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"}
-        Shape of picks.
-    pick_size : float or None
-        Size of picks in nm. For circles - diameters. For
-        rectangles - width. For squares - side length. For polygons,
-        boxes and brush picks - ignored. Ignored if picks are loaded
-        from a YAML file.
+    pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
+            "Brush"} or list of str
+        Shape of picks, or the shape of each pick, see
+        ``lib.pick_shapes_and_sizes``.
+    pick_size : float, list of float or None
+        Size of picks in nm, or the size of each pick. For circles -
+        diameters. For rectangles - width. For squares - side length.
+        For polygons, boxes and brush picks - ignored.
     index_blocks : tuple, optional
         Used only for circular picks. Precomputed index blocks for
         localizations, see  ``get_index_blocks``. If None, they will be
@@ -2179,15 +2173,6 @@ def remove_locs_in_picks(
         Metadata of the remaining localizations: ``info`` with an entry
         recording the removal appended, see ``lib.append_metadata``.
     """
-    assert (
-        pick_shape in lib.PICK_SHAPES
-    ), f"pick_shape must be one of {lib.PICK_SHAPES}."
-    if pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE:
-        assert isinstance(
-            pick_size, (int, float)
-        ), "pick_size must be a number."
-    if pick_shape != "Circle":
-        index_blocks = None  # ignore index blocks, only used for circle picks
     all_picked_locs = picked_locs(
         locs,
         info,
@@ -2209,20 +2194,24 @@ def remove_locs_in_picks(
 def _picks_entry(
     step: str,
     picks: list[tuple],
-    pick_shape: str,
-    pick_size: float | None,
+    pick_shape: str | list[str],
+    pick_size: float | list[float | None] | None,
 ) -> dict:
     """Metadata entry recording a step on picked localizations: the
-    number, shape and size of the picks (the diameter for circles)."""
+    number, shape and size of the picks (the diameter for circles).
+    Shapes and sizes the picks do not share are listed per pick."""
+    shape, size = lib._compact_pick_shapes_and_sizes(
+        *lib.pick_shapes_and_sizes(picks, pick_shape, pick_size)
+    )
     entry = {
         **lib.step_info(step),
         "Number of picks": len(picks),
-        "Pick shape": pick_shape,
+        "Pick shape": shape if len(picks) else pick_shape,
     }
-    if pick_shape == "Circle":
-        entry["Pick diameter (nm)"] = float(pick_size)
-    elif pick_size is not None:
-        entry["Pick size (nm)"] = float(pick_size)
+    if shape == "Circle":
+        entry["Pick diameter (nm)"] = size
+    elif size is not None:
+        entry["Pick size (nm)"] = size
     return entry
 
 
@@ -3816,10 +3805,11 @@ def combine_locs_in_picks(
     info: list[dict],
     *,
     picks: list[tuple],
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ],
-    pick_size: float | None = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
+    ),
+    pick_size: float | list[float | None] | None = None,
     index_blocks: tuple | None = None,
     progress: lib.Progress | Literal["console"] | None = None,
 ) -> tuple[pd.DataFrame, list[dict]]:
@@ -3834,19 +3824,21 @@ def combine_locs_in_picks(
         Metadata of the localizations.
     picks : list of tuples
         List of pick positions. See ``io.load_picks``.
-    pick_shape : {'Circle', 'Rectangle', 'Polygon', 'Square', 'Box', 'Brush'}
-        Shape of the picks.
-    pick_size : float or None, optional
-        Size of the picks. For circular picks, the size is the diameter;
-        for rectangular picks, the size is the width; for square picks,
-        the size is the side length. None for polygonal, box and brush
-        picks (size not defined).
+    pick_shape : {'Circle', 'Rectangle', 'Polygon', 'Square', 'Box', \
+            'Brush'} or list of str
+        Shape of the picks, or the shape of each pick, see
+        ``lib.pick_shapes_and_sizes``.
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick. For circular
+        picks, the size is the diameter; for rectangular picks, the size
+        is the width; for square picks, the size is the side length.
+        None for polygonal, box and brush picks (size not defined).
     index_blocks : tuple or None, optional
         Precomputed spatial index over ``locs`` as returned by
-        ``get_index_blocks`` (built with block size equal to the pick
-        radius). When provided, used to skip re-indexing inside circular
-        ``picked_locs``. Ignored for non-circular pick shapes. Default
-        is None (index is computed on demand).
+        ``get_index_blocks`` (built with a block size of at least the
+        largest pick radius). When provided, used to skip re-indexing
+        inside circular ``picked_locs``. Ignored for non-circular
+        picks. Default is None (index is computed on demand).
     progress : lib.Progress, "console" or None, optional
         Progress tracker, see ``picasso.lib.Progress``: e.g. a
         ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
@@ -3863,13 +3855,7 @@ def combine_locs_in_picks(
         Metadata of ``out_locs``: ``info`` with an entry recording the
         combining appended, see ``lib.append_metadata``.
     """
-    assert (
-        pick_shape in lib.PICK_SHAPES
-    ), f"pick_shape must be one of {lib.PICK_SHAPES}."
-    if pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE:
-        assert (
-            pick_size is not None
-        ), "Pick size must be provided for this pick shape."
+    lib.pick_shapes_and_sizes(picks, pick_shape, pick_size)  # check
     with lib.tracked_progress(
         progress, "Picking localizations", unit="pick"
     ) as progress:
@@ -4494,10 +4480,11 @@ def undrift_from_fiducials(
     info: list[dict],
     *,
     picks: list[tuple] | None = None,
-    pick_size: float | None = None,
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ] = "Circle",
+    pick_size: float | list[float | None] | None = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
+    ) = "Circle",
     undrift_z: bool = True,
     index_blocks: tuple | None = None,
     progress: lib.Progress | Literal["console"] | None = None,
@@ -4515,27 +4502,28 @@ def undrift_from_fiducials(
         ``pick_shape``. If None (default), circular fiducials are
         automatically detected using
         ``picasso.imageprocess.find_fiducials``.
-    pick_size : float or None, optional
-        Size of the picks in nm: the diameter for circles, the width
-        for rectangles, the side length for squares.
-        Required when ``picks`` is a list of coordinates, unless
-        ``pick_shape`` carries its own extent ("Polygon", "Box").
-        Ignored when ``picks`` is None (determined by
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick: the diameter
+        for circles, the width for rectangles, the side length for
+        squares. Required when ``picks`` is a list of coordinates,
+        unless ``pick_shape`` carries its own extent ("Polygon", "Box",
+        "Brush"). Ignored when ``picks`` is None (determined by
         ``find_fiducials``).
-    pick_shape : str, optional
-        Shape of the given picks, one of ``lib.PICK_SHAPES``. Forced to
-        "Circle" when ``picks`` is None. Default is "Circle".
+    pick_shape : str or list of str, optional
+        Shape of the given picks, one of ``lib.PICK_SHAPES``, or the
+        shape of each pick (see ``lib.pick_shapes_and_sizes``). Forced
+        to "Circle" when ``picks`` is None. Default is "Circle".
     undrift_z : bool, optional
         If True, also undrift the z coordinate if it exists in the
         localizations. Default is True.
     index_blocks : tuple or None, optional
         Precomputed spatial index over ``locs`` as returned by
-        ``get_index_blocks`` (built with block size equal to the pick
-        radius, ``pick_size / 2``). When provided, used to skip
-        re-indexing inside circular ``picked_locs``. Ignored for every
-        other pick shape, and when ``picks`` is None (auto-detected
-        fiducials use a size that may not match the precomputed index).
-        Default is None.
+        ``get_index_blocks`` (built with a block size of at least the
+        largest pick radius). When provided, used to skip re-indexing
+        inside circular ``picked_locs``. Ignored for every other pick
+        shape, and when ``picks`` is None (auto-detected fiducials use a
+        size that may not match the precomputed index). Default is
+        None.
     progress : lib.Progress, "console" or None, optional
         Progress tracker, see ``picasso.lib.Progress``: e.g. a
         ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
@@ -4558,11 +4546,10 @@ def undrift_from_fiducials(
     ------
     ValueError
         If ``pick_size`` is not provided when ``picks`` is a list of
-        coordinates of a shape that needs one.
+        coordinates of a shape that needs one, or if a shape is unknown.
     """
-    assert (
-        pick_shape in lib.PICK_SHAPES
-    ), f"pick_shape must be one of {lib.PICK_SHAPES}."
+    if isinstance(pick_shape, str):
+        lib.pick_shapes_and_sizes([], pick_shape)  # check the shape
     locs = locs.copy()
 
     with lib.tracked_progress(
@@ -4582,17 +4569,16 @@ def undrift_from_fiducials(
                 index_blocks = None
         else:
             # user-provided list of pick coordinates
-            needs_size = pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE
+            shapes = (
+                [pick_shape] if isinstance(pick_shape, str) else pick_shape
+            )
+            needs_size = set(shapes) - set(lib.PICK_SHAPES_WITHOUT_SIZE)
             if pick_size is None and needs_size:
                 raise ValueError(
                     "pick_size (diameter in nm for circular picks) "
                     "must be provided when picks are given as a list of "
                     "coordinates."
                 )
-
-        if pick_shape != "Circle":
-            # the index is built for circular lookups only
-            index_blocks = None
 
         if len(picks) == 0:
             raise ValueError("No picks found for drift correction.")
@@ -4907,10 +4893,11 @@ def align(
     *,
     method: Literal["rcc", "picked"] = "rcc",
     picks: list[tuple] | None = None,
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ] = "Circle",
-    pick_size: float | None = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
+    ) = "Circle",
+    pick_size: float | list[float | None] | None = None,
     index_blocks: list[tuple | None] | None = None,
     display: bool = False,
     return_shifts: bool = False,
@@ -4939,14 +4926,15 @@ def align(
         Picked regions, in the format required by ``pick_shape``, see
         ``io.load_picks``. Required for ``method="picked"`` and not
         accepted otherwise. Default is None.
-    pick_shape : str, optional
-        Shape of the picks, one of ``lib.PICK_SHAPES``. Only used for
+    pick_shape : str or list of str, optional
+        Shape of the picks, one of ``lib.PICK_SHAPES``, or the shape of
+        each pick (see ``lib.pick_shapes_and_sizes``). Only used for
         ``method="picked"``. Default is "Circle".
-    pick_size : float or None, optional
-        Size of the picks: the diameter of circular picks, the side
-        length of square picks and the width of rectangular picks. None
-        for polygon, box and brush picks. Only used for
-        ``method="picked"``. Default is None.
+    pick_size : float, list of float or None, optional
+        Size of the picks, or the size of each pick: the diameter of
+        circular picks, the side length of square picks and the width of
+        rectangular picks. None for polygon, box and brush picks. Only
+        used for ``method="picked"``. Default is None.
     index_blocks : list of tuple or None, optional
         Per-channel precomputed spatial indices for circular picks, see
         ``align_from_picked``. Only used for ``method="picked"``.
@@ -5187,10 +5175,11 @@ def align_from_picked(
     infos: list[list[dict]],
     *,
     picks: list[tuple],
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ],
-    pick_size: float | None = None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
+    ),
+    pick_size: float | list[float | None] | None = None,
     return_shifts: bool = False,
     index_blocks: list[tuple | None] | None = None,
     keep_non_overlapping: bool = True,
@@ -5208,16 +5197,17 @@ def align_from_picked(
     infos : list of list of dicts
         List of metadata dictionaries corresponding to each localization
         dataset in ``locs``.
-    picks : list of (2,) tuples
-        Coordinates of picked regions as (x, y) tuples. See
-        ``io.load_picks``.
-    pick_shape : str
-        Shape of the picks, one of ``lib.PICK_SHAPES``.
-    pick_size : float or None, optional
-        Size of the picks. For circular picks, the size is the diameter.
-        For square picks, the size is the side length. For rectangular
-        picks, the size is the width. None for polygon, box and brush
-        picks. Default is None.
+    picks : list
+        Coordinates of picked regions in the format of their shapes,
+        e.g., (x, y) tuples for circles. See ``io.load_picks``.
+    pick_shape : str or list of str
+        Shape of the picks, one of ``lib.PICK_SHAPES``, or the shape of
+        each pick (see ``lib.pick_shapes_and_sizes``).
+    pick_size : float, list of float or None, optional
+        Size of the picks, or the size of each pick. For circular picks,
+        the size is the diameter. For square picks, the size is the side
+        length. For rectangular picks, the size is the width. None for
+        polygon, box and brush picks. Default is None.
     return_shifts : bool, optional
         If True, also returns the calculated shifts for each channel.
         Default is False.
@@ -5256,15 +5246,10 @@ def align_from_picked(
     ------
     ValueError
         If ``keep_non_overlapping`` is False and the aligned channels
-        do not overlap.
+        do not overlap, or if a pick shape is unknown or a size is
+        missing.
     """
-    assert (
-        pick_shape in lib.PICK_SHAPES
-    ), f"pick_shape must be one of {lib.PICK_SHAPES}"
-    if pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE:
-        assert (
-            pick_size is not None
-        ), "pick_size must be provided when picks is a list of coordinates"
+    lib.pick_shapes_and_sizes(picks, pick_shape, pick_size)  # check
     ib_list = index_blocks if index_blocks is not None else [None] * len(locs)
     pl = [
         picked_locs(
@@ -6899,8 +6884,8 @@ _SHIFT_REGIONS_ERROR = (
 def _statistic_regions(
     info: list[dict],
     picks: list[tuple] | None,
-    pick_shape: str | None,
-    pick_size: float | None,
+    pick_shape: str | list[str] | None,
+    pick_size: float | list[float | None] | None,
     shift: bool,
 ) -> list[_Region | None]:
     """The regions of interest in nm: the picks (None for those
@@ -6917,14 +6902,11 @@ def _statistic_regions(
             )
         ]
     else:
-        if pick_shape not in lib.PICK_SHAPES:
-            raise ValueError(
-                f"Invalid pick shape: {pick_shape}. Choose one of "
-                f"{lib.PICK_SHAPES}."
-            )
-        if pick_shape not in lib.PICK_SHAPES_WITHOUT_SIZE and not pick_size:
-            raise ValueError(f"{pick_shape} picks require a pick size.")
-        regions = [_pick_region(pick, pick_shape, pick_size) for pick in picks]
+        shapes, sizes = lib.pick_shapes_and_sizes(picks, pick_shape, pick_size)
+        regions = [
+            _pick_region(pick, shape, size)
+            for pick, shape, size in zip(picks, shapes, sizes)
+        ]
     if shift:
         for region in regions:
             if (
@@ -7207,9 +7189,10 @@ def ripley_h(
     picks: list[tuple] | None = None,
     pick_shape: (
         Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
         | None
     ) = None,
-    pick_size: float | None = None,
+    pick_size: float | list[float | None] | None = None,
     r_max: float = 500.0,
     steps: int = 100,
     edge_correction: bool = True,
@@ -7278,13 +7261,14 @@ def ripley_h(
         None, the whole field of view (``Width`` x ``Height`` in the
         metadata) is used. Default is None.
     pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
-"Brush"} or None, optional
-        Shape of the picks. Required if ``picks`` is given. Default is
-        None.
-    pick_size : float or None, optional
-        Size of the picks in nm: diameter for circles, width for
-        rectangles, side length for squares, None for polygons, boxes
-        and brush picks. Default is None.
+"Brush"}, list of str or None, optional
+        Shape of the picks, or the shape of each pick (see
+        ``lib.pick_shapes_and_sizes``). Required if ``picks`` is given.
+        Default is None.
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick: diameter for
+        circles, width for rectangles, side length for squares, None for
+        polygons, boxes and brush picks. Default is None.
     r_max : float, optional
         Largest radius in nm. It should be well below the size of the
         regions; the edge correction is less reliable for radii
@@ -7468,9 +7452,10 @@ def rdf(
     picks: list[tuple] | None = None,
     pick_shape: (
         Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
         | None
     ) = None,
-    pick_size: float | None = None,
+    pick_size: float | list[float | None] | None = None,
     r_max: float = 500.0,
     steps: int = 50,
     edge_correction: bool = True,
@@ -7528,13 +7513,14 @@ def rdf(
         ``pick_shape``. If None, the whole field of view is used. See
         ``ripley_h``. Default is None.
     pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
-"Brush"} or None, optional
-        Shape of the picks. Required if ``picks`` is given. Default is
-        None.
-    pick_size : float or None, optional
-        Size of the picks in nm: diameter for circles, width for
-        rectangles, side length for squares, None for polygons, boxes
-        and brush picks. Default is None.
+"Brush"}, list of str or None, optional
+        Shape of the picks, or the shape of each pick (see
+        ``lib.pick_shapes_and_sizes``). Required if ``picks`` is given.
+        Default is None.
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick: diameter for
+        circles, width for rectangles, side length for squares, None for
+        polygons, boxes and brush picks. Default is None.
     r_max : float, optional
         Largest radius in nm. It should be well below the size of the
         regions. Default is 500.
@@ -7905,9 +7891,10 @@ def nnd_distributions(
     picks: list[tuple] | None = None,
     pick_shape: (
         Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | list[str]
         | None
     ) = None,
-    pick_size: float | None = None,
+    pick_size: float | list[float | None] | None = None,
     names: list[str] | None = None,
     r_max: float = 200.0,
     steps: int = 40,
@@ -7959,13 +7946,14 @@ def nnd_distributions(
         ``pick_shape``. If None, the whole field of view is used. See
         ``ripley_h``. Default is None.
     pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
-"Brush"} or None, optional
-        Shape of the picks. Required if ``picks`` is given. Default is
-        None.
-    pick_size : float or None, optional
-        Size of the picks in nm: diameter for circles, width for
-        rectangles, side length for squares, None for polygons, boxes
-        and brush picks. Default is None.
+"Brush"}, list of str or None, optional
+        Shape of the picks, or the shape of each pick (see
+        ``lib.pick_shapes_and_sizes``). Required if ``picks`` is given.
+        Default is None.
+    pick_size : float, list of float or None, optional
+        Size of the picks in nm, or the size of each pick: diameter for
+        circles, width for rectangles, side length for squares, None for
+        polygons, boxes and brush picks. Default is None.
     names : list of str or None, optional
         Names of the channels for the plot and the saved tables. If
         None, the channels are called "0", "1", ... Default is None.

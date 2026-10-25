@@ -66,12 +66,14 @@ integer column ``group`` with the index of their pick (see
 color when the file is opened (see :ref:`render-coloring`). To display the group number in Render, select ``Annotate picks`` in
 ``Tools > Tools settings`` (see :ref:`render-tools-settings`).
 
-In case of rectangular picks, the saved localizations file will contain new
+If all picks are rectangular, the saved localizations file will contain new
 columns ``x_pick_rot`` and ``y_pick_rot``, which are localization coordinates
 into the coordinate system of the pick rectangle (coordinate (0,0) is where
 the rectangle was started to be drawn, and ``y_pick_rot`` is in the direction
 of the drawn line.) These columns can be used to plot density profiles of
-localizations along the rectangle dimensions easily.
+localizations along the rectangle dimensions easily. With picks of other
+shapes among them (see :ref:`render-pick-sizes`), the columns are left out,
+since they are undefined for those picks.
 
 The picked regions themselves (shape, size and positions, in the same format
 as a pick regions ``.yaml`` file, see :ref:`render-save-pick-regions`) can
@@ -182,8 +184,8 @@ pick, e.g., to plot its distribution in :doc:`/filter`.
 Save pick regions
 -----------------
 
-Saves the positions of the picked regions (yellow circles) in a .yaml file. It
-is possible to manually add regions or copy them from another pick regions
+Saves the picked regions (their shapes, sizes and positions) in a .yaml file.
+It is possible to manually add regions or copy them from another pick regions
 file with a text editor. The file always carries a ``Shape`` key and the
 format marker ``picasso_format`` (see :ref:`files-format-versions`); the
 remaining keys depend on the shape. All coordinates and all sizes are in nm:
@@ -201,6 +203,14 @@ remaining keys depend on the shape. All coordinates and all sizes are in nm:
   pick is not stored: it follows from their geometry and is worked out again
   when the file is loaded, so overlapping strokes always come back as a single
   pick.
+
+Picks of one shape but different sizes store a list with the size of each
+pick, in the order of the positions, e.g., ``Diameter (nm): [100.0, 160.0]``.
+Picks of different shapes (see :ref:`render-pick-sizes`) are stored with
+``Shape: Mixed`` and a ``Picks`` list, in which each pick has its own
+``Shape``, size (as above) and position: ``Center`` for a circle or square,
+``Center-Axis-Points``, ``Vertices`` or ``Corners`` for a single rectangle,
+polygon or box, and ``Strokes`` for the strokes of one brush pick.
 
 For example:
 
@@ -224,6 +234,20 @@ For example:
     - Width (nm): 80.0
       Path:
       - [1950.0, 3250.0]
+
+.. code-block:: yaml
+
+    Shape: Mixed
+    picasso_format: '1.0'
+    Picks:
+    - Shape: Circle
+      Diameter (nm): 100.0
+      Center: [1625.0, 3913.0]
+    - Shape: Rectangle
+      Width (nm): 80.0
+      Center-Axis-Points: [[5200.0, 7200.0], [6100.0, 7650.0]]
+    - Shape: Box
+      Corners: [[10400.0, 1300.0], [12415.0, 2899.0]]
 
 Pick regions saved before Picasso 1.0 (no ``picasso_format`` key) hold their
 coordinates in camera pixels; they are converted when loaded, see
@@ -251,13 +275,19 @@ Load pick regions
 
 Resets the current picked regions and loads regions from a .yaml file that
 contains pick regions. The ``.yaml`` file can also be dropped in the Render window.
+Every pick keeps the shape and size stored in the file. If the file holds
+picks of one shape, the pick shape in ``Tools > Tools settings`` switches to
+it, and so does the size if all picks share one, so that new picks match the
+loaded ones.
 
 .. dropdown:: Python
    :icon: code
    :class-container: api-example
 
-   Positions and the size (a diameter for circles) come back in nm.
-   ``pixelsize`` is needed only for files written before Picasso 1.0.
+   Positions and the size (a diameter for circles) come back in nm. Picks
+   of different shapes or sizes come with a list of the shape or size of
+   each pick, which every function taking picks accepts. ``pixelsize`` is
+   needed only for files written before Picasso 1.0.
 
    .. code-block:: python
 

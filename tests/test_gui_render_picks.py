@@ -429,7 +429,7 @@ class TestCircularPicksUseThePyramid:
 
     def test_no_index_blocks_are_built(self, circle_view, monkeypatch):
         view = circle_view
-        assert view.render_index[0] is not None
+        assert view._ensure_render_index(0) is not None
         monkeypatch.setattr(
             view,
             "index_locs",

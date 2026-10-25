@@ -666,9 +666,9 @@ To use it, open ``Postprocess > Spatial statistics > Ripley's H function...``:
 1. Choose the ``Channel`` (with several channels loaded). Leave ``Partner
    channel`` at ``None (one channel)``; choose a second channel for the cross
    function between two channels, see :ref:`render-cross-functions`.
-2. Choose the ``Regions``: the ``Picks`` (any pick shape; ``H`` is computed
-   in each pick and averaged over the picks with at least two localizations),
-   the ``Current view`` or the ``Whole field of view``.
+2. Choose the ``Regions``: the ``Picks`` (any pick shape, also mixed; ``H``
+   is computed in each pick and averaged over the picks with at least two
+   localizations), the ``Current view`` or the ``Whole field of view``.
 3. Set ``Max. radius (nm)``, which should be well below the size of the
    regions, and the number of ``Radius steps`` up to it.
 4. Set the number of ``Simulations``. Each region is filled with as many

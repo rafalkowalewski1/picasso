@@ -45,7 +45,12 @@ def source_key(view, source: str) -> tuple:
             "fov",
             (float(y_min), float(x_min), float(y_max), float(x_max)),
         )
-    return ("pick", repr(view._picks[0]), view._pick_shape, view._pick_size)
+    return (
+        "pick",
+        repr(view._picks[0]),
+        view._pick_shapes[0],
+        view._pick_sizes[0],
+    )
 
 
 N_GROUP_COLORS = render.N_GROUP_COLORS  # 8
@@ -1582,8 +1587,8 @@ class ViewRotation(QtWidgets.QLabel, idle.SpillableChannels):
         else:
             # save the pick information
             self.pick = w.view._picks[0]
-            self.pick_shape = w.view._pick_shape
-            self.pick_size = w.view._pick_size
+            self.pick_shape = w.view._pick_shapes[0]
+            self.pick_size = w.view._pick_sizes[0]
             self.viewport = self.fit_in_view_rotated(get_viewport=True)
         self._source_key = source_key(w.view, self._source)
 
@@ -3507,6 +3512,13 @@ class RotationWindow(QtWidgets.QMainWindow):
             ]
             self.window.view._picks = [new_pick]  # main window
             self.view_rot.pick = new_pick  # view rotation
+        # the main window keeps only the moved pick, with its own shape
+        # and size rather than those of the pick tool
+        self.window.view._set_picks(
+            self.window.view._picks,
+            self.view_rot.pick_shape,
+            self.view_rot.pick_size,
+        )
 
         self.window.view.update_scene()  # update scene in main window
 

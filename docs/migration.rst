@@ -1424,6 +1424,13 @@ attributes of the Render window need these:
        ``_pick_size``), ``View.map_to_movie``, ``max_movie_width`` and
        ``max_movie_height``, the drift (camera pixels)
      - The same in nm
+   * - ``View._pick_shape``, ``View._pick_size`` (the shape and size of
+       all picks)
+     - The shape and size of new picks (the pick tool). Picks can differ
+       in shape and size: those of each pick are in ``View._pick_shapes``
+       and ``View._pick_sizes``, and ``View._pick_args()`` returns the
+       ``picks``, ``pick_shape`` and ``pick_size`` arguments of the
+       functions that take picks
    * - A plugin that changes ``View.locs[channel]`` sets
        ``View.index_blocks[channel] = None``
      - ``View.invalidate_locs_index(channel)``, which also drops the new

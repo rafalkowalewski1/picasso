@@ -127,6 +127,7 @@
   "sync_groups",
   "unfold_localizations_square",
   "PICK_SHAPES",
+  "pick_shapes_and_sizes",
   "pick_areas",
   "locs_at",
   "locs_in_rectangle",

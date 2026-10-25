@@ -159,7 +159,7 @@ def test_polygons_extended_in_place_are_mirrored_as_copies(linked):
     view._pick_shape = "Polygon"
     view._picks = [[(130.0, 130.0), (650.0, 130.0)]]
     view.update_scene(picks_only=True)
-    assert secondary.view._pick_shape == "Polygon"
+    assert secondary.view._pick_shapes == ["Polygon"]
     assert secondary.view._picks == view._picks
     assert secondary.view._picks[0] is not view._picks[0]
     view._picks[0].append((650.0, 650.0))

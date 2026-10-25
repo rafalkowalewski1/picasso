@@ -24,8 +24,8 @@ group_input,"The original ``group`` value of each localization, kept when a step
 "n ","The number of localizations in this event, if localizations from consecutive frames have been linked, potentially diverging from the “len” column due to a transient dark time tolerance.","long "
 "dark ","The dark time preceding the event in frames, i.e., the number of frames without signal since the end of the previous event in the same group. Only available after computing dark times (e.g., “picasso dark”). Events without a preceding event are removed. Before Picasso 0.11.3, dark times were one frame longer.","long "
 "photon_rate ","The mean number of photons per frame, if localizations from consecutive frames have been linked. The total number of photons is set in the “photons” column. ","float "
-"x_pick_rot ","Position of the localization across the axis of the rectangular pick (perpendicular distance from it), in nm. Only available after saving rectangular pick(s). ",float
-"y_pick_rot ","Position of the localization along the axis of the rectangular pick, measured from its start point, in nm. Used for the pick profile. Only available after saving rectangular pick(s). ",float
+"x_pick_rot ","Position of the localization across the axis of the rectangular pick (perpendicular distance from it), in nm. Only available after saving rectangular pick(s), when all picks are rectangles. ",float
+"y_pick_rot ","Position of the localization along the axis of the rectangular pick, measured from its start point, in nm. Used for the pick profile. Only available after saving rectangular pick(s), when all picks are rectangles. ",float
 "photons_unc ","The uncertainty of the photons estimation as estimated by the Cramer-Rao Lower Bound of the Maximum Likelihood fit. ",float
 "bg_unc ","The uncertainty of the background estimation as estimated by the Cramer-Rao Lower Bound of the Maximum Likelihood fit. ",float
 "sx_unc ","The uncertainty of the sx estimation (nm) as estimated by the Cramer-Rao Lower Bound of the Maximum Likelihood fit. ",float

@@ -388,7 +388,8 @@ Chooses which attributes the linked windows share:
   :ref:`Per-channel contrast <render-channel-contrast>`; a channel takes the contrast of the channel
   of the same file in the other windows), colormap, render by property, scale
   bar, grid, minimap, background and legend,
-- pick shape and size, and the picks themselves,
+- the shape and size of new picks, and the picks themselves (each with its
+  own shape and size),
 - slicing (the slice position is matched in nm).
 
 Channel colors and visibility are never shared.

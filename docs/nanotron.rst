@@ -38,7 +38,11 @@ Train a MLP model for nanopattern prediction using nanoTRON.
      model ``.yaml`` records it as ``Display pixel size (nm)`` and the pick
      size as ``Pick Diameter (nm)`` (models trained before Picasso 1.0
      recorded ``Oversampling`` and ``Pick Diameter`` in camera pixels; they
-     are converted when loaded, see :ref:`files-legacy`).
+     are converted when loaded, see :ref:`files-legacy`). The training files
+     need circular picks; of picks with different diameters, the largest is
+     used, so that every pick fits into the images. Files picked with other
+     shapes, or with a mix of shapes, record no pick diameter and are
+     refused.
    - Augment the training data sets via the check button
      ``Expand Training Set``. Here every data set point is rotated eleven
      times.
@@ -81,7 +85,8 @@ Train a MLP model for nanopattern prediction using nanoTRON.
       X, y = [], []
       for label, path in enumerate(["class0_picked.hdf5", "class1_picked.hdf5"]):
           locs, info = io.load_locs(path)
-          pick_diameter = lib.get_from_metadata(info, "Pick Diameter (nm)")   # nm
+          # nm; one diameter per pick if they differ, of which the largest
+          pick_diameter = np.max(lib.get_from_metadata(info, "Pick Diameter (nm)"))
           for group in locs["group"].unique():
               img = nanotron.roi_to_img(
                   locs, info, pick=int(group), pick_diameter=pick_diameter,

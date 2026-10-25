@@ -260,7 +260,7 @@ class TestPickedLocs:
         assert out == []
 
     def test_invalid_shape_raises(self, locs, info, origami_picks):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="Unrecognized pick shape"):
             postprocess.picked_locs(
                 locs,
                 info,
@@ -1065,7 +1065,7 @@ class TestRemoveLocsInPicks:
         assert len(out) == len(locs) - n_inside
 
     def test_invalid_shape_raises(self, locs, info):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="Unrecognized pick shape"):
             postprocess.remove_locs_in_picks(
                 locs.copy(),
                 info,
@@ -2061,7 +2061,7 @@ class TestAlign:
     def test_align_from_picked_invalid_shape_raises(
         self, locs_copy, info, origami_picks
     ):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="Unrecognized pick shape"):
             postprocess.align_from_picked(
                 [locs_copy, locs_copy.copy()],
                 [info, info],

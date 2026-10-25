@@ -9263,6 +9263,8 @@ class Window(QtWidgets.QMainWindow):
             lib.show_load_error(self, path, error)
             return
         if shape != "Circle":
+            if not isinstance(shape, str):
+                shape = "picks of different shapes"
             QtWidgets.QMessageBox.warning(
                 self,
                 "Unsupported shape",

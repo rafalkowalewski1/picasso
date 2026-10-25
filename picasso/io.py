@@ -2173,14 +2173,34 @@ def load_structures(path: str) -> tuple[list[spinna.Structure], list[str]]:
     return structures, targets
 
 
+# "Shape" of a picks file whose picks have different shapes; its
+# "Picks" list then describes each pick on its own, see ``picks_dict``
+_MIXED_PICKS_SHAPE = "Mixed"
+
+# per shape: the key holding one pick's coordinates in a picks file
+# with picks of different shapes, and the key of the pick size
+_MIXED_PICK_KEYS = {
+    "Circle": ("Center", "Diameter"),
+    "Rectangle": ("Center-Axis-Points", "Width"),
+    "Polygon": ("Vertices", None),
+    "Square": ("Center", "Side Length"),
+    "Box": ("Corners", None),
+    "Brush": ("Strokes", None),
+}
+
+
 def load_picks(
     path: str, pixelsize: float | None = None
-) -> tuple[list, str, float | None]:
+) -> tuple[list, str | list[str], float | list[float | None] | None]:
     """Load pick regions saved by Picasso Render.
 
     Positions and sizes are returned in nm. Files written before Picasso
     1.0 store the positions in camera pixels; they are converted with
     ``pixelsize`` (see ``picasso.legacy``).
+
+    Picks of different shapes or sizes come with one shape or size per
+    pick, which every function taking picks accepts (see
+    ``lib.pick_shapes_and_sizes``).
 
     Parameters
     ----------
@@ -2197,30 +2217,32 @@ def load_picks(
         window: centers for circles and squares, pairs of end points for
         rectangles, vertex lists for polygons, corner pairs for boxes and
         lists of ``(width, path)`` strokes for brush picks.
-    shape : str
-        The shape of the picks, one of ``lib.PICK_SHAPES``.
-    size : float or None
+    shape : str or list of str
+        The shape of the picks, one of ``lib.PICK_SHAPES``, or the shape
+        of each pick if they differ.
+    size : float, list or None
         The size of the picks in nm: the diameter of circles, the width
-        of rectangles, the side length of squares. None for polygonal,
-        box and brush picks (size not defined).
+        of rectangles, the side length of squares; the size of each pick
+        (None for those without a size) if they differ. None for
+        polygonal, box and brush picks (size not defined).
 
     Raises
     ------
     ValueError
         If the file is not recognized as a picks file, if the pick
         shape is unknown, or if a shape that needs a size does not
-        carry one.
+        carry a positive one.
     MissingPixelsizeError
         If the file was written before Picasso 1.0 and ``pixelsize`` is
         None.
+    FileFormatError
+        If the file is in a newer major format version, see
+        ``check_format_version``.
 
     Examples
     --------
     >>> from picasso import io
     >>> picks, shape, diameter = io.load_picks("movie_locs_picks.yaml")
-    FileFormatError
-        If the file is in a newer major format version, see
-        ``check_format_version``.
     """
     _check_path_length(path)
     assert path.endswith(".yaml"), "Picks should be stored in a .yaml file."
@@ -2254,19 +2276,32 @@ def load_picks(
             )
         regions = legacy.picks_to_nm(regions, pixelsize)
 
+    if shape == _MIXED_PICKS_SHAPE:
+        picks, shapes, sizes = [], [], []
+        for entry in regions.get("Picks", []):
+            pick, size = _pick_from_entry(entry)
+            picks.append(pick)
+            shapes.append(entry["Shape"])
+            sizes.append(size)
+        shape, size = lib._compact_pick_shapes_and_sizes(shapes, sizes)
+        if shape is None:  # no picks: one shape per pick
+            shape = []
+        lib.pick_shapes_and_sizes(picks, shape, size)  # e.g., a size of 0
+        return picks, shape, size
+
     # assign loaded picks and pick size
     if shape == "Circle":
         picks = regions["Centers"]
-        size = _pick_size_from_regions(regions, "Diameter")
+        size = _pick_size_from_regions(regions, "Diameter", len(picks))
     elif shape == "Rectangle":
         picks = regions["Center-Axis-Points"]
-        size = _pick_size_from_regions(regions, "Width")
+        size = _pick_size_from_regions(regions, "Width", len(picks))
     elif shape == "Polygon":
         picks = regions["Vertices"]
         size = None
     elif shape == "Square":
         picks = regions["Centers"]
-        size = _pick_size_from_regions(regions, "Side Length")
+        size = _pick_size_from_regions(regions, "Side Length", len(picks))
     elif shape == "Box":
         # each box carries its own extent, so there is no size
         picks = regions["Corners"]
@@ -2283,15 +2318,35 @@ def load_picks(
         size = None
     else:
         raise ValueError(f"Unrecognized pick shape: {shape}")
+    lib.pick_shapes_and_sizes(picks, shape, size)  # e.g., a size of 0
     return picks, shape, size
 
 
-def _pick_size_from_regions(regions: dict, key: str) -> float:
+def _pick_from_entry(entry: dict) -> tuple[list, float | None]:
+    """Return one pick (nm) and its size from an entry of the "Picks"
+    list of a picks file with picks of different shapes."""
+    shape = entry.get("Shape")
+    if shape not in _MIXED_PICK_KEYS:
+        raise ValueError(f"Unrecognized pick shape: {shape}")
+    key, size_key = _MIXED_PICK_KEYS[shape]
+    pick = entry[key]
+    if shape == "Brush":
+        pick = [(stroke["Width (nm)"], stroke["Path"]) for stroke in pick]
+    size = None
+    if size_key is not None:
+        size = _pick_size_from_regions(entry, size_key)
+    return pick, size
+
+
+def _pick_size_from_regions(
+    regions: dict, key: str, n_picks: int | None = None
+) -> float | list[float]:
     """Return a pick size from a loaded picks file, in nm.
 
     Sizes are stored in nm under ``"<key> (nm)"`` (files written before
     Picasso 0.6 stored them in camera pixels under the bare ``key``,
-    which ``legacy.picks_to_nm`` renames).
+    which ``legacy.picks_to_nm`` renames): one number for all picks, or
+    a list with the size of each pick.
 
     Parameters
     ----------
@@ -2299,39 +2354,63 @@ def _pick_size_from_regions(regions: dict, key: str) -> float:
         Contents of the picks .yaml file, in nm.
     key : str
         Name of the size entry, e.g., "Diameter".
+    n_picks : int, optional
+        Number of picks in the file, which a list of sizes must match.
+        Default is None (no list expected).
 
     Returns
     -------
-    size : float
-        Pick size in nm.
+    size : float or list of float
+        Pick size in nm, or the size of each pick.
 
     Raises
     ------
     ValueError
-        If the entry is not present.
+        If the entry is not present, or a list of sizes does not hold
+        one size per pick.
     """
-    if f"{key} (nm)" in regions:
-        return float(regions[f"{key} (nm)"])
-    raise ValueError(
-        f"Picks file is missing the pick size entry '{key} (nm)'."
-    )
+    if f"{key} (nm)" not in regions:
+        raise ValueError(
+            f"Picks file is missing the pick size entry '{key} (nm)'."
+        )
+    size = regions[f"{key} (nm)"]
+    if isinstance(size, list) and n_picks is not None:
+        if len(size) != n_picks:
+            raise ValueError(
+                f"Picks file lists {len(size)} sizes ('{key} (nm)') for "
+                f"{n_picks} picks."
+            )
+        return [float(_) for _ in size]
+    return float(size)
 
 
-def picks_dict(picks: list, shape: str, size: float | None = None) -> dict:
+def picks_dict(
+    picks: list,
+    shape: str | list[str],
+    size: float | list[float | None] | None = None,
+) -> dict:
     """The dictionary describing pick regions, in the format of a picks
     .yaml file (see ``load_picks``).
+
+    Picks of one shape are stored with one list of positions and their
+    size: one number, or a list with the size of each pick if the sizes
+    differ. Picks of different shapes are stored with ``"Shape":
+    "Mixed"`` and a ``"Picks"`` list, where each pick has its own shape,
+    position and size.
 
     Parameters
     ----------
     picks : list
         Picks in the format of the Render window (positions in nm), see
         ``load_picks``.
-    shape : str
-        The shape of the picks, one of ``lib.PICK_SHAPES``.
-    size : float, optional
-        The size of the picks in nm: the diameter of circles, the width
-        of rectangles, the side length of squares. Not needed (ignored)
-        for polygons, boxes and brush picks. Default is None.
+    shape : str or list of str
+        The shape of the picks, one of ``lib.PICK_SHAPES``, or the shape
+        of each pick.
+    size : float, list or None, optional
+        The size of the picks in nm, or the size of each pick: the
+        diameter of circles, the width of rectangles, the side length of
+        squares. Not needed (ignored) for polygons, boxes and brush
+        picks. Default is None.
 
     Returns
     -------
@@ -2341,45 +2420,67 @@ def picks_dict(picks: list, shape: str, size: float | None = None) -> dict:
     Raises
     ------
     ValueError
-        If the shape is unknown or a shape that needs a size has none.
+        If a shape is unknown or a shape that needs a size has none.
     """
-    if shape not in lib.PICK_SHAPES:
-        raise ValueError(f"Unrecognized pick shape: {shape}")
-    if shape in ("Circle", "Rectangle", "Square") and size is None:
-        raise ValueError(f"{shape} picks need a size.")
+    shapes, sizes = lib.pick_shapes_and_sizes(picks, shape, size)
+    if isinstance(shape, str):
+        # no picks: a size is still needed for the file to load
+        if not len(picks) and shape not in lib.PICK_SHAPES_WITHOUT_SIZE:
+            lib.pick_shapes_and_sizes([None], shape, size)
+    else:
+        shape, _ = lib._compact_pick_shapes_and_sizes(shapes, sizes)
+        if shape is None:  # no picks
+            shape = _MIXED_PICKS_SHAPE
 
     def point(p) -> list[float]:
         return [float(p[0]), float(p[1])]
 
-    regions = {}
-    if shape == "Circle":
-        regions["Diameter (nm)"] = float(size)
-        regions["Centers"] = [point(_) for _ in picks]
-    elif shape == "Rectangle":
-        regions["Width (nm)"] = float(size)
-        regions["Center-Axis-Points"] = [
-            [point(a), point(b)] for a, b in picks
-        ]
-    elif shape == "Polygon":
-        regions["Vertices"] = [
-            [point(v) for v in pick] for pick in picks if len(pick)
-        ]
-    elif shape == "Square":
-        regions["Side Length (nm)"] = float(size)
-        regions["Centers"] = [point(_) for _ in picks]
-    elif shape == "Box":
-        # each box carries its own extent, so no size is saved
-        regions["Corners"] = [[point(a), point(b)] for a, b in picks]
-    elif shape == "Brush":
-        # a flat, ordered stroke list: which strokes form one pick
-        # follows from their geometry and is re-derived on loading
-        regions["Strokes"] = [
+    def coordinates(pick, shape: str):
+        if shape in ("Circle", "Square"):
+            return point(pick)
+        if shape in ("Rectangle", "Box"):
+            return [point(pick[0]), point(pick[1])]
+        if shape == "Polygon":
+            return [point(v) for v in pick]
+        return [  # brush strokes
             {
                 "Width (nm)": float(stroke[0]),
                 "Path": [point(_) for _ in stroke[1]],
             }
-            for pick in picks
             for stroke in pick
+        ]
+
+    regions = {}
+    if not isinstance(shape, str) or shape == _MIXED_PICKS_SHAPE:
+        regions["Picks"] = []
+        for pick, shape_, size_ in zip(picks, shapes, sizes):
+            if shape_ == "Polygon" and not len(pick):
+                continue
+            key, size_key = _MIXED_PICK_KEYS[shape_]
+            entry = {"Shape": shape_}
+            if size_key is not None:
+                entry[f"{size_key} (nm)"] = size_
+            entry[key] = coordinates(pick, shape_)
+            regions["Picks"].append(entry)
+        shape = _MIXED_PICKS_SHAPE
+    elif shape == "Brush":
+        # a flat, ordered stroke list: which strokes form one pick
+        # follows from their geometry and is re-derived on loading
+        regions["Strokes"] = [
+            stroke for pick in picks for stroke in coordinates(pick, shape)
+        ]
+    else:
+        key, size_key = _MIXED_PICK_KEYS[shape]
+        if size_key is not None:
+            _, sizes_ = lib._compact_pick_shapes_and_sizes(shapes, sizes)
+            regions[f"{size_key} (nm)"] = (
+                float(size) if sizes_ is None else sizes_
+            )
+        key = "Centers" if shape in ("Circle", "Square") else key
+        regions[key] = [
+            coordinates(pick, shape)
+            for pick in picks
+            if shape != "Polygon" or len(pick)
         ]
     regions["Shape"] = shape
     regions[FORMAT_VERSION_ATTR] = FORMAT_VERSION
@@ -2387,7 +2488,10 @@ def picks_dict(picks: list, shape: str, size: float | None = None) -> dict:
 
 
 def save_picks(
-    path: str, picks: list, shape: str, size: float | None = None
+    path: str,
+    picks: list,
+    shape: str | list[str],
+    size: float | list[float | None] | None = None,
 ) -> None:
     """Save pick regions to a .yaml file that ``load_picks`` reads.
 
@@ -2398,16 +2502,27 @@ def save_picks(
     picks : list
         Picks in the format of the Render window (positions in nm), see
         ``load_picks``.
-    shape : str
-        The shape of the picks, one of ``lib.PICK_SHAPES``.
-    size : float, optional
-        The size of the picks in nm (diameter, width or side length);
-        not needed for polygons, boxes and brush picks. Default is None.
+    shape : str or list of str
+        The shape of the picks, one of ``lib.PICK_SHAPES``, or the shape
+        of each pick, see ``picks_dict``.
+    size : float, list or None, optional
+        The size of the picks in nm (diameter, width or side length), or
+        the size of each pick; not needed for polygons, boxes and brush
+        picks. Default is None.
 
     Examples
     --------
     >>> from picasso import io
     >>> io.save_picks("picks.yaml", [(1200.0, 850.5)], "Circle", size=100.0)
+
+    Circles of different diameters and a box:
+
+    >>> io.save_picks(
+    ...     "picks.yaml",
+    ...     [(1200.0, 850.5), (400.0, 230.0), ((0.0, 0.0), (90.0, 60.0))],
+    ...     ["Circle", "Circle", "Box"],
+    ...     size=[100.0, 140.0, None],
+    ... )
     """
     save_yaml(path, picks_dict(picks, shape, size))
 

@@ -2120,25 +2120,26 @@ def _window_with_a_fiducial(tmp_path) -> gui_render.Window:
 
 def test_pick_fiducials(qt_offscreen, tmp_path):
     window = _window_with_a_fiducial(tmp_path)
-    window.view._pick_shape = "Circle"
+    # the fiducials are circles, whatever the pick tool
+    window.tools_settings_dialog.pick_shape.setCurrentText("Square")
     window.view.pick_fiducials()
     ((x, y),) = window.view._picks
     assert (x, y) == pytest.approx((4000.0, 3000.0), abs=100.0)
-    assert window.view._pick_size > 500.0  # nm
+    assert window.view._pick_shapes == ["Circle"]
+    assert window.view._pick_shape == "Circle"
+    assert window.view._pick_sizes[0] > 500.0  # nm
+    assert window.view._pick_size == window.view._pick_sizes[0]
     window.close()
 
 
 def test_pick_fiducials_refusals(window, answers):
     answers.record_messages()
-    window.view._pick_shape = "Square"
-    window.view.pick_fiducials()
     window.view._pick_shape = "Circle"
     window.view._picks = [(100.0, 100.0)]
     window.view.pick_fiducials()
     window.view._picks = []
     window.view.pick_fiducials()  # no fiducial in the clusters
     assert answers.messages == [
-        "Please select circular pick before picking fiducials.",
         "Please remove all picks before picking fiducials.",
         "No fiducials found, manual picking is required.",
     ]

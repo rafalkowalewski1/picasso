@@ -37,8 +37,8 @@ Rendering
 Display
     Scale bar, grid, minimap, background color and legend.
 Picks
-    Pick shape and size, or the picks themselves (which include their
-    shape and size).
+    Shape and size of new picks (the pick tool), or the picks
+    themselves (each with its own shape and size).
 Slicing
     Slicing on/off, slice thickness and slice position; the position is
     matched in nm, since the slice bins depend on each window's data.
@@ -202,7 +202,7 @@ CATEGORIES = (
         "pick_geometry",
         "Pick shape and size",
         "Picks",
-        "Pick shape and dimensions.",
+        "Shape and size of new picks.",
     ),
     LinkCategory(
         "picks",
@@ -392,7 +392,8 @@ def matching_channels(
 
 def picks_signature(view) -> tuple:
     """Cheap fingerprint of a view's picks that changes whenever picks
-    are added, removed, replaced or (polygons) extended in place.
+    are added, removed, replaced, resized or (polygons) extended in
+    place.
 
     Parameters
     ----------
@@ -402,16 +403,17 @@ def picks_signature(view) -> tuple:
     Returns
     -------
     signature : tuple
-        Pick shape, number of picks and each pick's identity and, for
-        picks stored as lists, length.
+        Number of picks, each pick's identity and, for picks stored as
+        lists, length, and the shape and size of each pick.
     """
     return (
-        view._pick_shape,
         len(view._picks),
         tuple(
             (id(pick), len(pick) if isinstance(pick, list) else -1)
             for pick in view._picks
         ),
+        tuple(view._pick_shapes),
+        tuple(view._pick_sizes),
     )
 
 
@@ -843,10 +845,11 @@ class LinkGroup(QtCore.QObject):
             d.update_viewport()
 
     def _apply_picks(self, src, dst) -> None:
-        # set the shape first, such that the shape combo box does not
-        # ask to delete the other window's picks
-        dst.view._pick_shape = src.view._pick_shape
-        dst.view._picks = copy_picks(src.view._picks)
+        dst.view._set_picks(
+            copy_picks(src.view._picks),
+            src.view._pick_shapes,
+            src.view._pick_sizes,
+        )
         self.apply("pick_geometry", src, dst)
         self._pick_signatures[dst] = picks_signature(dst.view)
         dst.view.update_pick_info_short()

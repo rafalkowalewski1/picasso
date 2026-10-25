@@ -24,19 +24,21 @@ Pick similar
 Shortcut: :kbd:`Ctrl+Shift+P`
 
 Automatically identifies picks that are similar to the current picks.
-Available for circular, square, rectangular and box picks. New circular and
-square picks take the current size. For rectangular picks, the new picks take
-the median length of the current picks and are oriented along the
-localizations they contain. New box picks take the median width and height of
-the current picks; the boxes you drew yourself are kept as drawn. See
-:ref:`render-picking-steps` for the similarity measures.
+Available for circular, square, rectangular and box picks, all of one shape.
+Picks of different sizes are searched for with their median size (diameter,
+side length or width), which the new picks take; the picks you drew keep
+theirs. For rectangular picks, the new picks take the median length of the
+current picks and are oriented along the localizations they contain. New box
+picks take the median width and height of the current picks; the boxes you
+drew yourself are kept as drawn. See :ref:`render-picking-steps` for the
+similarity measures.
 
 .. dropdown:: Python
    :icon: code
    :class-container: api-example
 
-   ``pick_size`` is the diameter for circles, in nm; ``std_range`` is
-   ``Pick similar ± range``.
+   ``pick_size`` is the diameter for circles, in nm, or one size per pick,
+   of which the median is used; ``std_range`` is ``Pick similar ± range``.
 
    .. code-block:: python
 
@@ -96,6 +98,9 @@ densest spots of the image. Requires no existing picks.
    99th percentile of the pixel values as the minimum net gradient.
 3. Only spots with more localizations than 80% of the number of frames are
    kept, and each gets a circular pick with a diameter of the box size.
+
+The pick shape in ``Tools > Tools settings`` switches to ``Circle`` with the
+box size as the ``Diameter``, so that further picks match the fiducials.
 
 .. dropdown:: Python
    :icon: code
@@ -225,8 +230,10 @@ Clears all currently selected picks.
 Subtract pick regions
 ---------------------
 
-Allows loading another pick regions file to subtract from the currently
-selected picks. Can be slow for a large number of picks.
+Loads another pick regions file and removes the current picks whose centers
+lie inside one of its circles. Only for circular picks, both in Render and in
+the file; the remaining picks keep their sizes. Can be slow for a large number
+of picks.
 
 .. _render-cluster-in-pick:
 

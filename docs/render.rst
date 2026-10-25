@@ -91,8 +91,9 @@ tool, selected in the ``Tools`` menu:
   button to zoom into a rectangle, drag with the right button to pan.
 - :ref:`Pick <render-pick>` (:kbd:`Ctrl+P`) selects regions of localizations
   for further analysis (see :doc:`render/picking`): the left button draws a
-  pick, the right button removes the pick under the cursor (for polygon
-  picks, it removes the last vertex instead).
+  pick, the right button removes the pick under the cursor, whatever its
+  shape (with the polygon shape selected, it removes the last vertex of the
+  polygon being drawn instead).
 - :ref:`Measure <render-measure>` (:kbd:`Ctrl+M`) measures distances on the
   image: the left button adds a point, the right button finishes the current
   measurement or, clicked again, deletes the last one.
@@ -100,8 +101,8 @@ tool, selected in the ``Tools`` menu:
   the localizations of the selected channels, e.g., to register channels by
   eye. The right button has no function here.
 
-The pick shape and size, the channels moved and the appearance of the tools
-are set in ``Tools > Tools settings...`` (:kbd:`Ctrl+T`); see
+The shape and size of new picks, the channels moved and the appearance of the
+tools are set in ``Tools > Tools settings...`` (:kbd:`Ctrl+T`); see
 :ref:`render-tools-settings`.
 
 The following controls move the view; those marked *every tool* also work
@@ -194,7 +195,8 @@ Topics
       :link: render/picking
       :link-type: doc
 
-      The six pick shapes, picking, Pick similar and saving picks.
+      The six pick shapes, mixing shapes and sizes, picking, Pick similar and
+      saving picks.
 
    .. grid-item-card:: :octicon:`gear;1.5em;sd-mr-1` Tools
       :link: render/tools

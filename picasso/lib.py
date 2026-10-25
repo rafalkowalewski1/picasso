@@ -21,7 +21,7 @@ import sys
 import warnings
 from copy import deepcopy
 from typing import Any, TypeAlias, Literal, Protocol, runtime_checkable
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from asyncio import Future
 
 import numba
@@ -55,6 +55,7 @@ __all__ = [
     "unfold_localizations_square",
     # regions
     "PICK_SHAPES",
+    "pick_shapes_and_sizes",
     "pick_areas",
     "locs_at",
     "locs_in_rectangle",
@@ -91,14 +92,15 @@ _dialogs = []
 REQUIRED_COLUMNS = ["frame", "x", "y", "z", "lpx", "lpy", "lpz"]
 
 #: Shapes that a pick region can take. "Circle" and "Square" are placed
-#: by a single click and share one global size; "Rectangle" is an
-#: oriented band of a global width drawn along its center axis;
-#: "Polygon", "Box" and "Brush" carry their own extent and have no
-#: global size.
+#: by a single click and have a size (diameter, side length);
+#: "Rectangle" is an oriented band of a given width drawn along its
+#: center axis; "Polygon", "Box" and "Brush" carry their own extent and
+#: have no size. Picks of different shapes and sizes can be mixed, see
+#: ``pick_shapes_and_sizes``.
 PICK_SHAPES = ("Circle", "Rectangle", "Polygon", "Square", "Box", "Brush")
 
-#: Pick shapes whose extent is defined per pick rather than by a single
-#: global size, i.e., those for which ``pick_size`` is None.
+#: Pick shapes whose extent is defined by the pick's coordinates rather
+#: than by a size, i.e., those for which ``pick_size`` is None.
 PICK_SHAPES_WITHOUT_SIZE = ("Polygon", "Box", "Brush")
 
 # Type alias
@@ -1541,7 +1543,7 @@ def _fit_canvas_axis(
 
 
 def translate_picks(
-    picks: list, shape: str | None, dx: float, dy: float
+    picks: list, shape: str | list[str] | None, dx: float, dy: float
 ) -> list:
     """Translate picks by ``(dx, dy)`` nm, e.g., to follow
     localizations moved by ``fit_canvas``.
@@ -1552,8 +1554,9 @@ def translate_picks(
         Picks in the format of the Render window (see
         ``gui.render.View._picks``).
     shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
-            "Brush"} or None
-        Shape of the picks. None is allowed only with no picks.
+            "Brush"}, list of str or None
+        Shape of the picks, or one shape per pick (see
+        ``pick_shapes_and_sizes``). None is allowed only with no picks.
     dx, dy : float
         Translation in nm.
 
@@ -1567,20 +1570,23 @@ def translate_picks(
     def point(p):
         return (p[0] + dx, p[1] + dy)
 
+    def translate(pick, shape):
+        if shape in ("Circle", "Square"):
+            return point(pick)
+        if shape in ("Rectangle", "Box"):
+            return (point(pick[0]), point(pick[1]))
+        if shape == "Polygon":
+            return [point(v) for v in pick]
+        if shape == "Brush":
+            return [(width, [point(p) for p in path]) for width, path in pick]
+        raise ValueError(f"Unrecognized pick shape: {shape}")
+
     if not len(picks):
         return []
-    if shape in ("Circle", "Square"):
-        return [point(p) for p in picks]
-    if shape in ("Rectangle", "Box"):
-        return [(point(a), point(b)) for a, b in picks]
-    if shape == "Polygon":
-        return [[point(v) for v in pick] for pick in picks]
-    if shape == "Brush":
-        return [
-            [(width, [point(p) for p in path]) for width, path in pick]
-            for pick in picks
-        ]
-    raise ValueError(f"Unrecognized pick shape: {shape}")
+    shapes = [shape] * len(picks) if isinstance(shape, str) else shape
+    if shapes is None or len(shapes) != len(picks):
+        raise ValueError("Give one pick shape, or one shape per pick.")
+    return [translate(pick, s) for pick, s in zip(picks, shapes)]
 
 
 def get_colors(n_channels):
@@ -3700,22 +3706,20 @@ def _pick_areas_polygon(
     Returns
     -------
     areas : FloatArray1D
-        Pick areas.
+        Pick areas; NaN for polygons that are not closed.
     """
-    areas = []
+    areas = np.full(len(picks), np.nan)
     for i, pick in enumerate(picks):
         if len(pick) < 3 or pick[0] != pick[-1]:  # not a closed polygon
             continue
         X, Y = get_pick_polygon_corners(pick)
-        areas.append(polygon_area(X, Y))
-    areas = np.array(areas)
-    areas = areas[areas > 0]  # remove open polygons
+        areas[i] = polygon_area(X, Y)
     return areas
 
 
 def _pick_areas_rectangle(
     picks: list[list[tuple[float, float]]],
-    w: float,
+    w: float | FloatArray1D,
 ) -> FloatArray1D:
     """Return pick areas for each pick in picks.
 
@@ -3724,18 +3728,19 @@ def _pick_areas_rectangle(
     picks : list
         List of picks, each pick is a list of coordinates of the
         rectangle corners.
-    w : float
-        Pick width.
+    w : float or FloatArray1D
+        Pick width, or the width of each pick.
 
     Returns
     -------
     areas : FloatArray1D
         Pick areas, same units as ``w``.
     """
+    w = np.broadcast_to(np.asarray(w, dtype=np.float64), (len(picks),))
     areas = np.zeros(len(picks))
     for i, pick in enumerate(picks):
         (xs, ys), (xe, ye) = pick
-        areas[i] = w * np.sqrt((xe - xs) ** 2 + (ye - ys) ** 2)
+        areas[i] = w[i] * np.sqrt((xe - xs) ** 2 + (ye - ys) ** 2)
     return areas
 
 
@@ -3850,12 +3855,120 @@ def _brush_bounds(
     return float(x_min), float(x_max), float(y_min), float(y_max)
 
 
+def pick_shapes_and_sizes(
+    picks: list,
+    pick_shape: str | Sequence[str] | None,
+    pick_size: float | Sequence[float | None] | None = None,
+) -> tuple[list[str], list[float | None]]:
+    """Return the shape and the size of every pick, after checking them.
+
+    Functions that take picks accept one shape (``pick_shape``) and one
+    size (``pick_size``) for all picks, or a sequence with one entry per
+    pick, so that picks of different shapes and sizes can be mixed.
+    This resolves both arguments into one entry per pick.
+
+    Parameters
+    ----------
+    picks : list
+        Picks (nm) in the format of their shapes, see
+        ``io.load_picks``.
+    pick_shape : str, sequence of str or None
+        Shape of all picks, one of ``PICK_SHAPES``, or the shape of each
+        pick. None is allowed only with no picks.
+    pick_size : float, sequence of float or None, optional
+        Size of all picks in nm, or the size of each pick: the diameter
+        of circles, the width of rectangles and the side length of
+        squares. Ignored (returned as None) for polygons, boxes and
+        brush picks, which carry their own extent. Default is None.
+
+    Returns
+    -------
+    shapes : list of str
+        Shape of each pick.
+    sizes : list of float or None
+        Size of each pick in nm, None for polygons, boxes and brush
+        picks.
+
+    Raises
+    ------
+    ValueError
+        If a shape is unknown, if a sequence does not hold one entry
+        per pick, or if a circle, rectangle or square has no positive
+        size.
+
+    Examples
+    --------
+    >>> from picasso import lib
+    >>> picks = [(150.0, 80.0), (400.0, 230.0), ((0.0, 0.0), (90.0, 60.0))]
+    >>> lib.pick_shapes_and_sizes(
+    ...     picks, ["Circle", "Circle", "Box"], [100.0, 140.0, None]
+    ... )
+    (['Circle', 'Circle', 'Box'], [100.0, 140.0, None])
+    """
+    n_picks = len(picks)
+    if isinstance(pick_shape, str) or pick_shape is None:
+        if pick_shape is None and n_picks:
+            raise ValueError("The shape of the picks (pick_shape) is needed.")
+        shapes = [pick_shape] * n_picks
+        checked = [pick_shape] if pick_shape is not None else []
+    else:
+        shapes = list(pick_shape)
+        checked = shapes
+        if len(shapes) != n_picks:
+            raise ValueError(
+                f"pick_shape holds {len(shapes)} shapes for {n_picks} picks."
+            )
+    for shape in checked:
+        if shape not in PICK_SHAPES:
+            raise ValueError(
+                f"Unrecognized pick shape: {shape}. Choose one of "
+                f"{PICK_SHAPES}."
+            )
+    if np.ndim(pick_size) == 0:  # one size (or None) for all picks
+        sizes = [pick_size] * n_picks
+    else:
+        sizes = list(pick_size)
+        if len(sizes) != n_picks:
+            raise ValueError(
+                f"pick_size holds {len(sizes)} sizes for {n_picks} picks."
+            )
+    for i, (shape, size) in enumerate(zip(shapes, sizes)):
+        if shape in PICK_SHAPES_WITHOUT_SIZE:
+            sizes[i] = None
+            continue
+        try:
+            value = float(size)
+        except (TypeError, ValueError):
+            value = np.nan
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(
+                f"{shape} picks need a size (pick_size, positive, in nm), "
+                f"got {size!r}."
+            )
+        sizes[i] = value
+    return shapes, sizes
+
+
+def _compact_pick_shapes_and_sizes(
+    shapes: list[str], sizes: list[float | None]
+) -> tuple[str | list[str] | None, float | list[float | None] | None]:
+    """Reverse ``pick_shapes_and_sizes``: the shape (size) shared by all
+    picks, or the list with one entry per pick if they differ. None for
+    no picks."""
+    if not len(shapes):
+        return None, None
+    shape = shapes[0] if all(_ == shapes[0] for _ in shapes) else list(shapes)
+    size = sizes[0] if all(_ == sizes[0] for _ in sizes) else list(sizes)
+    return shape, size
+
+
 def pick_areas(
     picks: list[tuple],
-    pick_shape: Literal[
-        "Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"
-    ],
-    pick_size: float | None,
+    pick_shape: (
+        Literal["Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"]
+        | Sequence[str]
+    ),
+    pick_size: float | Sequence[float | None] | None,
 ) -> FloatArray1D:
     """Get pick areas for each pick in picks.
 
@@ -3863,36 +3976,41 @@ def pick_areas(
     ----------
     picks : list of tuples
         Coordinates of picks in nm.
-    pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", "Brush"}
-        Shape of picks.
-    pick_size : float or None
-        Size of picks in nm. For circles - diameters. For
-        rectangles - width. For squares - side length. For polygons,
-        boxes and brush picks - ignored.
+    pick_shape : {"Circle", "Rectangle", "Polygon", "Square", "Box", \
+            "Brush"} or sequence of str
+        Shape of picks, or the shape of each pick (see
+        ``pick_shapes_and_sizes``).
+    pick_size : float, sequence of float or None
+        Size of picks in nm, or the size of each pick. For circles -
+        diameters. For rectangles - width. For squares - side length.
+        For polygons, boxes and brush picks - ignored.
 
     Returns
     -------
     areas : FloatArray1D
-        Pick areas in nm squared.
+        Pick areas in nm squared. Polygons that are not closed are left
+        out, like in ``postprocess.picked_locs``.
     """
-    if pick_shape == "Circle":
-        r = pick_size / 2
-        # same area for all picks
-        areas = np.pi * r**2 * np.ones(len(picks))
-    elif pick_shape == "Rectangle":
-        areas = _pick_areas_rectangle(picks, pick_size)
-    elif pick_shape == "Polygon":
-        areas = _pick_areas_polygon(picks)
-    elif pick_shape == "Square":
-        # same area for all picks
-        areas = pick_size**2 * np.ones(len(picks))
-    elif pick_shape == "Box":
-        areas = _pick_areas_box(picks)
-    elif pick_shape == "Brush":
-        areas = _pick_areas_brush(picks)
-    else:
-        raise ValueError(f"Unknown pick shape: {pick_shape}")
-    return areas
+    shapes, sizes = pick_shapes_and_sizes(picks, pick_shape, pick_size)
+    areas = np.zeros(len(picks))
+    for shape in set(shapes):
+        idx = [i for i, _ in enumerate(shapes) if _ == shape]
+        subset = [picks[i] for i in idx]
+        if shape not in PICK_SHAPES_WITHOUT_SIZE:
+            size = np.array([sizes[i] for i in idx])
+        if shape == "Circle":
+            areas[idx] = np.pi * (size / 2) ** 2
+        elif shape == "Rectangle":
+            areas[idx] = _pick_areas_rectangle(subset, size)
+        elif shape == "Polygon":
+            areas[idx] = _pick_areas_polygon(subset)
+        elif shape == "Square":
+            areas[idx] = size**2
+        elif shape == "Box":
+            areas[idx] = _pick_areas_box(subset)
+        elif shape == "Brush":
+            areas[idx] = _pick_areas_brush(subset)
+    return areas[~np.isnan(areas)]  # without open polygons
 
 
 def pick_bounds(
