@@ -295,6 +295,14 @@ def _pick_classes(locs) -> list[int]:
 # ---------------------------------------------------------------------------
 
 
+def test_training_uses_the_largest_of_several_pick_diameters():
+    parse = gui_nanotron.train_dialog.parse_pick_diameter
+    assert parse([{"Pick Diameter (nm)": [100.0, 180.0, 140.0]}]) == 180.0
+    assert parse([{"Pick Diameter (nm)": 120.0}]) == 120.0
+    # a mix of shapes records no diameter
+    assert parse([{"Pick Shape": ["Circle", "Box"]}]) is None
+
+
 def test_opening_picked_localizations_renders_them_and_counts_picks(
     window, locs_path
 ):

@@ -334,3 +334,104 @@ class TestMixedShapes:
         view._picks = [(1000.0, 1000.0), (2000.0, 2000.0)]
         assert view._pick_shapes == ["Circle", "Circle"]
         assert view._pick_sizes == [120.0, 120.0]
+
+
+class TestPickTools:
+    def test_subtract_uses_each_loaded_diameter(self, window, tmp_path):
+        view = window.view
+        view._set_picks(
+            [(1000.0, 1000.0), (2000.0, 1000.0), (3000.0, 1000.0)],
+            "Circle",
+            100.0,
+        )
+        # 60 nm from the first and second picks: the loaded circle of
+        # 200 nm covers the first center, the one of 100 nm misses the
+        # second
+        path = str(tmp_path / "subtract.yaml")
+        io.save_picks(
+            path,
+            [(1060.0, 1000.0), (2060.0, 1000.0)],
+            "Circle",
+            [200.0, 100.0],
+        )
+        diameter = window.tools_settings_dialog.pick_diameter
+        diameter.setValue(150.0)
+        view.subtract_picks(path)
+        assert view._picks == [(2000.0, 1000.0), (3000.0, 1000.0)]
+        assert view._pick_sizes == [100.0, 100.0]
+        assert diameter.value() == 150.0  # the size of new picks stays
+
+    def test_pick_similar_gives_new_picks_the_median_size(
+        self, window, monkeypatch
+    ):
+        view = window.view
+        view._set_picks(
+            [(1000.0, 1000.0), (2000.0, 2000.0), (3000.0, 1000.0)],
+            "Circle",
+            [100.0, 300.0, 250.0],
+        )
+        calls = []
+
+        def pick_similar(locs, info, *, picks, pick_shape, pick_size, **_):
+            calls.append((pick_shape, pick_size))
+            return list(picks) + [(4000.0, 4000.0)]
+
+        monkeypatch.setattr(
+            gui_render.postprocess, "pick_similar", pick_similar
+        )
+        view.pick_similar()
+        assert calls == [("Circle", [100.0, 300.0, 250.0])]
+        assert view._picks[-1] == (4000.0, 4000.0)
+        # the drawn picks keep their sizes, the new one takes the median
+        assert view._pick_sizes == [100.0, 300.0, 250.0, 250.0]
+
+    def test_picks_saved_separately_record_their_own_shape(
+        self, window, tmp_path
+    ):
+        view = window.view
+        view._set_picks(
+            [(1000.0, 1000.0), ((2000.0, 2000.0), (3000.0, 2600.0))],
+            ["Circle", "Box"],
+            [300.0, None],
+        )
+        view.save_picked_locs_sep(str(tmp_path / "picked.hdf5"), 0)
+        _, circle_info = io.load_locs(str(tmp_path / "picked_0.hdf5"))
+        _, box_info = io.load_locs(str(tmp_path / "picked_1.hdf5"))
+        assert circle_info[-1]["Pick Shape"] == "Circle"
+        assert circle_info[-1]["Pick Diameter (nm)"] == 300.0
+        assert box_info[-1]["Pick Shape"] == "Box"
+        assert not any("(nm)" in key for key in box_info[-1])
+
+
+class TestThreeDWindow:
+    def test_moving_the_pick_keeps_its_shape_and_size(
+        self, qt_offscreen, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            staticmethod(lambda *args, **kwargs: None),
+        )
+        window = gui_render.Window(plugins_loaded=True)
+        locs = _locs()
+        rng = np.random.default_rng(1)
+        locs["z"] = rng.uniform(-200.0, 200.0, size=len(locs))
+        locs["lpz"] = np.full(len(locs), 20.0)
+        window.view.add(
+            str(tmp_path / "locs.hdf5"), locs, _info(), render_=False
+        )
+        window.view.viewport = [(0.0, 0.0), (FOV, FOV)]
+        window.view.resize(VIEW_SIZE, VIEW_SIZE)
+        view = window.view
+        view._set_picks([(2000.0, 2000.0)], "Circle", 300.0)
+        # the pick tool differs from the pick
+        window.tools_settings_dialog.pick_shape.setCurrentText("Square")
+        try:
+            window.open_3d_view()
+            window.window_rot.move_pick(100.0, -50.0)
+            assert view._picks == [(2100.0, 1950.0)]
+            assert view._pick_shapes == ["Circle"]
+            assert view._pick_sizes == [300.0]
+        finally:
+            window.window_rot.view_rot.stop_render_worker()
+            view.stop_render_worker()

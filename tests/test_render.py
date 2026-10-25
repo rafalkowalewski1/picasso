@@ -1640,6 +1640,53 @@ class TestDrawing:
         )
         assert np.array_equal(before, _qimage_to_array(out))
 
+    def test_draw_picks_of_different_shapes_and_sizes(self):
+        # each pick is drawn as it would be on its own, with its size
+        viewport = ((0, 0), (32, 32))
+        picks = [(8, 16), (24, 16), ((4, 26), (12, 30))]
+        shapes = ["Circle", "Circle", "Box"]
+        sizes = [2, 8, None]
+        mixed = render.draw_picks(
+            _fresh_canvas(), viewport, shapes, picks, pick_size=sizes
+        )
+        one_by_one = _fresh_canvas()
+        for pick, shape, size in zip(picks, shapes, sizes):
+            one_by_one = render.draw_picks(
+                one_by_one, viewport, shape, [pick], pick_size=size
+            )
+        assert np.array_equal(
+            _qimage_to_array(mixed), _qimage_to_array(one_by_one)
+        )
+        same_size = render.draw_picks(
+            _fresh_canvas(), viewport, shapes, picks, pick_size=[2, 2, None]
+        )
+        assert not np.array_equal(
+            _qimage_to_array(mixed), _qimage_to_array(same_size)
+        )
+
+    def test_draw_picks_annotates_mixed_picks_by_their_index(
+        self, monkeypatch
+    ):
+        # picks are drawn shape by shape, but each is labeled with its
+        # index in the whole list
+        texts = []
+        draw_text = QtGui.QPainter.drawText
+
+        def record(painter, *args):
+            texts.append(args[-1])
+            return draw_text(painter, *args)
+
+        monkeypatch.setattr(QtGui.QPainter, "drawText", record)
+        render.draw_picks(
+            _fresh_canvas(),
+            ((0, 0), (32, 32)),
+            ["Box", "Circle", "Box"],
+            [((1, 1), (4, 4)), (16, 16), ((20, 20), (24, 24))],
+            pick_size=[None, 4, None],
+            annotate_picks=True,
+        )
+        assert sorted(texts) == ["0", "1", "2"]
+
     def test_draw_picks_brush_fills_overlaps_once(self):
         # the strokes of a merged pick always overlap, so filling them
         # one by one would leave a darker seam where they cross

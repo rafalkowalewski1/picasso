@@ -226,6 +226,27 @@ def test_drag_beyond_top_left_translates_everything(window, tmp_path):
         assert len(loaded) == len(locs)
 
 
+def test_translated_picks_keep_their_shapes_and_sizes(window):
+    # picks of several shapes and sizes, while the pick tool has another
+    # shape and size: the translation must not give them the tool's
+    view = window.view
+    view._set_picks(
+        [(650.0, 780.0), ((300.0, 300.0), (900.0, 700.0))],
+        ["Circle", "Box"],
+        [250.0, None],
+    )
+    view._pick_shape = "Square"
+    _drag(view, -10, -3)
+    ox, oy = (view.infos[1][-1][key] for key in lib.CANVAS_OFFSET_KEYS)
+    assert ox > 0 and oy > 0
+    assert view._picks == [
+        (650.0 + ox, 780.0 + oy),
+        ((300.0 + ox, 300.0 + oy), (900.0 + ox, 700.0 + oy)),
+    ]
+    assert view._pick_shapes == ["Circle", "Box"]
+    assert view._pick_sizes == [250.0, None]
+
+
 def test_undo_restores_the_registration(window):
     view = window.view
     diff = (view.locs[0]["x"] - view.locs[1]["x"]).to_numpy().copy()

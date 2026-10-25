@@ -253,6 +253,38 @@ class TestPickSimilarSizes:
         assert len(mixed) == len(median)
         np.testing.assert_allclose(mixed, median)
 
+    @pytest.mark.parametrize(
+        "shape, picks, sizes",
+        [
+            (
+                "Square",
+                [(1000.0, 1000.0), (2500.0, 2500.0), (4000.0, 1200.0)],
+                [100.0, 300.0, 200.0],
+            ),
+            (
+                "Rectangle",
+                [
+                    ((900.0, 1000.0), (1400.0, 1000.0)),
+                    ((2500.0, 2300.0), (2500.0, 2800.0)),
+                    ((3500.0, 3500.0), (3900.0, 3800.0)),
+                ],
+                [60.0, 120.0, 80.0],
+            ),
+        ],
+    )
+    def test_squares_and_rectangles_use_the_median(
+        self, locs, shape, picks, sizes
+    ):
+        kwargs = dict(picks=picks, pick_shape=shape, std_range=5.0)
+        mixed = postprocess.pick_similar(locs, INFO, pick_size=sizes, **kwargs)
+        median = postprocess.pick_similar(
+            locs, INFO, pick_size=float(np.median(sizes)), **kwargs
+        )
+        assert len(mixed) == len(median) > len(picks)
+        np.testing.assert_allclose(
+            np.asarray(mixed, dtype=float), np.asarray(median, dtype=float)
+        )
+
     def test_different_shapes_raise(self, locs):
         with pytest.raises(ValueError, match="one shape"):
             postprocess.pick_similar(
@@ -345,6 +377,32 @@ class TestMixedPicksFiles:
             path, {**regions, io.FORMAT_VERSION_ATTR: io.FORMAT_VERSION}
         )
         with pytest.raises(ValueError, match="need a size"):
+            io.load_picks(path)
+
+    @pytest.mark.parametrize(
+        "entry, message",
+        [
+            (
+                {"Shape": "Hexagon", "Center": [1.0, 1.0]},
+                "Unrecognized pick shape",
+            ),
+            (
+                {"Shape": "Circle", "Center": [1.0, 1.0]},
+                "missing the pick size",
+            ),
+        ],
+    )
+    def test_invalid_mixed_entries_raise(self, tmp_path, entry, message):
+        path = str(tmp_path / "picks.yaml")
+        io.save_yaml(
+            path,
+            {
+                "Shape": "Mixed",
+                "Picks": [entry],
+                io.FORMAT_VERSION_ATTR: io.FORMAT_VERSION,
+            },
+        )
+        with pytest.raises(ValueError, match=message):
             io.load_picks(path)
 
     def test_mixed_file_without_picks(self, tmp_path):
