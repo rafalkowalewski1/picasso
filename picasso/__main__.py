@@ -2174,6 +2174,22 @@ def _localize_process_file(
     z_params, lateral_transforms = _localize_legacy_calibrations(
         args, z_params, lateral_transforms, cam_info["Pixelsize"]
     )
+    if args.multi_emitter:
+        return [
+            _localize_multi_emitter(
+                movie,
+                info,
+                path,
+                args,
+                box,
+                min_net_gradient,
+                roi,
+                frame_bounds,
+                cam_info,
+                camera_calibration,
+                lateral_transforms,
+            )
+        ]
     if region_fit is not None:
         return _localize_regions(
             movie,
@@ -2220,6 +2236,69 @@ def _localize_process_file(
         spline_calibration,
     )
     return [saved]
+
+
+def _multi_emitter_parameters_from_args(args: argparse.Namespace):
+    """The ``localize.MultiEmitterParameters`` given on the command
+    line."""
+    from .localize import MultiEmitterParameters
+
+    return MultiEmitterParameters(
+        snr_threshold=args.snr_threshold,
+        psf_sigma=args.psf_sigma,
+        max_cycles=args.max_cycles,
+        peak_radius=args.peak_radius,
+        background_sigma=args.background_sigma,
+    )
+
+
+def _localize_multi_emitter(
+    movie,
+    info: list[dict],
+    path: str,
+    args: argparse.Namespace,
+    box: int,
+    min_net_gradient: float | list[float],
+    roi,
+    frame_bounds,
+    camera_info: dict,
+    camera_calibration: dict | None,
+    lateral_transforms: list | None,
+) -> str:
+    """Fit one movie with the multi-emitter fitting (``--multi-emitter``),
+    then save it and undrift it as any other fit.
+
+    Returns
+    -------
+    out_path : str
+        Path of the localization file written.
+    """
+    from .localize import localize_multi_emitter
+
+    seed_identification = None
+    if args.seed_identification:
+        seed_identification = _identification_parameters_from_args(
+            args, box, min_net_gradient
+        )
+    locs, info = localize_multi_emitter(
+        movie,
+        info,
+        camera_info=camera_info,
+        parameters=_multi_emitter_parameters_from_args(args),
+        roi=roi,
+        frame_bounds=frame_bounds,
+        seed_identification=seed_identification,
+        camera_calibration=camera_calibration,
+        parallel=True,
+        progress="console",
+    )
+    print(
+        f"PSF sigma: {info[-1]['PSF Sigma (nm)']:.1f} nm"
+        + (" (estimated)" if info[-1]["PSF Sigma Estimated"] else "")
+    )
+    return _localize_finish(
+        locs, info, path, args, None, lateral_transforms, None
+    )
 
 
 def _localize_region_fit(
@@ -2526,6 +2605,28 @@ def _localize_finish(
     return out_path
 
 
+def _check_multi_emitter_args(args: argparse.Namespace) -> None:
+    """Refuse the options the multi-emitter fitting cannot honor: it fits
+    a 2D Gaussian by maximum likelihood, on the CPU, one region of one
+    channel at a time."""
+    fit_methods = args.fit_method or ["mle"]
+    if fit_methods != ["mle"]:
+        raise SystemExit(
+            "--multi-emitter fits a 2D Gaussian by maximum likelihood; "
+            "leave out --fit-method."
+        )
+    if args.zc or args.spline_calibration:
+        raise SystemExit(
+            "--multi-emitter fits in 2D; leave out --z-calibration and "
+            "--spline-calibration."
+        )
+    if args.regions_separately:
+        raise SystemExit(
+            "--multi-emitter cannot fit regions separately yet; leave out "
+            "--regions-separately."
+        )
+
+
 def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
     """Localize molecules in microscopy images.
 
@@ -2568,6 +2669,10 @@ def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
     # regions are fitted separately, where they are one per region; the
     # first one stands for the run as a whole (the GPU check, the 3D and
     # spline branches below).
+    if getattr(args, "multi_emitter", False):
+        _check_multi_emitter_args(args)
+    else:
+        args.multi_emitter = False
     fit_methods = args.fit_method or ["mle"]
     args.fit_method = fit_methods[0]
     gradients = args.gradient or [5000]
@@ -5220,6 +5325,74 @@ def _build_parser() -> (
         "--database",
         action="store_true",
         help="add the run to the local database",
+    )
+    multi_emitter = localize_parser.add_argument_group(
+        "multi-emitter fitting",
+        "fit all emitters of a frame at once, so that emitters closer than"
+        " about two PSF widths are localized separately (3D-DAOSTORM,"
+        " Babcock et al., Optical Nanoscopy 2012). The peaks are found in"
+        " the residual of the fit, so the identification options are not"
+        " used, except with --seed-identification",
+    )
+    multi_emitter.add_argument(
+        "-me",
+        "--multi-emitter",
+        action="store_true",
+        help="fit overlapping emitters instead of one emitter per box",
+    )
+    multi_emitter.add_argument(
+        "--snr-threshold",
+        type=float,
+        default=6.0,
+        help=(
+            "peak threshold, in units of the signal-to-noise ratio, and the"
+            " minimum significance of an emitter (default 6)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--psf-sigma",
+        type=float,
+        default=None,
+        help=(
+            "standard deviation of the PSF in nm, fixed in the fit."
+            " Default: estimated from the movie"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--max-cycles",
+        type=int,
+        default=20,
+        help=(
+            "most cycles of finding, fitting and subtracting per frame"
+            " (default 20)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--peak-radius",
+        type=float,
+        default=5.0,
+        help=(
+            "radius (camera pixels) within which a new peak must be the"
+            " maximum of the residual (default 5)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--background-sigma",
+        type=float,
+        default=8.0,
+        help=(
+            "width (camera pixels) of the Gaussian low pass that estimates"
+            " the background (default 8)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--seed-identification",
+        action="store_true",
+        help=(
+            "start the fit of each frame from the spots the identification"
+            " options find (--gradient, --box-side-length, the wavelet and"
+            " filter options), instead of the peak finder's first cycle"
+        ),
     )
 
     # camera-calibrate: per-pixel sCMOS offset, variance and gain maps

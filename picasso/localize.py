@@ -27,6 +27,7 @@ License (MIT): ``LICENSES/Gpufit-LICENSE.txt``.
 from __future__ import annotations
 
 import logging
+import math
 import numbers
 import os
 import sqlite3
@@ -53,6 +54,7 @@ from scipy.ndimage import gaussian_filter
 from scipy.optimize import curve_fit
 from scipy.signal import fftconvolve
 from scipy.spatial.distance import cdist
+from scipy import stats
 
 from .ext import bitplane
 
@@ -75,6 +77,7 @@ from .fitting import (
     gaussfit,
     gaussfit_cuda,
     precision,
+    residualfit,
     seeds,
     splinefit,
     splinefit_cuda,
@@ -87,9 +90,11 @@ __all__ = [
     "IDENTIFY_METHODS",
     "IdentificationParameters",
     "NetGradient",
+    "MultiEmitterParameters",
     # one channel
     "localize",
     "localize_frames",
+    "localize_multi_emitter",
     "identify",
     "identify_in_frame",
     "identify_by_frame_number",
@@ -221,6 +226,7 @@ LOCALIZATION_COLUMNS = {
     "Least squares only": ["chi_square"],
     "Goodness of fit": ["reduced_chi_square"],
     "Uncertainty": ["photons_unc", "bg_unc", "sx_unc", "sy_unc"],
+    "Multi-emitter only": ["significance", "n_emitters"],
     "Multichannel only": (
         [f"photons_ch{c}" for c in range(precision._LINK_XYZ_MAX_CHANNELS)]
         + [f"bg_ch{c}" for c in range(precision._LINK_XYZ_MAX_CHANNELS)]
@@ -9614,6 +9620,809 @@ def _process_fitting_futures(
                 f.cancel()
     progress.set_value(N)
     return theta
+
+
+# ----------------------------------------------------------------------
+# Multi-emitter fitting
+#
+# Whole frames are fitted with all their emitters at once, so that spots
+# closer than about two PSF widths are localized separately rather than
+# merged into one biased localization: the 3D-DAOSTORM analysis of Babcock,
+# Sigal & Zhuang (2012), run by ``picasso.fitting.residualfit``.
+# ----------------------------------------------------------------------
+
+#: Most frames sampled to estimate the PSF width of a movie.
+_PSF_SIGMA_SAMPLE_FRAMES = 200
+#: Provisional PSF width (camera pixels) the emitters for the estimate are
+#: first found with.
+_PSF_SIGMA_START = 1.0
+#: Fewest isolated, well fitted emitters the estimate needs.
+_PSF_SIGMA_MIN_SPOTS = 10
+#: p-value of the chi-square test an emitter must pass to count as well
+#: fitted in the estimate.
+_PSF_SIGMA_P_VALUE = 0.01
+
+
+@dataclass(frozen=True, kw_only=True)
+class MultiEmitterParameters:
+    """Settings of the multi-emitter fitting, see
+    :func:`localize_multi_emitter`.
+
+    The defaults are those of 3D-DAOSTORM (Babcock et al., 2012) in its
+    reference implementation, storm-analysis. All arguments are
+    keyword-only.
+
+    Parameters
+    ----------
+    snr_threshold : float, optional
+        Peaks are found where the residual of the fit, smoothed with the
+        PSF, exceeds this many times its expected noise, and an emitter
+        is kept only if its significance exceeds it too. Default is 6
+        ("6 sigma"). The noise is that of photon counting; on EMCCD
+        camera it is larger by the excess noise factor, so the same
+        threshold lets more noise through.
+    psf_sigma : float or None, optional
+        Standard deviation of the PSF in nm, fixed in the fit. None (the
+        default) estimates it from the movie, as the median width of
+        isolated emitters fitted with a free width.
+    max_cycles : int, optional
+        Most cycles of finding, fitting and subtracting per frame. Default
+        is 20.
+    peak_radius : float, optional
+        Radius (camera pixels) within which a new peak must be the
+        maximum of the residual. Default is 5.
+    background_sigma : float, optional
+        Width (camera pixels) of the Gaussian low pass that estimates the
+        background from the frame minus the fit. Default is 8.
+
+    Raises
+    ------
+    ValueError
+        If ``snr_threshold``, ``peak_radius`` or ``background_sigma`` is
+        not a positive number, ``max_cycles`` not a positive integer, or
+        ``psf_sigma`` neither None nor a positive number.
+
+    Examples
+    --------
+    >>> from picasso import localize
+    >>> parameters = localize.MultiEmitterParameters(snr_threshold=8.0)
+    >>> parameters = localize.MultiEmitterParameters(psf_sigma=140.0)
+    """
+
+    snr_threshold: float = residualfit.THRESHOLD
+    psf_sigma: float | None = None
+    max_cycles: int = residualfit.N_CYCLES
+    peak_radius: float = residualfit.PEAK_RADIUS
+    background_sigma: float = residualfit.BACKGROUND_SIGMA
+
+    def __post_init__(self) -> None:
+        # frozen: normalize the values through object.__setattr__
+        for name in ("snr_threshold", "peak_radius", "background_sigma"):
+            value = getattr(self, name)
+            if not _is_positive_number(value) or not np.isfinite(value):
+                raise ValueError(
+                    f"{name} must be a positive number, got {value!r}."
+                )
+            object.__setattr__(self, name, float(value))
+        cycles = self.max_cycles
+        if (
+            isinstance(cycles, (bool, np.bool_))
+            or not isinstance(cycles, (int, np.integer))
+            or cycles < 1
+        ):
+            raise ValueError(
+                f"max_cycles must be a positive integer, got {cycles!r}."
+            )
+        object.__setattr__(self, "max_cycles", int(cycles))
+        sigma = self.psf_sigma
+        if sigma is not None:
+            if not _is_positive_number(sigma) or not np.isfinite(sigma):
+                raise ValueError(
+                    "psf_sigma must be None (estimated from the movie) or a "
+                    f"positive number of nm, got {sigma!r}."
+                )
+            object.__setattr__(self, "psf_sigma", float(sigma))
+
+    def to_info(self) -> dict:
+        """The settings under the keys of the fit's metadata.
+
+        ``"PSF Sigma (nm)"`` is only recorded when it was given; the fit
+        records the width it used either way.
+
+        Returns
+        -------
+        info : dict
+            ``"SNR Threshold"``, ``"PSF Sigma (nm)"``, ``"Max. Cycles"``,
+            ``"Peak Search Radius"`` and ``"Background Filter Sigma"``.
+        """
+        info = {"SNR Threshold": self.snr_threshold}
+        if self.psf_sigma is not None:
+            info["PSF Sigma (nm)"] = self.psf_sigma
+        info["Max. Cycles"] = self.max_cycles
+        info["Peak Search Radius"] = self.peak_radius
+        info["Background Filter Sigma"] = self.background_sigma
+        return info
+
+    @classmethod
+    def from_info(cls, info: dict) -> MultiEmitterParameters:
+        """Read the settings from a dictionary with the keys of
+        :meth:`to_info`, e.g., the metadata of a multi-emitter fit.
+
+        Missing keys take the defaults. The metadata of a fit records the
+        PSF width it used, so the settings read from it reproduce the fit.
+
+        Parameters
+        ----------
+        info : dict
+            Metadata or settings.
+
+        Returns
+        -------
+        MultiEmitterParameters
+            The settings found in ``info``.
+        """
+        return cls(
+            snr_threshold=info.get("SNR Threshold", residualfit.THRESHOLD),
+            psf_sigma=info.get("PSF Sigma (nm)"),
+            max_cycles=info.get("Max. Cycles", residualfit.N_CYCLES),
+            peak_radius=info.get(
+                "Peak Search Radius", residualfit.PEAK_RADIUS
+            ),
+            background_sigma=info.get(
+                "Background Filter Sigma", residualfit.BACKGROUND_SIGMA
+            ),
+        )
+
+
+def _frame_photons(
+    frame: np.ndarray,
+    camera_info: dict,
+    offset: np.ndarray | None,
+    gain: np.ndarray | None,
+) -> np.ndarray:
+    """A camera frame in photons (float64), with the full-frame maps of an
+    sCMOS camera calibration where given (see :func:`_to_photons`)."""
+    baseline = camera_info["Baseline"] if offset is None else offset
+    sensitivity = camera_info["Sensitivity"] if gain is None else 1.0 / gain
+    return (
+        (np.asarray(frame, dtype=np.float64) - baseline)
+        * sensitivity
+        / camera_info["Gain"]
+    )
+
+
+def _read_frame(
+    movie: LoadedMovie, frame_number: int, lock: threading.Lock
+) -> np.ndarray:
+    """One frame, read under ``lock`` unless the movie supports concurrent
+    reads (see :func:`identify_by_frame_number`)."""
+    concurrent = getattr(
+        movie, "supports_concurrent_reads", False
+    ) or isinstance(movie, np.memmap)
+    if concurrent:
+        return np.asarray(movie[frame_number])
+    with lock:
+        return np.asarray(movie[frame_number])
+
+
+def _peak_mask(
+    shape: tuple[int, int],
+    pad: int,
+    roi: tuple | list | None,
+    window: tuple | None,
+) -> np.ndarray:
+    """Where new peaks may be found in a frame padded by ``pad``: inside
+    the frame, the ROIs and the part of a canvas that holds data."""
+    height, width = shape
+    mask = np.zeros((height + 2 * pad, width + 2 * pad), dtype=bool)
+    rois = _as_roi_list(roi)
+    if rois is None:
+        mask[pad : pad + height, pad : pad + width] = True
+    else:
+        for (y0, x0), (y1, x1) in rois:
+            y0, y1 = max(y0, 0), min(y1, height)
+            x0, x1 = max(x0, 0), min(x1, width)
+            mask[pad + y0 : pad + y1, pad + x0 : pad + x1] = True
+    if window is not None:
+        (y0, x0), (y1, x1) = window
+        inside = np.zeros_like(mask)
+        inside[pad + y0 : pad + y1, pad + x0 : pad + x1] = True
+        mask &= inside
+    return mask
+
+
+def _estimate_psf_sigma(
+    movie: LoadedMovie,
+    frame_numbers: np.ndarray,
+    camera_info: dict,
+    offset: np.ndarray | None,
+    gain: np.ndarray | None,
+    roi: tuple | list | None,
+    parameters: MultiEmitterParameters,
+    em: bool,
+    progress: lib.Progress,
+    abort_callback: Callable[[], bool] | None,
+) -> float | None:
+    """PSF standard deviation (camera pixels) of a movie: the median width
+    of isolated emitters fitted with a free width, in frames sampled
+    evenly from ``frame_numbers``.
+
+    The emitters are found as in the first cycle of the multi-emitter fit,
+    with a provisional width; if the estimate is more than 20 % off it,
+    they are found once more with the estimate. Returns None if aborted.
+
+    Raises
+    ------
+    ValueError
+        If fewer than ``_PSF_SIGMA_MIN_SPOTS`` isolated, well fitted
+        emitters were found.
+    """
+    n_sample = min(len(frame_numbers), _PSF_SIGMA_SAMPLE_FRAMES)
+    sample = np.unique(
+        frame_numbers[
+            np.linspace(0, len(frame_numbers) - 1, n_sample).astype(int)
+        ]
+    )
+    window = getattr(movie, "filled_window", None)
+    lock = threading.Lock()
+    sigma = _PSF_SIGMA_START
+    lib.start_phase(progress, "Estimating the PSF width", 2 * len(sample))
+    for attempt in range(2):
+        half = int(math.ceil(3.0 * sigma))
+        box = 2 * half + 1
+        pad = residualfit.padding(sigma)
+        spots = []
+        for k, frame_number in enumerate(sample):
+            if callable(abort_callback) and abort_callback():
+                return None
+            photons = _frame_photons(
+                _read_frame(movie, int(frame_number), lock),
+                camera_info,
+                offset,
+                gain,
+            )
+            height, width = photons.shape
+            x, y = residualfit.find_peaks(
+                np.pad(photons, pad, mode="symmetric"),
+                _peak_mask(photons.shape, pad, roi, window),
+                sigma,
+                parameters.snr_threshold,
+                parameters.peak_radius,
+                parameters.background_sigma,
+            )
+            x = x - pad
+            y = y - pad
+            for i in range(len(x)):
+                # isolated: no other peak in the box or next to it; a
+                # neighbor's tail that still reaches in fails the
+                # chi-square test below
+                near = (np.abs(x - x[i]) <= half + 1) & (
+                    np.abs(y - y[i]) <= half + 1
+                )
+                inside = (
+                    half <= x[i] < width - half
+                    and half <= y[i] < height - half
+                )
+                if near.sum() == 1 and inside:
+                    spots.append(
+                        photons[
+                            y[i] - half : y[i] + half + 1,
+                            x[i] - half : x[i] + half + 1,
+                        ]
+                    )
+            progress.set_value(attempt * len(sample) + k + 1)
+        clean = np.zeros(0, dtype=bool)
+        if spots:
+            thetas, deviance = residualfit.fit_free_sigma(
+                np.clip(np.array(spots), 0, None)
+            )
+            p_value = stats.chi2.sf(
+                deviance / (2.0 if em else 1.0), box * box - 5
+            )
+            center = 0.5 * (box - 1)
+            with np.errstate(invalid="ignore"):
+                clean = (
+                    np.isfinite(thetas).all(axis=1)
+                    & (p_value >= _PSF_SIGMA_P_VALUE)
+                    & (np.abs(thetas[:, 1] - center) <= 1.0)
+                    & (np.abs(thetas[:, 2] - center) <= 1.0)
+                    & (thetas[:, 3] > 0.3)
+                    & (thetas[:, 3] < half)
+                    & (thetas[:, 0] > 0)
+                )
+        if clean.sum() < _PSF_SIGMA_MIN_SPOTS:
+            raise ValueError(
+                f"Only {int(clean.sum())} isolated, well fitted emitters "
+                "were found to estimate the PSF width of the movie, too "
+                "few. Give the width as psf_sigma (nm) in the "
+                "MultiEmitterParameters."
+            )
+        estimate = float(np.median(thetas[clean, 3]))
+        converged = abs(estimate - sigma) <= 0.2 * sigma
+        sigma = estimate
+        if converged:
+            break
+    progress.set_value(2 * len(sample))
+    return sigma
+
+
+def _multi_emitter_frame(
+    frame: np.ndarray,
+    seeds: np.ndarray | None,
+    camera_info: dict,
+    offset: np.ndarray | None,
+    gain: np.ndarray | None,
+    variance: np.ndarray | None,
+    mask: np.ndarray,
+    sigma: float,
+    parameters: MultiEmitterParameters,
+) -> residualfit.FrameResult:
+    """Fit one camera frame (see ``residualfit.analyze_frame``); the
+    results are in the coordinates of the padded frame. ``seeds`` are
+    ``(n, 2)`` integer x, y pixel positions that start the first cycle
+    instead of the peak finder, or None."""
+    pad = residualfit.padding(sigma)
+    photons = np.pad(
+        _frame_photons(frame, camera_info, offset, gain),
+        pad,
+        mode="symmetric",
+    )
+    if variance is None:
+        padded_variance = np.zeros((1, 1))
+    else:
+        padded_variance = np.pad(variance, pad, mode="symmetric")
+    if seeds is None:
+        seed_x = seed_y = np.empty(0, dtype=np.int64)
+    else:
+        seed_x = seeds[:, 0].astype(np.int64) + pad
+        seed_y = seeds[:, 1].astype(np.int64) + pad
+    return residualfit.analyze_frame(
+        photons,
+        padded_variance,
+        variance is not None,
+        mask,
+        seed_x,
+        seed_y,
+        sigma,
+        parameters.snr_threshold,
+        parameters.max_cycles,
+        parameters.peak_radius,
+        parameters.background_sigma,
+    )
+
+
+def _multi_emitter_worker(
+    movie: LoadedMovie,
+    frame_numbers: np.ndarray,
+    seeds: dict,
+    state: list,
+    lock: threading.Lock,
+    results: list,
+    args: tuple,
+) -> None:
+    """Fit frames until none is left. ``state`` is ``[claimed, finished,
+    stop]``, guarded by ``lock``; ``results[k]`` receives the fit of
+    frame ``frame_numbers[k]``, ``args`` the remaining arguments of
+    :func:`_multi_emitter_frame`."""
+    while True:
+        with lock:
+            k = state[0]
+            if state[2] or k >= len(frame_numbers):
+                return
+            state[0] += 1
+        frame_number = int(frame_numbers[k])
+        frame = _read_frame(movie, frame_number, lock)
+        results[k] = _multi_emitter_frame(
+            frame, seeds.get(frame_number), *args
+        )
+        with lock:
+            state[1] += 1
+
+
+def _fit_frames_multi_emitter(
+    movie: LoadedMovie,
+    frame_numbers: np.ndarray,
+    seeds: dict,
+    args: tuple,
+    parallel: bool,
+    progress: lib.Progress,
+    abort_callback: Callable[[], bool] | None,
+) -> list | None:
+    """Fit every frame of ``frame_numbers``, on a pool of threads if
+    ``parallel``, reporting the frames finished to the running phase of
+    ``progress``. Returns the results in frame order, or None if
+    aborted."""
+    n_frames = len(frame_numbers)
+    results = [None] * n_frames
+    lock = threading.Lock()
+    state = [0, 0, False]
+    if not parallel or n_frames < 2:
+        for k in range(n_frames):
+            if callable(abort_callback) and abort_callback():
+                return None
+            frame = _read_frame(movie, int(frame_numbers[k]), lock)
+            results[k] = _multi_emitter_frame(
+                frame, seeds.get(int(frame_numbers[k])), *args
+            )
+            progress.set_value(k + 1)
+        return results
+    n_threads = max(1, min(lib.n_workers(), n_frames))
+    executor = ThreadPoolExecutor(n_threads)
+    futures = [
+        executor.submit(
+            _multi_emitter_worker,
+            movie,
+            frame_numbers,
+            seeds,
+            state,
+            lock,
+            results,
+            args,
+        )
+        for _ in range(n_threads)
+    ]
+    executor.shutdown(wait=False)
+    try:
+        while True:
+            # polled before the completion check, as in _identify_threaded
+            if callable(abort_callback) and abort_callback():
+                return None
+            _, pending = wait_futures(futures, timeout=0.2)
+            for future in futures:
+                if future.done() and future.exception() is not None:
+                    raise future.exception()
+            if not pending:
+                break
+            progress.set_value(state[1])
+    finally:
+        # on an abort, an error or a cancellation the workers stop after
+        # their current frame
+        with lock:
+            state[2] = True
+    progress.set_value(n_frames)
+    return results
+
+
+def _locs_from_multi_emitter_fits(
+    frame_numbers: np.ndarray,
+    results: list,
+    sigma: float,
+    pixelsize: float,
+    em: bool,
+) -> pd.DataFrame:
+    """One localization per emitter, with every length in nm."""
+    pad = residualfit.padding(sigma)
+    excess_noise = 2.0 if em else 1.0
+    tables = []
+    for frame_number, result in zip(frame_numbers, results):
+        n = len(result.x)
+        crlb = excess_noise * result.crlb
+        with np.errstate(invalid="ignore"):
+            columns = {
+                "frame": np.full(n, frame_number, dtype=np.uint32),
+                "x": result.x - pad,
+                "y": result.y - pad,
+                "photons": result.photons,
+                "sx": np.full(n, sigma),
+                "sy": np.full(n, sigma),
+                "bg": result.bg,
+                "lpx": np.sqrt(crlb[:, 1]),
+                "lpy": np.sqrt(crlb[:, 2]),
+                "photons_unc": np.sqrt(crlb[:, 0]),
+                "bg_unc": np.sqrt(crlb[:, 3]),
+                "log_likelihood": -0.5 * result.error,
+                "iterations": result.iterations.astype(np.int32),
+                # the deviance of the emitter's region over its degrees of
+                # freedom, see reduced_chi_square
+                "reduced_chi_square": result.error
+                / (excess_noise * np.maximum(result.n_pixels - 4, 1)),
+                "significance": result.significance,
+                "n_emitters": result.n_emitters.astype(np.int32),
+            }
+        columns = {
+            name: (
+                values.astype(np.float32)
+                if values.dtype == np.float64
+                else values
+            )
+            for name, values in columns.items()
+        }
+        tables.append(pd.DataFrame(_lengths_to_nm(columns, pixelsize)))
+    if not tables:
+        tables.append(
+            pd.DataFrame(
+                _lengths_to_nm(
+                    {
+                        "frame": np.empty(0, dtype=np.uint32),
+                        **{
+                            name: np.empty(0, dtype=np.float32)
+                            for name in (
+                                "x",
+                                "y",
+                                "photons",
+                                "sx",
+                                "sy",
+                                "bg",
+                                "lpx",
+                                "lpy",
+                            )
+                        },
+                    },
+                    pixelsize,
+                )
+            )
+        )
+    locs = pd.concat(tables, ignore_index=True)
+    # an emitter whose Fisher matrix is singular has no uncertainty; it
+    # cannot be saved (lib.ensure_sanity), so it is not reported
+    finite = np.isfinite(locs[["lpx", "lpy"]].to_numpy()).all(axis=1)
+    return locs[finite].reset_index(drop=True)
+
+
+def localize_multi_emitter(
+    movie: LoadedMovie,
+    info: list[dict] | None = None,
+    *,
+    camera_info: dict,
+    parameters: MultiEmitterParameters | None = None,
+    roi: tuple[tuple[int, int], tuple[int, int]] | list | None = None,
+    frame_bounds: tuple[int, int] | list | None = None,
+    seed_identification: IdentificationParameters | None = None,
+    camera_calibration: dict | None = None,
+    lateral_transforms: dict | list | str | None = None,
+    parallel: bool = True,
+    progress: lib.Progress | Literal["console"] | None = None,
+    abort_callback: Callable[[], bool] | None = None,
+) -> tuple[pd.DataFrame | None, list[dict]]:
+    """Localize overlapping emitters: find and fit all emitters of a
+    frame at once.
+
+    Single-emitter fitting (:func:`localize`) fits one PSF per box, so
+    two emitters closer than about two PSF widths in the same frame give
+    one biased localization. This fits whole frames instead, in cycles of
+    finding peaks in what the current fit leaves unexplained, fitting
+    them with all others in place, and subtracting: the 3D-DAOSTORM
+    analysis of Babcock, Sigal & Zhuang (2012), ported from its reference
+    implementation, storm-analysis. It replaces the identification - the
+    peaks are found in the residual of the fit, by their signal-to-noise
+    ratio - and fits a Gaussian PSF of fixed width, integrated over the
+    pixels, by maximum likelihood.
+
+    Of two emitters closer than the PSF width, only the brighter is
+    kept, so pairs closer than about 1.5 PSF widths are seldom resolved.
+    See the multi-emitter page of the documentation for when to use it.
+
+    Parameters
+    ----------
+    movie : LoadedMovie
+        The input movie, as loaded by ``picasso.io.load_movie``.
+    info : list of dicts or None, optional
+        Metadata of the movie. Default is None, i.e., none.
+    camera_info : dict
+        Camera information: "Baseline", "Sensitivity", "Gain" and
+        "Pixelsize".
+    parameters : MultiEmitterParameters or None, optional
+        The settings of the fit. None (the default) uses the defaults,
+        which estimate the PSF width from the movie.
+    roi : tuple or list of tuples, optional
+        Region(s) of interest in camera pixels, as in :func:`localize`:
+        emitters are only found inside them, and the localizations get a
+        ``roi_id`` column (see :func:`add_roi_id`). Default is None (the
+        whole frame).
+    frame_bounds : tuple or list of tuples, optional
+        Frames to fit, as in :func:`identify`. Default is None (all).
+    seed_identification : IdentificationParameters or None, optional
+        If given, the spots this identification finds (see
+        :func:`identify`) start the fit of each frame instead of the
+        peak finder's first cycle; later cycles find the remaining peaks
+        as usual. This is not part of 3D-DAOSTORM. Default is None.
+    camera_calibration : dict or None, optional
+        Per-pixel sCMOS camera calibration, as in :func:`fit`: its maps
+        replace the scalar "Baseline" (and "Sensitivity"), and the
+        readout variance enters the noise model of the fit and of the
+        peak threshold. Default is None.
+    lateral_transforms : dict, list, str or None, optional
+        Lateral (x, y) corrections applied to the localizations after the
+        fit, as in :func:`fit`: a calibration with an ``"Affine
+        transforms"`` list, the list itself, or the path of a calibration
+        file. They are recorded in an entry of their own. Default is
+        None.
+    parallel : bool, optional
+        If True, the frames are fitted on a pool of threads; if False, in
+        the calling thread. Default is True.
+    progress : lib.Progress, "console" or None, optional
+        Progress tracker, see ``picasso.lib.Progress``: e.g. a
+        ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
+        or None for no reporting. Reports the phases "Estimating the PSF
+        width" over twice the sampled frames (only without
+        ``parameters.psf_sigma``), "Identifying spots" (only with
+        ``seed_identification``, see :func:`identify`) and "Fitting
+        frames" over the frames. Default is None.
+    abort_callback : callable or None, optional
+        Polled throughout; returning True stops the fit and the function
+        returns None for the localizations. Default is None.
+
+    Returns
+    -------
+    locs : pd.DataFrame or None
+        One localization per emitter, with every length in nm: ``frame``,
+        ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the fixed PSF
+        width), ``bg``, the Cramer-Rao bounds ``lpx``, ``lpy``,
+        ``photons_unc`` and ``bg_unc`` (from the Fisher matrix of the
+        emitter and its neighbors), ``log_likelihood``, ``iterations`` and
+        ``reduced_chi_square`` of the emitter's region, its
+        ``significance`` and ``n_emitters``, the number of emitters
+        within four PSF widths, the emitter itself included (1 for an
+        isolated one). None if aborted.
+    info : list of dicts
+        Metadata of the localizations: ``info`` with an entry recording
+        the fit and ``camera_info`` appended (see ``lib.append_metadata``),
+        and one recording ``lateral_transforms`` if any were applied.
+
+    Raises
+    ------
+    ValueError
+        If ``camera_info`` lacks a positive "Pixelsize", or the PSF width
+        is to be estimated and the movie has too few isolated emitters.
+    TypeError
+        If ``parameters`` or ``seed_identification`` is of the wrong
+        type.
+
+    References
+    ----------
+    Babcock, H., Sigal, Y. M. & Zhuang, X. A high-density 3D localization
+    algorithm for stochastic optical reconstruction microscopy. Opt.
+    Nanoscopy 1, 6 (2012). https://doi.org/10.1186/2192-2853-1-6
+
+    Examples
+    --------
+    >>> from picasso import io, localize
+    >>> movie, movie_info = io.load_movie("movie.ome.tif")
+    >>> camera_info = {
+    ...     "Baseline": 100, "Sensitivity": 0.53, "Gain": 1, "Pixelsize": 130
+    ... }
+    >>> locs, info = localize.localize_multi_emitter(
+    ...     movie, movie_info, camera_info=camera_info
+    ... )
+
+    Isolated emitters only (no other within four PSF widths):
+
+    >>> isolated = locs[locs["n_emitters"] == 1]
+    """
+    if parameters is None:
+        parameters = MultiEmitterParameters()
+    if not isinstance(parameters, MultiEmitterParameters):
+        raise TypeError(
+            "parameters must be a MultiEmitterParameters, got "
+            f"{type(parameters).__name__}."
+        )
+    if seed_identification is not None and not isinstance(
+        seed_identification, IdentificationParameters
+    ):
+        raise TypeError(
+            "seed_identification must be an IdentificationParameters or "
+            f"None, got {type(seed_identification).__name__}."
+        )
+    assert isinstance(camera_info, dict), "camera_info must be a dict"
+    assert isinstance(parallel, bool), "parallel must be a boolean"
+    pixelsize = camera_info.get("Pixelsize")
+    if not _is_positive_number(pixelsize):
+        raise ValueError(
+            "camera_info needs 'Pixelsize', the effective camera pixel size "
+            "in nm (after magnification): coordinates are stored in nm, "
+            f"so the fit cannot run without it. Got {pixelsize!r}."
+        )
+    pixelsize = float(pixelsize)
+    _validate_camera_calibration(camera_calibration, movie, camera_info)
+    offset = gain = variance = None
+    if camera_calibration is not None:
+        offset = np.asarray(camera_calibration["offset"], dtype=np.float64)
+        if camera_calibration.get("gain") is not None:
+            gain = np.asarray(camera_calibration["gain"], dtype=np.float64)
+        variance = np.asarray(
+            _variance_to_photons(
+                camera_calibration["variance"], camera_info, gain
+            ),
+            dtype=np.float64,
+        )
+    em = camera_info["Gain"] > 1
+    n_frames = len(movie)
+    frame_numbers = np.array(
+        [
+            f
+            for f in range(n_frames)
+            if lib.frame_in_bounds(f, frame_bounds, n_frames)
+        ],
+        dtype=np.int64,
+    )
+    sigma = None
+    results = None
+    with lib.tracked_progress(
+        progress, "Fitting frames", unit="frame"
+    ) as progress:
+        if parameters.psf_sigma is None:
+            sigma = _estimate_psf_sigma(
+                movie,
+                frame_numbers,
+                camera_info,
+                offset,
+                gain,
+                roi,
+                parameters,
+                em,
+                progress,
+                abort_callback,
+            )
+        else:
+            sigma = parameters.psf_sigma / pixelsize
+        seeds = {}
+        if sigma is not None and seed_identification is not None:
+            identified = identify(
+                movie,
+                info,
+                parameters=seed_identification,
+                roi=roi,
+                frame_bounds=frame_bounds,
+                parallel=parallel,
+                progress=progress,
+                abort_callback=abort_callback,
+            )
+            if identified is None:  # aborted
+                sigma = None
+            else:
+                for frame_number, group in identified[0].groupby("frame"):
+                    seeds[int(frame_number)] = group[["x", "y"]].to_numpy(
+                        dtype=np.int64
+                    )
+        if sigma is not None:
+            pad = residualfit.padding(sigma)
+            height, width = np.shape(movie[0])
+            mask = _peak_mask(
+                (height, width),
+                pad,
+                roi,
+                getattr(movie, "filled_window", None),
+            )
+            args = (
+                camera_info,
+                offset,
+                gain,
+                variance,
+                mask,
+                sigma,
+                parameters,
+            )
+            lib.start_phase(
+                progress, "Fitting frames", len(frame_numbers), unit="frame"
+            )
+            results = _fit_frames_multi_emitter(
+                movie,
+                frame_numbers,
+                seeds,
+                args,
+                parallel,
+                progress,
+                abort_callback,
+            )
+    entry = {**lib.step_info("Fit multi-emitter"), **parameters.to_info()}
+    if sigma is not None:
+        # the width the fit used, given or estimated
+        entry["PSF Sigma (nm)"] = sigma * pixelsize
+    entry["PSF Sigma Estimated"] = parameters.psf_sigma is None
+    if seed_identification is not None:
+        entry["Seed Identification"] = seed_identification.to_info()
+    entry["ROI"] = roi
+    entry["Frame Bounds"] = frame_bounds
+    entry.update(camera_calibration_info(camera_calibration))
+    info = lib.append_metadata(info, entry | camera_info)
+    if results is None:  # aborted
+        return None, info
+    locs = _locs_from_multi_emitter_fits(
+        frame_numbers, results, sigma, pixelsize, em
+    )
+    # before the lateral corrections, which move x and y
+    locs = add_roi_id(locs, roi, pixelsize=pixelsize)
+    return _apply_extra_affine(locs, info, lateral_transforms)
 
 
 def localize(

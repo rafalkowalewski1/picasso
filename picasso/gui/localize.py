@@ -48,7 +48,7 @@ from .. import (
 # aliased: `transforms` is used as a local name for lists of channel
 # transforms throughout this module
 from .. import transforms as transforms_mod
-from ..fitting import precision, splinefit
+from ..fitting import precision, residualfit, splinefit
 from .app import run_gui
 from . import theme
 from . import toolbars
@@ -324,6 +324,12 @@ GAUSS_LINK_PHOTONS_TIP = (
     "CHECKED: one photon count and background shared by every channel."
 )
 
+# The fit model that fits overlapping emitters, frame by frame; it finds
+# the spots itself, so it needs no identification.
+MULTI_EMITTER_MODEL = "2D Gaussian, overlapping emitters"
+# its code in ``FIT_MODELS``
+MULTI_EMITTER_CODE = "multi-emitter"
+
 # Fitting models offered in the GUI, decoupled from the optimizer. Each
 # model maps its optimizer labels to the internal ``fit`` codes;
 # models without an optimizer (e.g. averaging) declare a fixed ``code``
@@ -345,6 +351,12 @@ FIT_MODELS = {
             "MLE": "gaussmle-spherical",
         },
         "needs_channel_registration": True,
+    },
+    # not a ``localize.fit`` method: it finds the spots itself and runs
+    # ``localize.localize_multi_emitter`` (see Window.fit)
+    MULTI_EMITTER_MODEL: {
+        "optimizers": {"MLE": MULTI_EMITTER_CODE},
+        "multi_emitter": True,
     },
     "Experimental PSF (cubic spline)": {
         "optimizers": {
@@ -374,6 +386,12 @@ MODEL_TOOLTIP = (
     "Useful for tilted/anisotropic PSFs.\n\n"
     "2D spherical Gaussian:\n"
     "Gaussian with one common width for x and y.\n\n"
+    "2D Gaussian, overlapping emitters:\n"
+    "Fits all emitters of a frame at once, so that emitters closer than\n"
+    "about two PSF widths are localized separately. Finds the spots itself\n"
+    "(no identification), with a PSF width fixed for the movie. For 2D\n"
+    "data with emitters in focus, e.g., DNA-PAINT at high imager\n"
+    "concentration. MLE on the CPU.\n\n"
     "Experimental PSF (cubic spline):\n"
     "Fits a cubic spline interpolation of a measured 3D PSF\n"
     "(requires a spline calibration file).\n"
@@ -480,6 +498,39 @@ def _filtered_identification_movie(
     else:
         gaussian = None
     return movie, [temporal, gaussian]
+
+
+def _compile_multi_emitter_fit() -> None:
+    """Compile the multi-emitter fit, or load it from numba's cache.
+
+    A fresh install compiles it for about ten seconds, which the first
+    preview would spend with the window frozen; run on a thread when the
+    model is first selected, this happens in the background instead. A
+    preview started meanwhile waits for numba's compiler lock rather than
+    compiling a second time."""
+    rng = np.random.default_rng(0)
+    frame = rng.poisson(20, (24, 24)).astype(np.float64)
+    frame[10:13, 10:13] += 200
+    sigma = 1.0
+    pad = residualfit.padding(sigma)
+    padded = np.pad(frame, pad, mode="symmetric")
+    mask = np.ones(padded.shape, dtype=bool)
+    empty = np.empty(0, dtype=np.int64)
+    residualfit.analyze_frame(
+        padded,
+        np.zeros((1, 1)),
+        False,
+        mask,
+        empty,
+        empty,
+        sigma,
+        6.0,
+        2,
+        5.0,
+        8.0,
+    )
+    residualfit.find_peaks(padded, mask, sigma, 6.0, 5.0, 8.0)
+    residualfit.fit_free_sigma(frame[None, 8:15, 8:15])
 
 
 def _fit_code(model: str, optimizer: str) -> str:
@@ -1385,8 +1436,16 @@ def format_hover_tooltip(row: pd.Series) -> str:
     return "\n".join(lines)
 
 
+#: Color of the marker of an emitter fitted together with neighbors
+#: (sky blue of the Okabe-Ito palette, which stays apart from the green of
+#: the single-emitter marker for every form of color blindness).
+OVERLAPPING_MARKER_COLOR = QtGui.QColor(86, 180, 233)
+
+
 class FitMarker(QtWidgets.QGraphicsItemGroup):
-    """Marker showing fitted position."""
+    """Marker showing fitted position: a green x, or, for an emitter of a
+    multi-emitter fit with neighbors (``overlapping``), a sky blue +, so
+    that the color is not the only cue."""
 
     def __init__(
         self,
@@ -1394,14 +1453,21 @@ class FitMarker(QtWidgets.QGraphicsItemGroup):
         y: float,
         size: float,
         parent: QtWidgets.QWidget | None = None,
+        overlapping: bool = False,
     ) -> None:
         super().__init__(parent)
         L = size / 2
-        line1 = QtWidgets.QGraphicsLineItem(x - L, y - L, x + L, y + L)
-        line1.setPen(QtGui.QPen(QtGui.QColor(0, 255, 0)))
+        if overlapping:
+            color = OVERLAPPING_MARKER_COLOR
+            line1 = QtWidgets.QGraphicsLineItem(x - L, y, x + L, y)
+            line2 = QtWidgets.QGraphicsLineItem(x, y - L, x, y + L)
+        else:
+            color = QtGui.QColor(0, 255, 0)
+            line1 = QtWidgets.QGraphicsLineItem(x - L, y - L, x + L, y + L)
+            line2 = QtWidgets.QGraphicsLineItem(x - L, y + L, x + L, y - L)
+        line1.setPen(QtGui.QPen(color))
         self.addToGroup(line1)
-        line2 = QtWidgets.QGraphicsLineItem(x - L, y + L, x + L, y - L)
-        line2.setPen(QtGui.QPen(QtGui.QColor(0, 255, 0)))
+        line2.setPen(QtGui.QPen(color))
         self.addToGroup(line2)
 
 
@@ -3735,6 +3801,9 @@ class ParametersDialog(lib.Dialog):
     WAVELET_URL = docs_url("localize/identification.html#localize-wavelet")
     ROI_URL = docs_url("localize/identification.html#localize-rois")
     SPLINE_URL = docs_url("localize/spline.html#localize-spline")
+    MULTI_EMITTER_URL = docs_url(
+        "localize/multi-emitter.html#localize-multi-emitter"
+    )
     TEMPORAL_MEDIAN_URL = docs_url(
         "localize/identification.html#localize-temporal-median-filter"
     )
@@ -3772,6 +3841,10 @@ class ParametersDialog(lib.Dialog):
         self.z_groupbox = None
         self.spline_groupbox = None
         self.channel_registration_groupbox = None
+        self.multi_emitter_groupbox = None
+        # the identification settings the multi-emitter fit does not use;
+        # set up further below
+        self.identification_settings = None
         # last resolved fit code, so the convergence defaults are only
         # reapplied when the method actually changes
         self._last_fit_code = None
@@ -3798,10 +3871,16 @@ class ParametersDialog(lib.Dialog):
         identification_grid = QtWidgets.QGridLayout(
             identification_groupbox.content
         )
+        # The box, the method and the filters, which the multi-emitter fit
+        # does not use: one widget, so that they hide together.
+        self.identification_settings = QtWidgets.QWidget()
+        settings_grid = QtWidgets.QGridLayout(self.identification_settings)
+        settings_grid.setContentsMargins(0, 0, 0, 0)
+        identification_grid.addWidget(self.identification_settings, 0, 0, 1, 2)
 
         # Box Size
         first_row = QtWidgets.QHBoxLayout()
-        identification_grid.addLayout(first_row, 0, 0, 1, 2)
+        settings_grid.addLayout(first_row, 0, 0, 1, 2)
         first_row.addWidget(lib.HelpButton(self.IDENT_URL))
         boxsize_label = QtWidgets.QLabel("Box side length:")
         boxsize_label.setToolTip(
@@ -3816,7 +3895,7 @@ class ParametersDialog(lib.Dialog):
 
         # identification method: net gradient or wavelet segmentation
         method_row = QtWidgets.QHBoxLayout()
-        identification_grid.addLayout(method_row, 1, 0, 1, 2)
+        settings_grid.addLayout(method_row, 1, 0, 1, 2)
         method_tip = (
             "How spots are found.\n\n"
             "Net gradient: local maxima whose net gradient (a measure of\n"
@@ -3845,7 +3924,7 @@ class ParametersDialog(lib.Dialog):
         self.mng_widget = QtWidgets.QWidget()
         mng_grid = QtWidgets.QGridLayout(self.mng_widget)
         mng_grid.setContentsMargins(0, 0, 0, 0)
-        identification_grid.addWidget(self.mng_widget, 2, 0, 1, 2)
+        settings_grid.addWidget(self.mng_widget, 2, 0, 1, 2)
 
         # Min. Net Gradient
         mng_label = QtWidgets.QLabel("Min. net gradient:")
@@ -3909,7 +3988,7 @@ class ParametersDialog(lib.Dialog):
         self.wavelet_widget = QtWidgets.QWidget()
         wavelet_grid = QtWidgets.QGridLayout(self.wavelet_widget)
         wavelet_grid.setContentsMargins(0, 0, 0, 0)
-        identification_grid.addWidget(self.wavelet_widget, 3, 0, 1, 2)
+        settings_grid.addWidget(self.wavelet_widget, 3, 0, 1, 2)
         threshold_tip = (
             "Threshold on the second wavelet plane, in units of the\n"
             "standard deviation of the noise. Izeddin et al. use 0.5 to 2\n"
@@ -4028,7 +4107,7 @@ class ParametersDialog(lib.Dialog):
         self.temporal_median_spinbox.valueChanged.connect(self.on_box_changed)
         tm_row.addWidget(self.temporal_median_spinbox)
         tm_row.addStretch(1)
-        identification_grid.addLayout(tm_row, 4, 0, 1, 2)
+        settings_grid.addLayout(tm_row, 4, 0, 1, 2)
 
         # spatial Gaussian smoothing (identification only). Sits right below
         # the temporal median filter, in the order the two are applied.
@@ -4068,7 +4147,7 @@ class ParametersDialog(lib.Dialog):
         )
         gauss_row.addWidget(self.gaussian_filter_spinbox)
         gauss_row.addStretch(1)
-        identification_grid.addLayout(gauss_row, 5, 0, 1, 2)
+        settings_grid.addLayout(gauss_row, 5, 0, 1, 2)
 
         # preview identifications + cross-channel link color overlay
         preview_row = QtWidgets.QHBoxLayout()
@@ -4556,6 +4635,113 @@ class ParametersDialog(lib.Dialog):
         # model.
         self.on_fit_model_changed()
 
+        # Overlapping emitters; shown while that fit model is selected
+        self.multi_emitter_groupbox = me_groupbox = lib.CollapsibleGroupBox(
+            "Overlapping emitters"
+        )
+        me_groupbox.setToolTip(
+            "Fits all emitters of a frame at once: in cycles, peaks are\n"
+            "found where the fit leaves photons unexplained, fitted with\n"
+            "every other emitter in place, and subtracted. Of two emitters\n"
+            "closer than the PSF width, only the brighter is kept.\n\n"
+            "Babcock, H., Sigal, Y. M. & Zhuang, X. A high-density 3D\n"
+            "localization algorithm for stochastic optical reconstruction\n"
+            "microscopy. Optical Nanoscopy 1, 6 (2012), ported from its\n"
+            "implementation in storm-analysis (Zhuang Lab)."
+        )
+        vbox.addWidget(me_groupbox)
+        me_grid = QtWidgets.QGridLayout(me_groupbox.content)
+        me_grid.addWidget(lib.HelpButton(self.MULTI_EMITTER_URL), 0, 2)
+        snr_label = QtWidgets.QLabel("SNR threshold:")
+        snr_tip = (
+            "Peaks are found where the fit's residual, smoothed with the\n"
+            "PSF, exceeds this many times its noise, and an emitter is\n"
+            "kept only if its significance exceeds it too. The noise is\n"
+            "that of photon counting; EMCCD data are noisier by the excess\n"
+            "noise factor, so raise it for them."
+        )
+        snr_label.setToolTip(snr_tip)
+        me_grid.addWidget(snr_label, 0, 0)
+        self.snr_threshold_spinbox = QtWidgets.QDoubleSpinBox()
+        self.snr_threshold_spinbox.setRange(0.5, 1000.0)
+        self.snr_threshold_spinbox.setDecimals(1)
+        self.snr_threshold_spinbox.setSingleStep(0.5)
+        self.snr_threshold_spinbox.setValue(residualfit.THRESHOLD)
+        self.snr_threshold_spinbox.setToolTip(snr_tip)
+        self.snr_threshold_spinbox.valueChanged.connect(
+            self.on_multi_emitter_changed
+        )
+        me_grid.addWidget(self.snr_threshold_spinbox, 0, 1)
+        sigma_label = QtWidgets.QLabel("PSF sigma (nm):")
+        sigma_tip = (
+            "Standard deviation of the PSF, fixed in the fit. Estimated\n"
+            "from the movie unless unticked: the median width of isolated\n"
+            "emitters fitted with a free width. The last estimate is shown\n"
+            "and used by the preview."
+        )
+        sigma_label.setToolTip(sigma_tip)
+        me_grid.addWidget(sigma_label, 1, 0)
+        self.psf_sigma_spinbox = QtWidgets.QDoubleSpinBox()
+        self.psf_sigma_spinbox.setRange(10.0, 2000.0)
+        self.psf_sigma_spinbox.setDecimals(1)
+        self.psf_sigma_spinbox.setValue(130.0)
+        self.psf_sigma_spinbox.setToolTip(sigma_tip)
+        self.psf_sigma_spinbox.valueChanged.connect(
+            self.on_multi_emitter_changed
+        )
+        me_grid.addWidget(self.psf_sigma_spinbox, 1, 1)
+        self.psf_sigma_estimate_checkbox = QtWidgets.QCheckBox("Estimate")
+        self.psf_sigma_estimate_checkbox.setToolTip(sigma_tip)
+        self.psf_sigma_estimate_checkbox.setChecked(True)
+        self.psf_sigma_estimate_checkbox.stateChanged.connect(
+            self.on_psf_sigma_estimate_changed
+        )
+        me_grid.addWidget(self.psf_sigma_estimate_checkbox, 1, 2)
+        cycles_label = QtWidgets.QLabel("Max. cycles:")
+        cycles_tip = (
+            "Most cycles of finding, fitting and subtracting per frame."
+        )
+        cycles_label.setToolTip(cycles_tip)
+        me_grid.addWidget(cycles_label, 2, 0)
+        self.max_cycles_spinbox = QtWidgets.QSpinBox()
+        self.max_cycles_spinbox.setRange(1, 1000)
+        self.max_cycles_spinbox.setValue(residualfit.N_CYCLES)
+        self.max_cycles_spinbox.setToolTip(cycles_tip)
+        me_grid.addWidget(self.max_cycles_spinbox, 2, 1)
+        radius_label = QtWidgets.QLabel("Peak search radius:")
+        radius_tip = (
+            "Radius (camera pixels) within which a new peak must be the\n"
+            "maximum of the residual."
+        )
+        radius_label.setToolTip(radius_tip)
+        me_grid.addWidget(radius_label, 3, 0)
+        self.peak_radius_spinbox = QtWidgets.QDoubleSpinBox()
+        self.peak_radius_spinbox.setRange(1.0, 50.0)
+        self.peak_radius_spinbox.setDecimals(1)
+        self.peak_radius_spinbox.setValue(residualfit.PEAK_RADIUS)
+        self.peak_radius_spinbox.setToolTip(radius_tip)
+        self.peak_radius_spinbox.valueChanged.connect(
+            self.on_multi_emitter_changed
+        )
+        me_grid.addWidget(self.peak_radius_spinbox, 3, 1)
+        background_label = QtWidgets.QLabel("Background filter sigma:")
+        background_tip = (
+            "Width (camera pixels) of the Gaussian low pass that estimates\n"
+            "the background from the frame minus the fit."
+        )
+        background_label.setToolTip(background_tip)
+        me_grid.addWidget(background_label, 4, 0)
+        self.background_sigma_spinbox = QtWidgets.QDoubleSpinBox()
+        self.background_sigma_spinbox.setRange(1.0, 100.0)
+        self.background_sigma_spinbox.setDecimals(1)
+        self.background_sigma_spinbox.setValue(residualfit.BACKGROUND_SIGMA)
+        self.background_sigma_spinbox.setToolTip(background_tip)
+        self.background_sigma_spinbox.valueChanged.connect(
+            self.on_multi_emitter_changed
+        )
+        me_grid.addWidget(self.background_sigma_spinbox, 4, 1)
+        self.on_psf_sigma_estimate_changed()
+
         # 3D via astigmatism (Gaussian models); shown for non-spline fits
         self.z_groupbox = z_groupbox = lib.CollapsibleGroupBox(
             "3D via Astigmatism"
@@ -5003,6 +5189,14 @@ class ParametersDialog(lib.Dialog):
         show/hide the optimizer controls. Models without an optimizer
         (e.g. averaging) hide the optimizer row and its parameters."""
         model = self.fit_model.currentText()
+        if FIT_MODELS[model].get("multi_emitter") and not getattr(
+            ParametersDialog, "_multi_emitter_compiling", False
+        ):
+            # once per session, see _compile_multi_emitter_fit
+            ParametersDialog._multi_emitter_compiling = True
+            threading.Thread(
+                target=_compile_multi_emitter_fit, daemon=True
+            ).start()
         optimizers = FIT_MODELS[model]["optimizers"]
         if optimizers is None:
             self.optimizer_label.hide()
@@ -5031,12 +5225,53 @@ class ParametersDialog(lib.Dialog):
         entry = FIT_MODELS[self.fit_model.currentText()]
         needs_spline = entry.get("needs_spline_calibration", False)
         needs_registration = entry.get("needs_channel_registration", False)
+        multi_emitter = entry.get("multi_emitter", False)
         if self.z_groupbox is not None:
-            self.z_groupbox.setVisible(not needs_spline)
+            # the multi-emitter fit is 2D: its width is fixed
+            self.z_groupbox.setVisible(not (needs_spline or multi_emitter))
         if self.spline_groupbox is not None:
             self.spline_groupbox.setVisible(needs_spline)
         if self.channel_registration_groupbox is not None:
             self.channel_registration_groupbox.setVisible(needs_registration)
+        if self.multi_emitter_groupbox is not None:
+            self.multi_emitter_groupbox.setVisible(multi_emitter)
+        if self.identification_settings is not None:
+            # it finds the spots itself
+            self.identification_settings.setVisible(not multi_emitter)
+
+    def is_multi_emitter(self) -> bool:
+        """Whether the selected fit model is the multi-emitter fit."""
+        return bool(
+            FIT_MODELS[self.fit_model.currentText()].get("multi_emitter")
+        )
+
+    def multi_emitter_parameters(
+        self, estimate: bool | None = None
+    ) -> localize.MultiEmitterParameters:
+        """The multi-emitter settings on the dialog. The PSF width is left
+        to the estimate while "Estimate" is ticked, unless ``estimate`` is
+        False (the preview, which uses the width shown)."""
+        if estimate is None:
+            estimate = self.psf_sigma_estimate_checkbox.isChecked()
+        return localize.MultiEmitterParameters(
+            snr_threshold=self.snr_threshold_spinbox.value(),
+            psf_sigma=None if estimate else self.psf_sigma_spinbox.value(),
+            max_cycles=self.max_cycles_spinbox.value(),
+            peak_radius=self.peak_radius_spinbox.value(),
+            background_sigma=self.background_sigma_spinbox.value(),
+        )
+
+    def on_psf_sigma_estimate_changed(self) -> None:
+        """The PSF width is typed in only when it is not estimated."""
+        self.psf_sigma_spinbox.setEnabled(
+            not self.psf_sigma_estimate_checkbox.isChecked()
+        )
+
+    def on_multi_emitter_changed(self) -> None:
+        """Refresh the preview, which fits the current frame with the new
+        settings."""
+        if self.preview_checkbox.isChecked() and self.is_multi_emitter():
+            self.window.draw_frame()
 
     def current_fit_code(self) -> str:
         """The ``fit`` code the current selection would run."""
@@ -6975,6 +7210,29 @@ class Window(QtWidgets.QMainWindow):
             index = self.parameters_dialog.fit_mode_combo.findText(fit_mode)
             if index >= 0:
                 self.parameters_dialog.fit_mode_combo.setCurrentIndex(index)
+        self._load_multi_emitter_settings(
+            settings["Localize"].get("multi_emitter")
+        )
+
+    def _load_multi_emitter_settings(self, saved: dict | None) -> None:
+        """Put the saved multi-emitter settings on the dialog; values that
+        are missing or invalid keep the defaults."""
+        if not isinstance(saved, dict):
+            return
+        dialog = self.parameters_dialog
+        for key, spinbox in (
+            ("snr_threshold", dialog.snr_threshold_spinbox),
+            ("psf_sigma", dialog.psf_sigma_spinbox),
+            ("max_cycles", dialog.max_cycles_spinbox),
+            ("peak_radius", dialog.peak_radius_spinbox),
+            ("background_sigma", dialog.background_sigma_spinbox),
+        ):
+            value = saved.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                spinbox.setValue(value)
+        estimate = saved.get("estimate_psf_sigma")
+        if isinstance(estimate, bool):
+            dialog.psf_sigma_estimate_checkbox.setChecked(estimate)
 
     def load_user_settings(self) -> None:
         """Load user settings based on the last-used parameters."""
@@ -7033,6 +7291,17 @@ class Window(QtWidgets.QMainWindow):
         settings["Localize"][
             "fit_mode"
         ] = self.parameters_dialog.fit_mode_combo.currentText()
+        dialog = self.parameters_dialog
+        settings["Localize"]["multi_emitter"] = {
+            "snr_threshold": dialog.snr_threshold_spinbox.value(),
+            "psf_sigma": dialog.psf_sigma_spinbox.value(),
+            "estimate_psf_sigma": (
+                dialog.psf_sigma_estimate_checkbox.isChecked()
+            ),
+            "max_cycles": dialog.max_cycles_spinbox.value(),
+            "peak_radius": dialog.peak_radius_spinbox.value(),
+            "background_sigma": dialog.background_sigma_spinbox.value(),
+        }
         settings["Localize"]["Columns to save"] = {
             column: checkbox.isChecked()
             for column, checkbox in (
@@ -9736,6 +10005,11 @@ class Window(QtWidgets.QMainWindow):
                 self.draw_identifications(
                     identifications_frame, box, QtGui.QColor("yellow")
                 )
+        elif (
+            self.parameters_dialog.preview_checkbox.isChecked()
+            and self.parameters_dialog.is_multi_emitter()
+        ):
+            self.draw_multi_emitter_preview()
         elif self.parameters_dialog.preview_checkbox.isChecked():
             # scrubbing into a new temporal window costs one median
             # (~0.1 s at 512x512, more for larger frames), and the
@@ -9807,6 +10081,7 @@ class Window(QtWidgets.QMainWindow):
                         loc["x"] / pixelsize + 0.5,
                         loc["y"] / pixelsize + 0.5,
                         1,
+                        overlapping=loc.get("n_emitters", 1) > 1,
                     )
                     marker.setToolTip(format_hover_tooltip(loc))
                     self.scene.addItem(marker)
@@ -9921,6 +10196,55 @@ class Window(QtWidgets.QMainWindow):
             item.setToolTip(
                 format_hover_tooltip(identification if loc is None else loc)
             )
+
+    def draw_multi_emitter_preview(self) -> None:
+        """Fit the current frame with the multi-emitter settings and draw
+        the emitters, with the PSF width shown on the dialog."""
+        dialog = self.parameters_dialog
+        camera_info = self.camera_info
+        sigma = dialog.psf_sigma_spinbox.value() / camera_info["Pixelsize"]
+        frame = np.asarray(self.movie[self.curr_frame_number])
+        pad = residualfit.padding(sigma)
+        mask = localize._peak_mask(
+            frame.shape,
+            pad,
+            _copied_rois(self.view.rois),
+            getattr(self.movie, "filled_window", None),
+        )
+        calibration = dialog.camera_calibration or {}
+        offset = calibration.get("offset")
+        gain = calibration.get("gain")
+        variance = None
+        if calibration:
+            variance = np.asarray(
+                localize._variance_to_photons(
+                    calibration["variance"], camera_info, gain
+                ),
+                dtype=np.float64,
+            )
+        QtWidgets.QApplication.setOverrideCursor(
+            QtCore.Qt.CursorShape.WaitCursor
+        )
+        try:
+            result = localize._multi_emitter_frame(
+                frame,
+                None,
+                camera_info,
+                offset,
+                gain,
+                variance,
+                mask,
+                sigma,
+                dialog.multi_emitter_parameters(estimate=False),
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        for x, y, n in zip(result.x - pad, result.y - pad, result.n_emitters):
+            marker = FitMarker(x + 0.5, y + 0.5, 1, overlapping=n > 1)
+            self.scene.addItem(marker)
+        self.status_bar.showMessage(
+            f"Preview: {len(result.x):,} emitters in this frame."
+        )
 
     def draw_preview_identifications(
         self, identifications_frame: pd.DataFrame, box: int
@@ -11478,6 +11802,14 @@ class Window(QtWidgets.QMainWindow):
                 self, "Identify", "Load a movie before identifying."
             )
             return
+        if self.parameters_dialog.is_multi_emitter() and not (
+            fit_afterwards or calibrate_z or calibrate_spline
+        ):
+            self.status_bar.showMessage(
+                f"'{MULTI_EMITTER_MODEL}' finds the spots itself: run Fit "
+                "or Localize (Identify & Fit)."
+            )
+            return
         # The calibrations are built from bead stacks, one channel at a time,
         # so they always identify the channels separately - only the
         # experimental data can be identified on the sum.
@@ -12351,6 +12683,9 @@ class Window(QtWidgets.QMainWindow):
                 "Load a movie before fitting.",
             )
             return
+        if self.parameters_dialog.is_multi_emitter() and not calibrate_z:
+            self._start_multi_emitter_fit()
+            return
         if not self._ready_for_fit_anywhere():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -12415,6 +12750,54 @@ class Window(QtWidgets.QMainWindow):
         self.fit_worker = worker
         self.fit_worker.finished.connect(self.on_fit_finished)
         self._start_fit_worker(self.fit_worker)
+
+    def _start_multi_emitter_fit(self) -> None:
+        """Fit overlapping emitters in the whole movie, frame by frame (see
+        ``localize.localize_multi_emitter``): no identification needed."""
+        if len(self.channels) > 1 or self.view.split_fov_mode:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fit",
+                f"'{MULTI_EMITTER_MODEL}' fits one channel; it cannot fit "
+                "several channels or the regions of a split field of view "
+                "yet. Load one channel, or choose another model.",
+            )
+            return
+        dialog = self.parameters_dialog
+        self.status_bar.showMessage("Preparing the multi-emitter fit...")
+        worker = MultiEmitterFitWorker(
+            self.movie,
+            io.strip_mm_metadata(self.info),
+            self.camera_info,
+            dialog.multi_emitter_parameters(),
+            _copied_rois(self.view.rois),
+            self.frame_range,
+            dialog.camera_calibration or None,
+            self._extra_lateral_transforms(None),
+        )
+        self.fit_worker = worker
+        worker.finished.connect(self.on_multi_emitter_fit_finished)
+        self._start_fit_worker(worker)
+
+    def on_multi_emitter_fit_finished(
+        self,
+        locs: pd.DataFrame,
+        info: list[dict],
+        elapsed_time: float,
+        fit_z: bool,
+        calibrate_z: bool,
+    ) -> None:
+        """Show the PSF width the fit used, which the preview then uses,
+        and finish as any fit."""
+        sigma = info[-1].get("PSF Sigma (nm)") if info else None
+        if sigma is None:
+            # lateral corrections append an entry of their own
+            sigma = lib.get_from_metadata(info, "PSF Sigma (nm)")
+        if sigma is not None:
+            self.parameters_dialog.psf_sigma_spinbox.blockSignals(True)
+            self.parameters_dialog.psf_sigma_spinbox.setValue(sigma)
+            self.parameters_dialog.psf_sigma_spinbox.blockSignals(False)
+        self.on_fit_finished(locs, info, elapsed_time, fit_z, calibrate_z)
 
     def _single_channel_fit_worker(
         self,
@@ -13784,6 +14167,8 @@ class Window(QtWidgets.QMainWindow):
         parts of one field, and each is saved to its own file already."""
         if self.locs is None or self.view.split_fov_mode:
             return
+        if localize.ROI_ID_COLUMN in self.locs.columns:
+            return  # named by the fit (the multi-emitter fit does)
         rois = (self.last_identification_info or {}).get("ROI")
         self.locs = localize.add_roi_id(
             self.locs, rois, pixelsize=self.parameters_dialog.pixelsize.value()
@@ -14122,6 +14507,9 @@ class Window(QtWidgets.QMainWindow):
                 "run the calibration again.",
             )
             return
+        if self.parameters_dialog.is_multi_emitter():
+            self.fit()
+            return
         self.parameters_dialog.gpu_checkbox.setDisabled(True)
         if (
             calibrate_z
@@ -14387,6 +14775,70 @@ class FitWorker(QtCore.QThread):
             return
         dt = time.time() - t0
         self.finished.emit(locs, info, dt, self.fit_z, self.calibrate_z)
+
+
+class MultiEmitterFitWorker(QtCore.QThread):
+    """Fit overlapping emitters in a whole movie, frame by frame (see
+    ``localize.localize_multi_emitter``), and report the progress. Its
+    signals are those of ``FitWorker``, so the window finishes both
+    alike."""
+
+    phaseStarted = QtCore.pyqtSignal(str, int)
+    progressMade = QtCore.pyqtSignal(int, int)
+    # localizations, their metadata, elapsed time, and that neither a z fit
+    # nor a z calibration follows
+    finished = QtCore.pyqtSignal(pd.DataFrame, object, float, bool, bool)
+    aborted = QtCore.pyqtSignal()
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        movie,
+        info: list[dict],
+        camera_info: dict,
+        parameters: localize.MultiEmitterParameters,
+        rois: list,
+        frame_bounds: list | None,
+        camera_calibration: dict | None,
+        lateral_transforms: list | None,
+    ) -> None:
+        super().__init__()
+        self.movie = movie
+        self.info = info
+        self.camera_info = camera_info
+        self.parameters = parameters
+        self.rois = rois
+        self.frame_bounds = frame_bounds
+        self.camera_calibration = camera_calibration
+        self.lateral_transforms = lateral_transforms or []
+
+    def run(self) -> None:
+        t0 = time.time()
+        try:
+            locs, info = localize.localize_multi_emitter(
+                self.movie,
+                self.info,
+                camera_info=self.camera_info,
+                parameters=self.parameters,
+                roi=self.rois or None,
+                frame_bounds=self.frame_bounds,
+                camera_calibration=self.camera_calibration,
+                lateral_transforms=self.lateral_transforms or None,
+                parallel=True,
+                progress=_SignalProgress(
+                    on_value=self.progressMade.emit,
+                    on_phase=self.phaseStarted.emit,
+                ),
+                abort_callback=self.isInterruptionRequested,
+            )
+        except Exception as e:
+            # letting it escape run() kills the thread without a word
+            self.failed.emit(str(e))
+            return
+        if locs is None:  # aborted
+            self.aborted.emit()
+            return
+        self.finished.emit(locs, info, time.time() - t0, False, False)
 
 
 def _no_linked_spots_message(split_fov: bool) -> str:

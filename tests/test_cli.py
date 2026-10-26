@@ -1457,3 +1457,63 @@ def test_a_failed_drift_correction_does_not_stop_localize(
     assert (tmp_path / "a_locs.hdf5").exists()
     assert (tmp_path / "b_locs.hdf5").exists()
     assert capsys.readouterr().out.count("Drift correction failed") == 2
+
+
+def _copy_testdata(tmp_path) -> str:
+    """The bundled test movie copied into ``tmp_path``."""
+    import shutil
+
+    data = os.path.join(os.path.dirname(__file__), "data")
+    for ext in (".raw", ".yaml"):
+        shutil.copy(
+            os.path.join(data, "testdata" + ext), tmp_path / ("movie" + ext)
+        )
+    return str(tmp_path / "movie.raw")
+
+
+def test_localize_multi_emitter(tmp_path, monkeypatch):
+    movie = _copy_testdata(tmp_path)
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-sigma",
+        131,
+        "--snr-threshold",
+        8,
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    locs, info = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert len(locs)
+    assert {"significance", "n_emitters"} <= set(locs.columns)
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Sigma (nm)"] == pytest.approx(131.0)
+    assert entry["SNR Threshold"] == 8.0
+    assert entry["Pixelsize"] == 160
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-a", "lq"],
+        ["-zc", "calibration.yaml"],
+        ["-sc", "spline.hdf5"],
+        ["--regions-separately", "-r", 0, 0, 16, 32, "-r", 16, 0, 32, 32],
+    ],
+)
+def test_localize_multi_emitter_refuses(tmp_path, monkeypatch, options):
+    movie = _copy_testdata(tmp_path)
+    with pytest.raises(SystemExit, match="multi-emitter"):
+        _picasso(
+            monkeypatch,
+            "localize",
+            movie,
+            "--multi-emitter",
+            *options,
+            "-px",
+            160,
+        )

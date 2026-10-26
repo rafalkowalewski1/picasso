@@ -128,6 +128,9 @@ Many of the functionalities provided by Picasso were published independently, pl
    * - B-spline wavelet spot identification
      - Izeddin et al., Opt. Express, 2012
      - `10.1364/OE.20.002081 <https://doi.org/10.1364/OE.20.002081>`__
+   * - Multi-emitter fitting (3D-DAOSTORM). A port of storm-analysis, see the `storm-analysis license <https://github.com/jungmannlab/picasso/blob/master/LICENSES/storm-analysis-LICENSE.txt>`__
+     - Babcock et al., Opt. Nanoscopy, 2012
+     - `10.1186/2192-2853-1-6 <https://doi.org/10.1186/2192-2853-1-6>`__
    * - sCMOS pixel-dependent noise modeling
      - Huang et al., Nat. Methods, 2013
      - `10.1038/nmeth.2488 <https://doi.org/10.1038/nmeth.2488>`__

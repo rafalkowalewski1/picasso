@@ -25,6 +25,7 @@ The following PSF models are implemented:
 - **Spherical (isotropic) Gaussian.** Fits a single shared width, so ``sx`` and ``sy`` are always equal. The ``ellipticity`` column is not saved for this model. Supports multichannel fitting as well, see :ref:`localize-multichannel-gaussian`.
 - **Rotated elliptical Gaussian.** Same as *Elliptical Gaussian*, however, an in-plane rotation angle is also fitted and saved in the ``angle`` column, in degrees.
 - **Experimental PSF (cubic spline).** Fits an experimentally measured PSF; a 3D calibration recovers ``z`` directly; see :doc:`localize/spline`. Supports multichannel fitting as well, see :ref:`localize-multichannel-spline`.
+- **2D Gaussian, overlapping emitters.** Fits all emitters of a frame at once, so that emitters closer than about two PSF widths are localized separately, with a PSF width fixed for the movie. It finds the spots itself, without the identification step; see :doc:`localize/multi-emitter`.
 
 In addition, ``Average of ROI`` is available as a non-fitting option that simply sums the intensity of each spot.
 
@@ -185,6 +186,12 @@ Topics
 
       Building and checking a spline PSF calibration, fitting with it, and multichannel (e.g. biplane) spline fitting.
 
+   .. grid-item-card:: :octicon:`people;1.5em;sd-mr-1` Overlapping emitters
+      :link: localize/multi-emitter
+      :link-type: doc
+
+      Multi-emitter fitting of dense frames: when to use it, its settings and its output.
+
    .. grid-item-card:: :octicon:`git-compare;1.5em;sd-mr-1` Lateral corrections
       :link: localize/lateral-correction
       :link-type: doc
@@ -205,5 +212,6 @@ Topics
    localize/camera
    localize/3d-calibration
    localize/spline
+   localize/multi-emitter
    localize/lateral-correction
    localize/multichannel

@@ -5194,9 +5194,13 @@ class TestGuiConvergenceDefaults:
     and the fit runs another."""
 
     def test_every_iterating_method_has_defaults(self):
-        """Every ``fit`` code except "avg" iterates and must be listed."""
+        """Every ``fit`` code except "avg" iterates and must be listed. The
+        multi-emitter model is not a ``fit`` method: its schedule is its
+        own, and it shows no convergence boxes."""
         codes = set()
         for entry in localize_gui.FIT_MODELS.values():
+            if entry.get("multi_emitter"):
+                continue
             optimizers = entry["optimizers"]
             if optimizers is None:
                 codes.add(entry["code"])
@@ -5239,9 +5243,13 @@ class TestGuiConvergenceDefaults:
     def test_every_fitted_model_can_use_the_gpu(self):
         """Every PSF model in the dialog runs on both devices now, so ticking
         "Use GPU" must move *all* of them onto the GPU - a code left out of
-        ``_GPU_CAPABLE_CODES`` would silently keep fitting on the CPU. Only
-        "Average of ROI", which does not fit, is exempt."""
+        ``_GPU_CAPABLE_CODES`` would silently keep fitting on the CPU.
+        "Average of ROI", which does not fit, is exempt, and so is the
+        multi-emitter model, which runs on the CPU only (its checkbox is
+        disabled, see ``test_gui_localize_multi_emitter``)."""
         for entry in localize_gui.FIT_MODELS.values():
+            if entry.get("multi_emitter"):
+                continue
             for code in (entry["optimizers"] or {}).values():
                 assert code in localize_gui._GPU_CAPABLE_CODES
                 assert (
