@@ -195,17 +195,20 @@ Overlapping emitters
 emitters closer than about 2 PSF σ are localized separately, instead
 of one emitter per identified box (3D-DAOSTORM, `Babcock et al., Optical
 Nanoscopy, 2012 <https://doi.org/10.1186/2192-2853-1-6>`__). It finds the
-spots itself, so the identification options are ignored, and it fits a 2D
-Gaussian by maximum likelihood on the CPU; ``--fit-method``, the spline
-calibration and ``--regions-separately`` cannot be combined with it, and the
-3D calibration only with ``--psf-model elliptical``. See
-:ref:`localize-multi-emitter`.
+spots itself, so the identification options are ignored, and it fits by
+maximum likelihood on the CPU; ``--fit-method`` and ``--regions-separately``
+cannot be combined with it, the 3D calibration only with ``--psf-model
+elliptical`` and the spline calibration only with ``--psf-model spline``.
+See :ref:`localize-multi-emitter`.
 
 ``--psf-model``
-   The PSF σ of each emitter: ``fixed``, the same for every emitter (the
-   default); ``spherical``, one fitted σ per emitter; ``elliptical``, a fitted
-   σ in x and one in y per emitter, from which ``--z-calibration`` (with
-   ``--magnification-factor``) gives z.
+   The PSF of each emitter: a 2D Gaussian whose σ is ``fixed``, the same for
+   every emitter (the default), ``spherical``, one fitted σ per emitter, or
+   ``elliptical``, a fitted σ in x and one in y per emitter, from which
+   ``--z-calibration`` (with ``--magnification-factor``) gives z; or
+   ``spline``, the PSF of one ``--spline-calibration``, which gives z
+   directly for a 3D calibration (`Babcock & Zhuang, Scientific Reports,
+   2017 <https://doi.org/10.1038/s41598-017-00622-w>`__).
 ``--snr-threshold``
    The peak threshold and the minimum significance of an emitter, in units of
    the signal-to-noise ratio (default 15).
@@ -216,6 +219,10 @@ calibration and ``--regions-separately`` cannot be combined with it, and the
    The cycles of finding, fitting and subtracting per frame (20), the radius
    within which a new peak must be the maximum (5 camera pixels) and the width
    of the background low pass (8 camera pixels).
+``--peak-search-z``
+   For ``--psf-model spline`` with a 3D calibration: the z (nm) at which the
+   PSF filters the residual to find peaks (default 0); a new emitter starts at
+   the z where it is brightest.
 ``--seed-identification``
    Start each frame from the spots the identification options find, instead
    of the first cycle's peaks.
@@ -224,6 +231,7 @@ calibration and ``--regions-separately`` cannot be combined with it, and the
 
    picasso localize movie.tif --multi-emitter -px 130 --snr-threshold 8
    picasso localize movie.tif --multi-emitter -px 130 --psf-model elliptical -zc 3d_calib.yaml -mf 0.79
+   picasso localize movie.tif --multi-emitter -px 130 --psf-model spline -sc spline_calib.hdf5
 
 Analyzing several movies as one
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

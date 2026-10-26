@@ -326,7 +326,7 @@ GAUSS_LINK_PHOTONS_TIP = (
 
 # The fit model that fits overlapping emitters, frame by frame; it finds
 # the spots itself, so it needs no identification.
-MULTI_EMITTER_MODEL = "2D Gaussian, overlapping emitters"
+MULTI_EMITTER_MODEL = "Overlapping emitters"
 # its code in ``FIT_MODELS``
 MULTI_EMITTER_CODE = "multi-emitter"
 # its PSF models (``localize.MultiEmitterParameters.psf_model``), by the
@@ -335,6 +335,7 @@ MULTI_EMITTER_PSF_MODELS = {
     "Fixed sigma": "fixed",
     "Fitted sigma": "spherical",
     "Fitted sx and sy (astigmatic 3D)": "elliptical",
+    "Experimental PSF (cubic spline)": "spline",
 }
 
 # Fitting models offered in the GUI, decoupled from the optimizer. Each
@@ -393,13 +394,13 @@ MODEL_TOOLTIP = (
     "Useful for tilted/anisotropic PSFs.\n\n"
     "2D spherical Gaussian:\n"
     "Gaussian with one common width for x and y.\n\n"
-    "2D Gaussian, overlapping emitters:\n"
+    "Overlapping emitters:\n"
     "Fits all emitters of a frame at once, so that emitters closer than\n"
     "about 2 PSF sigma are localized separately. Finds the spots itself\n"
-    "(no identification), with a PSF sigma fixed for the movie or fitted\n"
-    "per emitter (PSF model). For 2D data with emitters in focus, e.g.,\n"
-    "DNA-PAINT at high imager concentration, and astigmatic 3D data.\n"
-    "MLE on the CPU.\n\n"
+    "(no identification), with a Gaussian PSF whose sigma is fixed for\n"
+    "the movie or fitted per emitter, or a spline PSF (PSF model). For\n"
+    "2D data with emitters in focus, e.g., DNA-PAINT at high imager\n"
+    "concentration, and 3D data. MLE on the CPU.\n\n"
     "Experimental PSF (cubic spline):\n"
     "Fits a cubic spline interpolation of a measured 3D PSF\n"
     "(requires a spline calibration file).\n"
@@ -538,6 +539,7 @@ def _compile_multi_emitter_fit() -> None:
         2,
         5.0,
         8.0,
+        residualfit.NO_SPLINE,
     )
     residualfit.find_peaks(padded, mask, sigma, 6.0, 5.0, 8.0)
     residualfit.fit_free_sigma(frame[None, 8:15, 8:15])
@@ -4657,16 +4659,19 @@ class ParametersDialog(lib.Dialog):
             "Babcock, H., Sigal, Y. M. & Zhuang, X. A high-density 3D\n"
             "localization algorithm for stochastic optical reconstruction\n"
             "microscopy. Optical Nanoscopy 1, 6 (2012), ported from its\n"
-            "implementation in storm-analysis (Zhuang Lab)."
+            "implementation in storm-analysis (Zhuang Lab).\n\n"
+            "The spline PSF: Babcock, H. P. & Zhuang, X. Analyzing single\n"
+            "molecule localization microscopy data using cubic splines.\n"
+            "Sci. Rep., 2017, implemented from the paper."
         )
         vbox.addWidget(me_groupbox)
         me_grid = QtWidgets.QGridLayout(me_groupbox.content)
         me_grid.addWidget(lib.HelpButton(self.MULTI_EMITTER_URL), 0, 2)
         psf_model_label = QtWidgets.QLabel("PSF model:")
         psf_model_tip = (
-            "The PSF sigma of each emitter:\n"
-            "Fixed sigma: the same for every emitter, the PSF sigma\n"
-            "below. Resolves close pairs best.\n"
+            "The PSF of each emitter:\n"
+            "Fixed sigma: a Gaussian with the same sigma for every\n"
+            "emitter, the PSF sigma below. Resolves close pairs best.\n"
             "Fitted sigma: one sigma per emitter, the same in x and y,\n"
             "e.g., for emitters not all in focus.\n"
             "Fitted sx and sy: a sigma in x and one in y per emitter, for\n"
@@ -4674,7 +4679,11 @@ class ParametersDialog(lib.Dialog):
             "calibration loaded under '3D via Astigmatism'.\n"
             "A fitted sigma starts at, and stays within 0.5 to 5 times,\n"
             "the PSF sigma below. A free sigma can take a close pair for\n"
-            "one wide emitter."
+            "one wide emitter.\n"
+            "Experimental PSF (cubic spline): the PSF of the spline\n"
+            "calibration loaded under 'Experimental PSF (spline)', which\n"
+            "gives z directly for a 3D calibration (Babcock & Zhuang,\n"
+            "Sci. Rep. 2017)."
         )
         psf_model_label.setToolTip(psf_model_tip)
         me_grid.addWidget(psf_model_label, 0, 0)
@@ -4705,7 +4714,9 @@ class ParametersDialog(lib.Dialog):
             self.on_multi_emitter_changed
         )
         me_grid.addWidget(self.snr_threshold_spinbox, 1, 1)
-        sigma_label = QtWidgets.QLabel("PSF sigma (nm):")
+        self.psf_sigma_label = sigma_label = QtWidgets.QLabel(
+            "PSF sigma (nm):"
+        )
         sigma_tip = (
             "Standard deviation of the PSF: fixed in the fit, or the start\n"
             "of a fitted one; peaks are found with it. Estimated from the\n"
@@ -4775,6 +4786,28 @@ class ParametersDialog(lib.Dialog):
             self.on_multi_emitter_changed
         )
         me_grid.addWidget(self.background_sigma_spinbox, 5, 1)
+        self.peak_search_z_label = QtWidgets.QLabel("Peak search z (nm):")
+        search_z_tip = (
+            "z at which the spline PSF filters the residual to find peaks,\n"
+            "separated by commas; a new emitter starts at the z where it\n"
+            "is brightest. More than one helps only for PSFs that change\n"
+            "shape with z beyond a blur, e.g., the double helix."
+        )
+        self.peak_search_z_label.setToolTip(search_z_tip)
+        me_grid.addWidget(self.peak_search_z_label, 6, 0)
+        self.peak_search_z_edit = QtWidgets.QLineEdit("0")
+        # numbers separated by commas, with optional whitespace
+        number = r"\s*-?\d+(\.\d*)?\s*"
+        self.peak_search_z_edit.setValidator(
+            QtGui.QRegularExpressionValidator(
+                QtCore.QRegularExpression(f"{number}(,{number})*")
+            )
+        )
+        self.peak_search_z_edit.setToolTip(search_z_tip)
+        self.peak_search_z_edit.editingFinished.connect(
+            self.on_multi_emitter_changed
+        )
+        me_grid.addWidget(self.peak_search_z_edit, 6, 1)
         self.on_psf_sigma_estimate_changed()
 
         # 3D via astigmatism (Gaussian models); shown for non-spline fits
@@ -5272,8 +5305,25 @@ class ParametersDialog(lib.Dialog):
                 or self.multi_emitter_psf_model() == "elliptical"
             )
             self.z_groupbox.setVisible(not needs_spline and astigmatic)
+        spline_psf = (
+            multi_emitter and self.multi_emitter_psf_model() == "spline"
+        )
         if self.spline_groupbox is not None:
-            self.spline_groupbox.setVisible(needs_spline)
+            self.spline_groupbox.setVisible(needs_spline or spline_psf)
+        if getattr(self, "peak_search_z_edit", None) is not None:
+            # the spline takes its PSF from the calibration, and searches
+            # in z with a 3D one
+            for widget in (
+                self.psf_sigma_label,
+                self.psf_sigma_spinbox,
+                self.psf_sigma_estimate_checkbox,
+            ):
+                widget.setVisible(not spline_psf)
+            search_z = spline_psf and (
+                (self.spline_calibration or {}).get("model") == "spline-3d"
+            )
+            self.peak_search_z_label.setVisible(search_z)
+            self.peak_search_z_edit.setVisible(search_z)
         if self.channel_registration_groupbox is not None:
             self.channel_registration_groupbox.setVisible(needs_registration)
         if self.multi_emitter_groupbox is not None:
@@ -5304,8 +5354,10 @@ class ParametersDialog(lib.Dialog):
         return MULTI_EMITTER_PSF_MODELS[combo.currentText()]
 
     def on_psf_model_changed(self) -> None:
-        """Show '3D via Astigmatism' for the fit that gives z, and refresh
-        the preview. The dialog grows or shrinks with it."""
+        """Show '3D via Astigmatism' for the fit that gives z, the spline
+        calibration and its settings for the spline instead of the PSF
+        sigma, and refresh the preview. The dialog grows or shrinks with
+        it."""
         lib.resize_with_contents(
             self, self.scroll_area, self._update_calib_group_visibility
         )
@@ -5325,14 +5377,30 @@ class ParametersDialog(lib.Dialog):
         False (the preview, which uses the sigma shown)."""
         if estimate is None:
             estimate = self.psf_sigma_estimate_checkbox.isChecked()
+        psf_model = self.multi_emitter_psf_model()
+        if psf_model == "spline":
+            # its PSF comes from the calibration
+            estimate = True
         return localize.MultiEmitterParameters(
-            psf_model=self.multi_emitter_psf_model(),
+            psf_model=psf_model,
             snr_threshold=self.snr_threshold_spinbox.value(),
             psf_sigma=None if estimate else self.psf_sigma_spinbox.value(),
             max_cycles=self.max_cycles_spinbox.value(),
             peak_radius=self.peak_radius_spinbox.value(),
             background_sigma=self.background_sigma_spinbox.value(),
+            peak_search_z=self.peak_search_z(),
         )
+
+    def peak_search_z(self) -> tuple[float, ...]:
+        """The z (nm) of the spline's peak search, typed as a list
+        separated by commas; 0 where nothing usable is typed."""
+        values = []
+        for part in self.peak_search_z_edit.text().split(","):
+            try:
+                values.append(float(part))
+            except ValueError:
+                pass
+        return tuple(values) or (0.0,)
 
     def on_psf_sigma_estimate_changed(self) -> None:
         """The PSF sigma is typed in only when it is not estimated."""
@@ -5889,6 +5957,11 @@ class ParametersDialog(lib.Dialog):
             self.spline_calib_label.setText("-- no calibration loaded --")
             self.spline_calib_label.setToolTip("")
         self._update_link_photons_visibility()
+        if getattr(self, "peak_search_z_edit", None) is not None:
+            # the peak search in z needs a 3D calibration
+            lib.resize_with_contents(
+                self, self.scroll_area, self._update_calib_group_visibility
+            )
         # The channel sum may have been registered from the calibration that
         # has just been replaced. Dropping it re-registers it from the new one
         # on the next draw, which is also what brings the summed view up when
@@ -7313,6 +7386,9 @@ class Window(QtWidgets.QMainWindow):
         estimate = saved.get("estimate_psf_sigma")
         if isinstance(estimate, bool):
             dialog.psf_sigma_estimate_checkbox.setChecked(estimate)
+        search_z = saved.get("peak_search_z")
+        if isinstance(search_z, str):
+            dialog.peak_search_z_edit.setText(search_z)
         model = saved.get("psf_model")
         for name, value in MULTI_EMITTER_PSF_MODELS.items():
             if value == model:
@@ -7386,6 +7462,7 @@ class Window(QtWidgets.QMainWindow):
             "max_cycles": dialog.max_cycles_spinbox.value(),
             "peak_radius": dialog.peak_radius_spinbox.value(),
             "background_sigma": dialog.background_sigma_spinbox.value(),
+            "peak_search_z": dialog.peak_search_z_edit.text(),
         }
         settings["Localize"]["Columns to save"] = {
             column: checkbox.isChecked()
@@ -10287,9 +10364,24 @@ class Window(QtWidgets.QMainWindow):
         the emitters, with the PSF sigma shown on the dialog."""
         dialog = self.parameters_dialog
         camera_info = self.camera_info
+        parameters = dialog.multi_emitter_parameters(estimate=False)
         sigma = dialog.psf_sigma_spinbox.value() / camera_info["Pixelsize"]
+        spline = residualfit.NO_SPLINE
+        if parameters.psf_model == "spline":
+            if not dialog.spline_calibration:
+                self.status_bar.showMessage(
+                    "Preview: load a spline calibration first."
+                )
+                return
+            try:
+                spline, sigma = localize._multi_emitter_spline(
+                    dialog.spline_calibration, parameters
+                )
+            except ValueError as e:
+                self.status_bar.showMessage(f"Preview: {e}")
+                return
         frame = np.asarray(self.movie[self.curr_frame_number])
-        pad = residualfit.padding(sigma, dialog.multi_emitter_psf_model())
+        pad = residualfit.padding(sigma, parameters.psf_model, spline)
         mask = localize._peak_mask(
             frame.shape,
             pad,
@@ -10320,7 +10412,8 @@ class Window(QtWidgets.QMainWindow):
                 variance,
                 mask,
                 sigma,
-                dialog.multi_emitter_parameters(estimate=False),
+                parameters,
+                spline,
             )
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -12860,6 +12953,18 @@ class Window(QtWidgets.QMainWindow):
             calibration_3d["Magnification factor"] = (
                 dialog.magnification_factor.value()
             )
+        spline_calibration = None
+        if parameters.psf_model == "spline":
+            if not dialog.spline_calibration:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Fit",
+                    "Load a spline PSF calibration first (Experimental "
+                    "PSF (spline) > Load calibration), or build one via "
+                    "3D > Calibrate spline PSF.",
+                )
+                return
+            spline_calibration = dialog.spline_calibration
         self.status_bar.showMessage("Preparing the multi-emitter fit...")
         worker = MultiEmitterFitWorker(
             self.movie,
@@ -12869,8 +12974,11 @@ class Window(QtWidgets.QMainWindow):
             _copied_rois(self.view.rois),
             self.frame_range,
             dialog.camera_calibration or None,
-            self._extra_lateral_transforms(calibration_3d),
+            self._extra_lateral_transforms(
+                calibration_3d or spline_calibration
+            ),
             calibration_3d,
+            spline_calibration,
         )
         self.fit_worker = worker
         self._fit_status_prefix = ""
@@ -14903,6 +15011,7 @@ class MultiEmitterFitWorker(QtCore.QThread):
         camera_calibration: dict | None,
         lateral_transforms: list | None,
         calibration_3d: dict | None = None,
+        spline_calibration: dict | None = None,
     ) -> None:
         super().__init__()
         self.movie = movie
@@ -14915,6 +15024,8 @@ class MultiEmitterFitWorker(QtCore.QThread):
         self.lateral_transforms = lateral_transforms or []
         # astigmatic z from the fitted sigmas, see localize_multi_emitter
         self.calibration_3d = calibration_3d
+        # the PSF of the "spline" model
+        self.spline_calibration = spline_calibration
 
     def run(self) -> None:
         t0 = time.time()
@@ -14928,6 +15039,7 @@ class MultiEmitterFitWorker(QtCore.QThread):
                 frame_bounds=self.frame_bounds,
                 camera_calibration=self.camera_calibration,
                 calibration_3d=self.calibration_3d,
+                spline_calibration=self.spline_calibration,
                 lateral_transforms=self.lateral_transforms or None,
                 parallel=True,
                 progress=_SignalProgress(

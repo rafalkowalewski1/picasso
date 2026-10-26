@@ -1,4 +1,4 @@
-"""Picasso: Localize with the "2D Gaussian, overlapping emitters" model,
+"""Picasso: Localize with the "Overlapping emitters" model,
 which runs ``localize.localize_multi_emitter``: the settings it shows and
 hides, the fit it runs without an identification, the live preview and
 the settings it keeps.
@@ -20,7 +20,7 @@ from picasso import io
 from picasso.gui import localize as gui_localize
 from tests.test_gui_localize_calibration import _load, _Messages
 from tests.test_gui_localize_dialogs import _memmap, _status, _wait
-from tests.test_multi_emitter import _emitters, _render
+from tests.test_multi_emitter import _emitters, _render, _spline_calibration
 
 PIXELSIZE = 130.0
 FRAMES = 12
@@ -95,6 +95,8 @@ def test_the_psf_model_selects_the_fit_and_its_z(window):
         "Fitted sigma": ("spherical", True),
         # z is read from the sigmas in x and y
         "Fitted sx and sy (astigmatic 3D)": ("elliptical", False),
+        # gives z itself
+        "Experimental PSF (cubic spline)": ("spline", True),
     }
     for name, (model, z_hidden) in expected.items():
         dialog.psf_model_combo.setCurrentText(name)
@@ -103,6 +105,78 @@ def test_the_psf_model_selects_the_fit_and_its_z(window):
     # the other models keep the box
     dialog.fit_model.setCurrentIndex(0)
     assert not dialog.z_groupbox.isHidden()
+
+
+def test_the_spline_takes_its_psf_from_the_calibration(window):
+    """The spline shows the calibration loader instead of the PSF sigma,
+    and the peak search in z for a 3D calibration."""
+    dialog = window.parameters_dialog
+    _select(window)
+    assert dialog.spline_groupbox.isHidden()
+    assert not dialog.psf_sigma_spinbox.isHidden()
+    dialog.psf_model_combo.setCurrentText("Experimental PSF (cubic spline)")
+    assert not dialog.spline_groupbox.isHidden()
+    for widget in (
+        dialog.psf_sigma_label,
+        dialog.psf_sigma_spinbox,
+        dialog.psf_sigma_estimate_checkbox,
+    ):
+        assert widget.isHidden()
+    # no calibration, or a 2D one: no z to search
+    assert dialog.peak_search_z_edit.isHidden()
+    dialog.spline_calibration = _spline_calibration("spline-3d")
+    dialog._update_calib_group_visibility()
+    assert not dialog.peak_search_z_edit.isHidden()
+    dialog.peak_search_z_edit.setText("-200, 0, 200")
+    parameters = dialog.multi_emitter_parameters()
+    assert parameters.psf_model == "spline"
+    assert parameters.psf_sigma is None
+    assert parameters.peak_search_z == (-200.0, 0.0, 200.0)
+    dialog.psf_model_combo.setCurrentText("Fixed sigma")
+    assert dialog.spline_groupbox.isHidden()
+    assert dialog.peak_search_z_edit.isHidden()
+    assert not dialog.psf_sigma_spinbox.isHidden()
+
+
+def test_the_spline_fit_gives_z(loaded, tmp_path, monkeypatch):
+    messages = _Messages(monkeypatch)
+    _select(loaded)
+    dialog = loaded.parameters_dialog
+    dialog.psf_model_combo.setCurrentText("Experimental PSF (cubic spline)")
+    # without a calibration, the fit asks for one
+    loaded.localize()
+    assert messages.kinds == ["warning"]
+    assert "spline PSF calibration" in messages.text("warning")
+    dialog.spline_calibration = _spline_calibration("spline-3d")
+    messages.shown.clear()
+    loaded.localize()
+    _wait(loaded)
+    assert messages.shown == []
+    locs, info = io.load_locs(str(tmp_path / "Channel 0_locs.hdf5"))
+    assert {"z", "lpz"} <= set(locs.columns)
+    assert "sx" not in locs.columns
+    assert len(locs) >= 4 * FRAMES
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "spline"
+    assert entry["Spline calibration model"] == "spline-3d"
+
+
+def test_the_spline_preview(loaded):
+    _select(loaded)
+    dialog = loaded.parameters_dialog
+    dialog.psf_model_combo.setCurrentText("Experimental PSF (cubic spline)")
+    dialog.preview_checkbox.setChecked(True)
+    loaded.draw_frame()
+    assert "load a spline calibration" in _status(loaded)
+    dialog.spline_calibration = _spline_calibration("spline-2d")
+    loaded.draw_frame()
+    markers = [
+        item
+        for item in loaded.scene.items()
+        if isinstance(item, gui_localize.FitMarker)
+    ]
+    assert len(markers) == 8
+    assert _status(loaded) == "Preview: 8 emitters in this frame."
 
 
 def test_the_dialog_leaves_no_gap(window):
@@ -293,6 +367,7 @@ def test_the_settings_are_kept(qt_offscreen):
     dialog.max_cycles_spinbox.setValue(12)
     dialog.peak_radius_spinbox.setValue(4.0)
     dialog.background_sigma_spinbox.setValue(10.0)
+    dialog.peak_search_z_edit.setText("-300, 0")
     first.close()
     second = gui_localize.Window()
     try:
@@ -304,5 +379,6 @@ def test_the_settings_are_kept(qt_offscreen):
         assert dialog.max_cycles_spinbox.value() == 12
         assert dialog.peak_radius_spinbox.value() == 4.0
         assert dialog.background_sigma_spinbox.value() == 10.0
+        assert dialog.peak_search_z() == (-300.0, 0.0)
     finally:
         second.close()

@@ -1566,6 +1566,40 @@ def test_localize_multi_emitter_elliptical_gives_z(tmp_path, monkeypatch):
     assert z_entry["Z Calibration Path"] == calibration
 
 
+def test_localize_multi_emitter_spline_gives_z(tmp_path, monkeypatch):
+    from tests.test_multi_emitter import _spline_calibration
+
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "spline_calib.hdf5")
+    io.save_spline_calibration(calibration, _spline_calibration("spline-3d"))
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-model",
+        "spline",
+        "-sc",
+        calibration,
+        "--peak-search-z",
+        -200,
+        0,
+        200,
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    locs, info = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert len(locs)
+    assert {"z", "lpz"} <= set(locs.columns)
+    assert "sx" not in locs.columns
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "spline"
+    assert entry["Peak Search z (nm)"] == [-200.0, 0.0, 200.0]
+    assert entry["Spline calibration path"] == calibration
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -1573,7 +1607,11 @@ def test_localize_multi_emitter_elliptical_gives_z(tmp_path, monkeypatch):
         # z needs the sigmas in x and y of --psf-model elliptical
         ["-zc", "calibration.yaml"],
         ["--psf-model", "spherical", "-zc", "calibration.yaml"],
+        # a spline calibration is the PSF of --psf-model spline only
         ["-sc", "spline.hdf5"],
+        ["--psf-model", "spline"],
+        ["--psf-model", "spline", "-sc", "a.hdf5", "-sc", "b.hdf5"],
+        ["--psf-model", "spline", "-sc", "spline.hdf5", "-zc", "c.yaml"],
         ["--regions-separately", "-r", 0, 0, 16, 32, "-r", 16, 0, 32, 32],
     ],
 )

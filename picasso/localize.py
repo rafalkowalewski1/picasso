@@ -6749,15 +6749,8 @@ def _locs_from_fits_spline_link_xyz(
         photons_unc = np.sqrt(np.sum(var_amp * (ps[None, :] ** 2), axis=1))
         bg_unc = np.sqrt(np.sum(var_bg, axis=1))
 
-    z_center = float(calibration.get("z_center", 0.0))
-    z_init = float(calibration.get("z_init", z_center))
-    z_step_nm = float(calibration.get("z_step_nm", 1.0))
-    magnification_factor = float(calibration.get("magnification_factor", 1.0))
-    z = (z_shift + z_init) * z_step_nm * magnification_factor + (
-        z_center - z_init
-    ) * z_step_nm
+    z, lpz = _spline_z_nm(z_shift, crlb[:, 2], calibration)
     with np.errstate(invalid="ignore", divide="ignore"):
-        lpz = np.sqrt(crlb[:, 2]) * z_step_nm * magnification_factor
         # Each channel's share of the total photons; sums to 1 per spot.
         rel_photons = np.where(
             photons[:, None] > 0, photons_ch / photons[:, None], np.nan
@@ -6795,6 +6788,41 @@ def _locs_from_fits_spline_link_xyz(
     locs = pd.DataFrame(_lengths_to_nm(columns, pixelsize))
     locs.sort_values(by="frame", kind="quicksort", inplace=True)
     return locs
+
+
+def _spline_z_nm(
+    z_shift: np.ndarray, z_variance: np.ndarray, calibration: dict
+) -> tuple[np.ndarray, np.ndarray]:
+    """``z`` and ``lpz`` (nm) of spline fits from their fitted z shift
+    (spline slices, the negative of the native spline coordinate) and its
+    variance.
+
+    The shift from the sharpest slice is scaled by the magnification
+    factor; the offset of that slice from the calibration's z reference
+    is raw stage nm."""
+    z_center = float(calibration.get("z_center", 0.0))
+    z_init = float(calibration.get("z_init", z_center))
+    z_step_nm = float(calibration.get("z_step_nm", 1.0))
+    magnification_factor = float(calibration.get("magnification_factor", 1.0))
+    z = (z_shift + z_init) * z_step_nm * magnification_factor + (
+        z_center - z_init
+    ) * z_step_nm
+    with np.errstate(invalid="ignore"):
+        lpz = np.sqrt(z_variance) * z_step_nm * magnification_factor
+    return z, lpz
+
+
+def _spline_z_shift(z: np.ndarray, calibration: dict) -> np.ndarray:
+    """The z shift (spline slices) of spline fits at ``z`` (nm), the
+    inverse of :func:`_spline_z_nm`."""
+    z_center = float(calibration.get("z_center", 0.0))
+    z_init = float(calibration.get("z_init", z_center))
+    z_step_nm = float(calibration.get("z_step_nm", 1.0))
+    magnification_factor = float(calibration.get("magnification_factor", 1.0))
+    z = np.asarray(z, dtype=np.float64)
+    return (z - (z_center - z_init) * z_step_nm) / (
+        z_step_nm * magnification_factor
+    ) - z_init
 
 
 def locs_from_fits_spline(
@@ -7011,20 +7039,8 @@ def _locs_from_fits_spline(
         **lib.net_gradient_column(identifications),
     }
     if is_3d:
-        z_shift = np.asarray(theta[:, 3])
-        z_center = float(calibration.get("z_center", 0.0))
-        z_init = float(calibration.get("z_init", z_center))
-        z_step_nm = float(calibration.get("z_step_nm", 1.0))
-        magnification_factor = float(
-            calibration.get("magnification_factor", 1.0)
-        )
-        z_position = (z_shift + z_init) * z_step_nm * magnification_factor
-        z_offset_nm = (z_center - z_init) * z_step_nm  # raw stage nm, no mag
-        z = z_position + z_offset_nm
+        z, lpz = _spline_z_nm(np.asarray(theta[:, 3]), crlb[:, 2], calibration)
         columns["z"] = z.astype(np.float32)
-        with np.errstate(invalid="ignore"):
-            # var(z_shift) -> nm via the same z-step scaling used for z
-            lpz = np.sqrt(crlb[:, 2]) * z_step_nm * magnification_factor
         columns["lpz"] = lpz.astype(np.float32)
     columns["photons_unc"] = photons_unc.astype(np.float32)
     columns["bg_unc"] = bg_unc.astype(np.float32)
@@ -9654,15 +9670,17 @@ class MultiEmitterParameters:
 
     Parameters
     ----------
-    psf_model : {"fixed", "spherical", "elliptical"}, optional
-        The PSF sigma of each emitter: "fixed" (the default) is the same
-        for every emitter, ``psf_sigma``; "spherical" fits one sigma per
-        emitter, the same in x and y; "elliptical" fits a sigma in x and
-        one in y per emitter, e.g., for astigmatic 3D data, whose z an
-        astigmatic calibration then gives (see
-        :func:`localize_multi_emitter`). These are the storm-analysis
-        models ``2dfixed``, ``2d`` and ``3d``. A fitted sigma stays within
-        0.5 to 5 times ``psf_sigma``.
+    psf_model : {"fixed", "spherical", "elliptical", "spline"}, optional
+        The PSF of each emitter. The Gaussian models differ in its sigma:
+        "fixed" (the default) is the same for every emitter,
+        ``psf_sigma``; "spherical" fits one sigma per emitter, the same in
+        x and y; "elliptical" fits a sigma in x and one in y per emitter,
+        e.g., for astigmatic 3D data, whose z an astigmatic calibration
+        then gives (see :func:`localize_multi_emitter`). These are the
+        storm-analysis models ``2dfixed``, ``2d`` and ``3d``. A fitted
+        sigma stays within 0.5 to 5 times ``psf_sigma``. "spline" is an
+        experimental PSF from a spline calibration (Babcock & Zhuang,
+        2017), which gives z directly for a 3D calibration.
     snr_threshold : float, optional
         Peaks are found where the residual of the fit, smoothed with the
         PSF, exceeds this many times its expected noise, and an emitter
@@ -9673,9 +9691,10 @@ class MultiEmitterParameters:
     psf_sigma : float or None, optional
         Standard deviation of the PSF in nm: fixed in the fit, or, where
         it is fitted, its starting value. Peaks are found, and those
-        closer than it pruned, with it in every model. None (the default)
-        estimates it from the movie, as the median sigma of isolated
-        emitters fitted with a free sigma.
+        closer than it pruned, with it in every Gaussian model. None (the
+        default) estimates it from the movie, as the median sigma of
+        isolated emitters fitted with a free sigma. Must be None for the
+        spline, which takes its PSF from the calibration.
     max_cycles : int, optional
         Most cycles of finding, fitting and subtracting per frame. Default
         is 20.
@@ -9685,14 +9704,21 @@ class MultiEmitterParameters:
     background_sigma : float, optional
         Sigma (camera pixels) of the Gaussian low pass that estimates the
         background from the frame minus the fit. Default is 8.
+    peak_search_z : tuple of float, optional
+        z (nm) at which the spline PSF filters the residual to find peaks
+        with a 3D calibration; a new emitter starts at the z where it is
+        brightest. More than one helps only for PSFs whose shape changes
+        with z beyond a blur, e.g., the double helix (Babcock & Zhuang,
+        2017). Ignored by the other models. Default is (0.0,).
 
     Raises
     ------
     ValueError
         If ``psf_model`` is not one of the models, ``snr_threshold``,
         ``peak_radius`` or ``background_sigma`` not a positive number,
-        ``max_cycles`` not a positive integer, or ``psf_sigma`` neither
-        None nor a positive number.
+        ``max_cycles`` not a positive integer, ``psf_sigma`` neither None
+        nor a positive number or given for the spline, or
+        ``peak_search_z`` not one or more finite numbers.
 
     Examples
     --------
@@ -9703,14 +9729,19 @@ class MultiEmitterParameters:
     A sigma per emitter, e.g., where the emitters are not all in focus:
 
     >>> parameters = localize.MultiEmitterParameters(psf_model="spherical")
+
+    An experimental PSF, from a spline calibration:
+
+    >>> parameters = localize.MultiEmitterParameters(psf_model="spline")
     """
 
-    psf_model: Literal["fixed", "spherical", "elliptical"] = "fixed"
+    psf_model: Literal["fixed", "spherical", "elliptical", "spline"] = "fixed"
     snr_threshold: float = residualfit.THRESHOLD
     psf_sigma: float | None = None
     max_cycles: int = residualfit.N_CYCLES
     peak_radius: float = residualfit.PEAK_RADIUS
     background_sigma: float = residualfit.BACKGROUND_SIGMA
+    peak_search_z: tuple[float, ...] = (0.0,)
 
     def __post_init__(self) -> None:
         if self.psf_model not in residualfit.PSF_MODELS:
@@ -9745,6 +9776,30 @@ class MultiEmitterParameters:
                     f"positive number of nm, got {sigma!r}."
                 )
             object.__setattr__(self, "psf_sigma", float(sigma))
+            if self.psf_model == "spline":
+                raise ValueError(
+                    "psf_sigma does not apply to psf_model='spline', which "
+                    "takes its PSF from the spline calibration."
+                )
+        search_z = self.peak_search_z
+        if isinstance(search_z, (int, float, np.number)) and not isinstance(
+            search_z, (bool, np.bool_)
+        ):
+            search_z = (search_z,)
+        try:
+            values = tuple(float(z) for z in search_z)
+        except (TypeError, ValueError):
+            values = ()
+        if (
+            not values
+            or any(isinstance(z, (bool, np.bool_)) for z in search_z)
+            or not all(np.isfinite(values))
+        ):
+            raise ValueError(
+                "peak_search_z must be one or more finite numbers of nm, "
+                f"got {self.peak_search_z!r}."
+            )
+        object.__setattr__(self, "peak_search_z", values)
 
     def to_info(self) -> dict:
         """The settings under the keys of the fit's metadata.
@@ -9756,8 +9811,9 @@ class MultiEmitterParameters:
         -------
         info : dict
             ``"PSF Model"``, ``"SNR Threshold"``, ``"PSF Sigma (nm)"``,
-            ``"Max. Cycles"``, ``"Peak Search Radius"`` and ``"Background
-            Filter Sigma"``.
+            ``"Max. Cycles"``, ``"Peak Search Radius"``, ``"Background
+            Filter Sigma"`` and, for the spline, ``"Peak Search z
+            (nm)"``.
         """
         info = {
             "PSF Model": self.psf_model,
@@ -9768,6 +9824,8 @@ class MultiEmitterParameters:
         info["Max. Cycles"] = self.max_cycles
         info["Peak Search Radius"] = self.peak_radius
         info["Background Filter Sigma"] = self.background_sigma
+        if self.psf_model == "spline":
+            info["Peak Search z (nm)"] = list(self.peak_search_z)
         return info
 
     @classmethod
@@ -9799,6 +9857,7 @@ class MultiEmitterParameters:
             background_sigma=info.get(
                 "Background Filter Sigma", residualfit.BACKGROUND_SIGMA
             ),
+            peak_search_z=info.get("Peak Search z (nm)", (0.0,)),
         )
 
 
@@ -9984,12 +10043,14 @@ def _multi_emitter_frame(
     mask: np.ndarray,
     sigma: float,
     parameters: MultiEmitterParameters,
+    spline: residualfit.SplinePSF = residualfit.NO_SPLINE,
 ) -> residualfit.FrameResult:
     """Fit one camera frame (see ``residualfit.analyze_frame``); the
     results are in the coordinates of the padded frame. ``seeds`` are
     ``(n, 2)`` integer x, y pixel positions that start the first cycle
-    instead of the peak finder, or None."""
-    pad = residualfit.padding(sigma, parameters.psf_model)
+    instead of the peak finder, or None. ``spline`` is the PSF of the
+    "spline" model (see :func:`_multi_emitter_spline`)."""
+    pad = residualfit.padding(sigma, parameters.psf_model, spline)
     photons = np.pad(
         _frame_photons(frame, camera_info, offset, gain),
         pad,
@@ -10017,7 +10078,91 @@ def _multi_emitter_frame(
         parameters.max_cycles,
         parameters.peak_radius,
         parameters.background_sigma,
+        spline,
     )
+
+
+def _multi_emitter_spline(
+    calibration: dict, parameters: MultiEmitterParameters
+) -> tuple[residualfit.SplinePSF, float]:
+    """The PSF of a "spline" multi-emitter fit from a spline calibration,
+    and the Gaussian-equivalent sigma (camera pixels) the fit prunes
+    with.
+
+    The PSF is divided by the calibration's ``photon_scale``, the sum of
+    its in-focus slice, so the fitted amplitude is in photons, as in the
+    single-emitter spline fit."""
+    model = calibration.get("model")
+    if model not in ("spline-2d", "spline-3d"):
+        raise ValueError(
+            "The multi-emitter fit takes a single-channel spline "
+            "calibration ('spline-2d' or 'spline-3d'), got a "
+            f"{model!r} calibration."
+        )
+    if float(calibration.get("oversampling", 1.0)) != 1.0:
+        raise ValueError(
+            "The multi-emitter fit takes a spline calibration with its "
+            "knots on the camera pixels (oversampling 1), got oversampling "
+            f"{calibration.get('oversampling')}."
+        )
+    coeff = precision._spline_coeff_reshaped(calibration)[0]
+    if model == "spline-2d":
+        # a 2D spline is a 3D one of a single z cell, held at z = 0
+        niy, nix = coeff.shape[:2]
+        lifted = np.zeros((1, niy, nix, 4, 4, 4))
+        lifted[0, :, :, 0] = coeff
+        coeff = lifted
+    box = coeff.shape[2] + 1
+    if box < 5:
+        raise ValueError(
+            "The multi-emitter fit needs a spline calibration box of at "
+            f"least 5 pixels, got {box}."
+        )
+    coeff = coeff / float(calibration.get("photon_scale", 1.0))
+    fit_z = model == "spline-3d"
+    search_z = (
+        -_spline_z_shift(np.asarray(parameters.peak_search_z), calibration)
+        if fit_z
+        else np.zeros(1)
+    )
+    n_slices = coeff.shape[0]
+    if fit_z and (search_z.min() < 0 or search_z.max() > n_slices):
+        z_min, z_max = _spline_z_nm(
+            -np.array([0.0, float(n_slices)]), np.zeros(2), calibration
+        )[0]
+        raise ValueError(
+            "peak_search_z must lie within the calibrated z range, "
+            f"{min(z_min, z_max):.0f} to {max(z_min, z_max):.0f} nm, got "
+            f"{list(parameters.peak_search_z)}."
+        )
+    spline = residualfit.spline_psf(coeff, fit_z, search_z)
+    sigma = calibration.get("effective_sigma")
+    if sigma is None:
+        # from the second moments of the PSF at its sharpest slice
+        z_focus = float(calibration.get("z_init", 0.0)) if fit_z else 0.0
+        image = np.clip(
+            [
+                [
+                    splinefit._eval_spline_3d(
+                        spline.coeff, 0, float(i), float(j), z_focus
+                    )[0]
+                    for i in range(box)
+                ]
+                for j in range(box)
+            ],
+            0,
+            None,
+        )
+        weights = image / image.sum()
+        grid = (np.arange(box) - (box - 1) / 2) ** 2
+        sigma = np.sqrt(
+            0.5
+            * (
+                (weights.sum(axis=0) * grid).sum()
+                + (weights.sum(axis=1) * grid).sum()
+            )
+        )
+    return spline, float(sigma)
 
 
 def _multi_emitter_worker(
@@ -10119,9 +10264,15 @@ def _locs_from_multi_emitter_fits(
     psf_model: str,
     pixelsize: float,
     em: bool,
+    spline: residualfit.SplinePSF | None = None,
+    spline_calibration: dict | None = None,
 ) -> pd.DataFrame:
-    """One localization per emitter, with every length in nm."""
-    pad = residualfit.padding(sigma, psf_model)
+    """One localization per emitter, with every length in nm. A "spline"
+    fit has no ``sx``, ``sy``, and its z (3D) is converted with
+    ``spline_calibration``."""
+    pad = residualfit.padding(sigma, psf_model, spline)
+    gaussian = psf_model != "spline"
+    fit_z = spline is not None and spline.fit_z
     excess_noise = 2.0 if em else 1.0
     tables = []
     for frame_number, result in zip(frame_numbers, results):
@@ -10133,22 +10284,24 @@ def _locs_from_multi_emitter_fits(
                 "x": result.x - pad,
                 "y": result.y - pad,
                 "photons": result.photons,
-                "sx": result.sx,
-                "sy": result.sy,
-                "bg": result.bg,
-                "lpx": np.sqrt(crlb[:, 1]),
-                "lpy": np.sqrt(crlb[:, 2]),
-                "photons_unc": np.sqrt(crlb[:, 0]),
-                "bg_unc": np.sqrt(crlb[:, 3]),
-                # a fixed sigma has none
-                **(
-                    {
-                        "sx_unc": np.sqrt(crlb[:, 4]),
-                        "sy_unc": np.sqrt(crlb[:, 5]),
-                    }
-                    if psf_model != "fixed"
-                    else {}
-                ),
+            }
+            if gaussian:
+                columns["sx"] = result.sx
+                columns["sy"] = result.sy
+            columns["bg"] = result.bg
+            columns["lpx"] = np.sqrt(crlb[:, 1])
+            columns["lpy"] = np.sqrt(crlb[:, 2])
+            if fit_z:
+                # as the single-emitter spline fit (z shift = -native z)
+                columns["z"], columns["lpz"] = _spline_z_nm(
+                    -result.z, crlb[:, 6], spline_calibration
+                )
+            columns["photons_unc"] = np.sqrt(crlb[:, 0])
+            columns["bg_unc"] = np.sqrt(crlb[:, 3])
+            if psf_model in ("spherical", "elliptical"):
+                columns["sx_unc"] = np.sqrt(crlb[:, 4])
+                columns["sy_unc"] = np.sqrt(crlb[:, 5])
+            columns |= {
                 "log_likelihood": -0.5 * result.error,
                 "iterations": result.iterations.astype(np.int32),
                 # the deviance of the emitter's region over its degrees of
@@ -10182,11 +10335,11 @@ def _locs_from_multi_emitter_fits(
                                 "x",
                                 "y",
                                 "photons",
-                                "sx",
-                                "sy",
+                                *(("sx", "sy") if gaussian else ()),
                                 "bg",
                                 "lpx",
                                 "lpy",
+                                *(("z", "lpz") if fit_z else ()),
                             )
                         },
                     },
@@ -10212,6 +10365,7 @@ def localize_multi_emitter(
     seed_identification: IdentificationParameters | None = None,
     camera_calibration: dict | None = None,
     calibration_3d: dict | str | None = None,
+    spline_calibration: dict | str | None = None,
     lateral_transforms: dict | list | str | None = None,
     parallel: bool = True,
     progress: lib.Progress | Literal["console"] | None = None,
@@ -10229,9 +10383,10 @@ def localize_multi_emitter(
     analysis of Babcock, Sigal & Zhuang (2012), ported from its reference
     implementation, storm-analysis. It replaces the identification - the
     peaks are found in the residual of the fit, by their signal-to-noise
-    ratio - and fits a Gaussian PSF integrated over the pixels, by
-    maximum likelihood, with a fixed sigma or, per emitter, a fitted one
-    or a fitted one in x and in y (``parameters.psf_model``).
+    ratio - and fits, by maximum likelihood, a Gaussian PSF integrated
+    over the pixels, with a fixed sigma or, per emitter, a fitted one or a
+    fitted one in x and in y, or an experimental PSF from a spline
+    calibration, as in Babcock & Zhuang (2017) (``parameters.psf_model``).
 
     Of two emitters closer than 1 PSF sigma, only the brighter is
     kept, so pairs closer than about 1.5 PSF sigma are seldom resolved.
@@ -10276,6 +10431,15 @@ def localize_multi_emitter(
         the sigmas in x and y of an "elliptical" fit after it (see
         ``picasso.zfit.zfit``), as storm-analysis's ``3d`` model does.
         Default is None.
+    spline_calibration : dict, str or None, optional
+        Spline calibration of a single channel, "spline-2d" or
+        "spline-3d" (see ``picasso.spline.calibrate_spline`` and
+        ``io.load_spline_calibration``), or the path of its file: the PSF
+        of the "spline" model, which needs it. A 3D calibration gives z
+        directly, and its own lateral corrections are applied. The region
+        each emitter is fitted in is the calibration box less 2 pixels,
+        so the box should cover the PSF and its tails, e.g., 13 pixels.
+        Default is None.
     lateral_transforms : dict, list, str or None, optional
         Lateral (x, y) corrections applied to the localizations after the
         fit, as in :func:`fit`: a calibration with an ``"Affine
@@ -10289,8 +10453,8 @@ def localize_multi_emitter(
         Progress tracker, see ``picasso.lib.Progress``: e.g. a
         ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
         or None for no reporting. Reports the phases "Estimating the PSF
-        sigma" over twice the sampled frames (only without
-        ``parameters.psf_sigma``), "Identifying spots" (only with
+        sigma" over twice the sampled frames (only for a Gaussian model
+        without ``parameters.psf_sigma``), "Identifying spots" (only with
         ``seed_identification``, see :func:`identify`), "Fitting
         frames" over the frames and "Fitting z" over the localizations
         (only with ``calibration_3d``). Default is None.
@@ -10301,25 +10465,26 @@ def localize_multi_emitter(
         Called with the PSF sigma (nm) as soon as it is known, i.e.,
         once estimated, or right away when ``parameters.psf_sigma`` is
         given, before the frames are fitted: the sigma of a "fixed" fit,
-        or the start of a fitted one.
-        It is called on the thread that runs this function. Default is
-        None.
+        or the start of a fitted one. Not called for the spline. It is
+        called on the thread that runs this function. Default is None.
 
     Returns
     -------
     locs : pd.DataFrame or None
         One localization per emitter, with every length in nm: ``frame``,
         ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the PSF sigma in x
-        and in y, fixed or fitted), ``bg``, the Cramer-Rao bounds ``lpx``,
-        ``lpy``, ``photons_unc`` and ``bg_unc``, and for a fitted sigma
-        ``sx_unc`` and ``sy_unc`` (see Notes), ``log_likelihood``,
-        ``iterations`` and ``reduced_chi_square`` of the emitter's region,
-        its ``significance`` and ``n_emitters``, the number of emitters
-        the bounds were computed from: the emitter itself and its
-        neighbors within 4 PSF sigma, at most the 8 nearest (1 for an
-        isolated emitter, at most 9). With ``calibration_3d``, also ``z``,
-        ``d_zcalib`` and ``lpz`` (see ``picasso.zfit.zfit``). None if
-        aborted.
+        and in y, fixed or fitted; not for the spline), ``bg``, the
+        Cramer-Rao bounds ``lpx``, ``lpy``, ``photons_unc`` and
+        ``bg_unc``, and for a fitted sigma ``sx_unc`` and ``sy_unc`` (see
+        Notes), ``log_likelihood``, ``iterations`` and
+        ``reduced_chi_square`` of the emitter's region, its
+        ``significance`` and ``n_emitters``, the number of emitters the
+        bounds were computed from: the emitter itself and its neighbors
+        within 4 PSF sigma, at most the 8 nearest (1 for an isolated
+        emitter, at most 9). With ``calibration_3d``, also ``z``,
+        ``d_zcalib`` and ``lpz`` (see ``picasso.zfit.zfit``); with a 3D
+        spline calibration, ``z`` and its bound ``lpz``, as in the
+        single-emitter spline fit. None if aborted.
     info : list of dicts
         Metadata of the localizations: ``info`` with an entry recording
         the fit and ``camera_info`` appended (see ``lib.append_metadata``),
@@ -10330,8 +10495,12 @@ def localize_multi_emitter(
     ------
     ValueError
         If ``camera_info`` lacks a positive "Pixelsize", the PSF sigma is
-        to be estimated and the movie has too few isolated emitters, or
-        ``calibration_3d`` is given for a model other than "elliptical".
+        to be estimated and the movie has too few isolated emitters,
+        ``calibration_3d`` is given for a model other than "elliptical",
+        ``spline_calibration`` is missing for the spline, given for
+        another model, not a single-channel calibration or with a box
+        below 5 pixels, or ``parameters.peak_search_z`` lies outside its z
+        range.
     TypeError
         If ``parameters`` or ``seed_identification`` is of the wrong
         type.
@@ -10339,11 +10508,12 @@ def localize_multi_emitter(
     Notes
     -----
     The localization precision (``lpx``, ``lpy``, and likewise
-    ``photons_unc``, ``bg_unc``, ``sx_unc`` and ``sy_unc``) is the Cramer-Rao lower bound of the
+    ``photons_unc``, ``bg_unc``, ``sx_unc``, ``sy_unc`` and ``lpz``) is
+    the Cramer-Rao lower bound of the
     fitted model, which storm-analysis does not report. An emitter's
     bound comes from the Poisson Fisher information matrix of it and its
     nearest neighbors jointly (Huang et al., 2011), with photons, x, y,
-    background and the fitted sigmas of each as parameters, over the
+    background and the fitted sigmas or z of each as parameters, over the
     union of their fit regions and evaluated at the fitted values. A
     fitted sigma costs some precision, most where the emitters overlap.
     Inverting the joint
@@ -10363,6 +10533,10 @@ def localize_multi_emitter(
     multiple-emitter fitting for single molecule super-resolution
     imaging. Biomed. Opt. Express 2, 1377-1393 (2011).
     https://doi.org/10.1364/BOE.2.001377
+
+    Babcock, H. P. & Zhuang, X. Analyzing single molecule localization
+    microscopy data using cubic splines. Sci. Rep. 7, 552 (2017).
+    https://doi.org/10.1038/s41598-017-00622-w
 
     Examples
     --------
@@ -10390,6 +10564,16 @@ def localize_multi_emitter(
     ...         psf_model="elliptical"
     ...     ),
     ...     calibration_3d="3d_calib.yaml",
+    ... )
+
+    An experimental PSF from a spline calibration, with z for a 3D one:
+
+    >>> locs, info = localize.localize_multi_emitter(
+    ...     movie,
+    ...     movie_info,
+    ...     camera_info=camera_info,
+    ...     parameters=localize.MultiEmitterParameters(psf_model="spline"),
+    ...     spline_calibration="spline_calib.hdf5",
     ... )
     """
     if parameters is None:
@@ -10439,6 +10623,22 @@ def localize_multi_emitter(
             calibration_3d = io.load_calibration(
                 calibration_3d, pixelsize=pixelsize
             )
+    is_spline = parameters.psf_model == "spline"
+    if is_spline != (spline_calibration is not None):
+        raise ValueError(
+            "psf_model='spline' needs a spline_calibration, and only it "
+            f"takes one; got psf_model={parameters.psf_model!r}"
+            + (" without one." if is_spline else " and one.")
+        )
+    spline = residualfit.NO_SPLINE
+    if is_spline:
+        if isinstance(spline_calibration, str):
+            spline_calibration = io.load_spline_calibration(
+                spline_calibration, pixelsize=pixelsize
+            )
+        spline, spline_sigma = _multi_emitter_spline(
+            spline_calibration, parameters
+        )
     em = camera_info["Gain"] > 1
     n_frames = len(movie)
     frame_numbers = np.array(
@@ -10454,7 +10654,9 @@ def localize_multi_emitter(
     with lib.tracked_progress(
         progress, "Fitting frames", unit="frame"
     ) as progress:
-        if parameters.psf_sigma is None:
+        if is_spline:
+            sigma = spline_sigma
+        elif parameters.psf_sigma is None:
             sigma = _estimate_psf_sigma(
                 movie,
                 frame_numbers,
@@ -10469,7 +10671,11 @@ def localize_multi_emitter(
             )
         else:
             sigma = parameters.psf_sigma / pixelsize
-        if sigma is not None and callable(psf_sigma_callback):
+        if (
+            sigma is not None
+            and not is_spline
+            and callable(psf_sigma_callback)
+        ):
             psf_sigma_callback(sigma * pixelsize)
         seeds = {}
         if sigma is not None and seed_identification is not None:
@@ -10491,7 +10697,7 @@ def localize_multi_emitter(
                         dtype=np.int64
                     )
         if sigma is not None:
-            pad = residualfit.padding(sigma, parameters.psf_model)
+            pad = residualfit.padding(sigma, parameters.psf_model, spline)
             height, width = np.shape(movie[0])
             mask = _peak_mask(
                 (height, width),
@@ -10507,6 +10713,7 @@ def localize_multi_emitter(
                 mask,
                 sigma,
                 parameters,
+                spline,
             )
             lib.start_phase(
                 progress, "Fitting frames", len(frame_numbers), unit="frame"
@@ -10524,10 +10731,22 @@ def localize_multi_emitter(
             **lib.step_info("Fit multi-emitter"),
             **parameters.to_info(),
         }
-        if sigma is not None:
-            # the sigma the fit used (or started from), given or estimated
-            entry["PSF Sigma (nm)"] = sigma * pixelsize
-        entry["PSF Sigma Estimated"] = parameters.psf_sigma is None
+        if is_spline:
+            entry["Spline calibration model"] = spline_calibration.get("model")
+            entry["Spline calibration path"] = spline_calibration.get(
+                "Path", "N/A"
+            )
+            # the lateral corrections the calibration carries, applied
+            # below
+            own = lib.describe_lateral_transforms(spline_calibration)
+            if own:
+                entry["Lateral corrections applied"] = own
+        else:
+            if sigma is not None:
+                # the sigma the fit used (or started from), given or
+                # estimated
+                entry["PSF Sigma (nm)"] = sigma * pixelsize
+            entry["PSF Sigma Estimated"] = parameters.psf_sigma is None
         if seed_identification is not None:
             entry["Seed Identification"] = seed_identification.to_info()
         entry["ROI"] = roi
@@ -10537,10 +10756,22 @@ def localize_multi_emitter(
         if results is None:  # aborted
             return None, info
         locs = _locs_from_multi_emitter_fits(
-            frame_numbers, results, sigma, parameters.psf_model, pixelsize, em
+            frame_numbers,
+            results,
+            sigma,
+            parameters.psf_model,
+            pixelsize,
+            em,
+            spline if is_spline else None,
+            spline_calibration,
         )
         # before the lateral corrections, which move x and y
         locs = add_roi_id(locs, roi, pixelsize=pixelsize)
+        if is_spline:
+            locs = lib.apply_lateral_transforms(locs, spline_calibration)
+            return _apply_extra_affine(
+                locs, info, lateral_transforms, applied=spline_calibration
+            )
         if calibration_3d is None:
             return _apply_extra_affine(locs, info, lateral_transforms)
         return _fit_z_multi_emitter(

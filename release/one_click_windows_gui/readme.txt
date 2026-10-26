@@ -80,7 +80,7 @@ Many of the functionalities provided by Picasso were published independently, pl
 - Multichannel (global) experimental-PSF fitting (globLoc): Li et al., Nat. Commun., 2022; 10.1038/s41467-022-30719-4 (https://doi.org/10.1038/s41467-022-30719-4)
 - 3D fitting via astigmatism: Huang et al., Science, 2008; 10.1126/science.1153529 (https://www.science.org/doi/10.1126/science.1153529)
 - B-spline wavelet spot identification: Izeddin et al., Opt. Express, 2012; 10.1364/OE.20.002081 (https://doi.org/10.1364/OE.20.002081)
-- Multi-emitter fitting (3D-DAOSTORM). A port of storm-analysis, see the storm-analysis license (https://github.com/jungmannlab/picasso/blob/master/LICENSES/storm-analysis-LICENSE.txt): Babcock et al., Opt. Nanoscopy, 2012; 10.1186/2192-2853-1-6 (https://doi.org/10.1186/2192-2853-1-6)
+- Multi-emitter fitting (3D-DAOSTORM). A port of storm-analysis, see the storm-analysis license (https://github.com/jungmannlab/picasso/blob/master/LICENSES/storm-analysis-LICENSE.txt); its spline PSF is implemented from the paper: Babcock et al., Opt. Nanoscopy, 2012; Babcock & Zhuang, Sci. Rep., 2017; 10.1186/2192-2853-1-6 (https://doi.org/10.1186/2192-2853-1-6), 10.1038/s41598-017-00622-w (https://doi.org/10.1038/s41598-017-00622-w)
 - sCMOS pixel-dependent noise modeling: Huang et al., Nat. Methods, 2013; 10.1038/nmeth.2488 (https://doi.org/10.1038/nmeth.2488)
 - NeNA: Endesfelder et al., Histochem. Cell Biol., 2014; 10.1007/s00418-014-1192-3 (https://doi.org/10.1007/s00418-014-1192-3)
 - FRC: Nieuwenhuizen et al., Nat. Methods, 2013; 10.1038/nmeth.2448 (https://doi.org/10.1038/nmeth.2448)

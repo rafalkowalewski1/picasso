@@ -1,11 +1,13 @@
 """Test the multi-emitter fitting - ``localize.localize_multi_emitter``,
 ``localize.MultiEmitterParameters`` and ``picasso.fitting.residualfit``.
 
-The fit is a port of 3D-DAOSTORM from storm-analysis, so the first test
-holds it to the reference implementation's output on a stored movie. The
-others check what the benchmark of the port measured on a small scale:
-recovery of close emitters, no false splits of single ones, calibrated
-uncertainties, and the conventions every Picasso fit follows.
+The fit is a port of 3D-DAOSTORM from storm-analysis, so the first tests
+hold it to the reference implementation's output on stored movies; the
+spline model, implemented from its paper, is held to storm-analysis's
+spline fitter, run as a black box. The others check what the benchmark of
+the port measured on a small scale: recovery of close emitters, no false
+splits of single ones, calibrated uncertainties, and the conventions
+every Picasso fit follows.
 
 :author: Rafal Kowalewski, 2026
 :copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
@@ -21,8 +23,8 @@ import pytest
 from scipy.optimize import linear_sum_assignment
 from scipy.special import erf
 
-from picasso import localize
-from picasso.fitting import residualfit
+from picasso import localize, spline
+from picasso.fitting import residualfit, splinefit
 
 from tests._progress_tracking import RecordingProgress, assert_phases_complete
 
@@ -35,7 +37,9 @@ CAMERA_INFO = {
     "Pixelsize": PIXELSIZE,
 }
 FIXED_SIGMA = localize.MultiEmitterParameters(psf_sigma=SIGMA)
-MODELS = list(residualfit.PSF_MODELS)
+# the Gaussian models; the spline has its own tests below
+MODELS = [model for model in residualfit.PSF_MODELS if model != "spline"]
+SPLINE = localize.MultiEmitterParameters(psf_model="spline")
 
 
 def _model(model):
@@ -267,6 +271,66 @@ def test_reproduces_storm_analysis_with_fitted_sigmas(model, storm_model):
         locs["photons"].to_numpy()[li] / reference["photons"].to_numpy()[ti]
     )
     assert np.median(np.abs(ratio - 1)) < 0.005
+
+
+def test_spline_reproduces_storm_analysis():
+    """storm-analysis v2.4.1 spliner (3D cubic spline, MLE), run as a
+    black box on tests/data/multi_emitter_spline_movie.npy with a spline
+    of the knot grid tests/data/multi_emitter_spline_psf.npy: per frame,
+    four astigmatic emitters at different z and a pair 2.5 px apart. The
+    spline model, implemented from Babcock & Zhuang (2017), finds the same
+    emitters at the same x, y and z with the same amplitude, the pair
+    merged in the same frames; its z falls with the knot index, as a
+    Picasso calibration's stage z does, so the grid is flipped."""
+    frames = np.load("tests/data/multi_emitter_spline_movie.npy")
+    grid = np.load("tests/data/multi_emitter_spline_psf.npy")  # (z, y, x)
+    reference = pd.read_csv(
+        "tests/data/multi_emitter_spline_storm.csv", comment="#"
+    )
+    n = len(grid)
+    calibration = {
+        "model": "spline-3d",
+        "coefficients": spline.spline_coefficients(
+            np.ascontiguousarray(grid[::-1].transpose(2, 1, 0))
+        ),
+        "n_data": [n, n, n],
+        "oversampling": 1.0,
+        "box": n,
+        "pixelsize": PIXELSIZE,
+        # the amplitude in units of the spline's peak, as spliner's height
+        "photon_scale": 1.0,
+        # spliner's sigma, which prunes
+        "effective_sigma": 1.0,
+        "z_center": (n - 1) / 2,
+        "z_init": (n - 1) / 2,
+        "z_step_nm": 60.0,
+        "magnification_factor": 1.0,
+    }
+    locs, _ = _fit(
+        frames,
+        parameters=dataclasses.replace(SPLINE, snr_threshold=6.0),
+        spline_calibration=calibration,
+    )
+    reference = pd.DataFrame(
+        {
+            "frame": reference["frame"],
+            "x": reference["x"] * PIXELSIZE,
+            "y": reference["y"] * PIXELSIZE,
+            "z": reference["z"],
+            "photons": reference["height"],
+        }
+    )
+    assert len(locs) == len(reference)
+    li, ti = _match(locs, reference, tolerance=10.0)
+    assert len(li) == len(reference)
+    for column in ("x", "y", "z"):
+        difference = locs[column].to_numpy()[li] - reference[column][ti]
+        assert np.abs(difference).max() < 0.01  # nm
+    ratio = (
+        locs["photons"].to_numpy()[li] / reference["photons"].to_numpy()[ti]
+    )
+    assert np.abs(ratio - 1).max() < 1e-5
+    assert (locs["n_emitters"] == 2).sum() == 4
 
 
 # ----------------------------------------------------------------------
@@ -733,7 +797,7 @@ def test_fit_free_sigma_recovers_the_width():
     assert np.isfinite(deviance).all()
 
 
-@pytest.mark.parametrize("model", list(residualfit.PSF_MODELS))
+@pytest.mark.parametrize("model", MODELS)
 def test_padding_covers_the_region(model):
     for sigma in (0.8, 1.0, 1.3, 2.0):
         assert residualfit.padding(sigma, model) >= (
@@ -898,3 +962,364 @@ def test_free_sigma_gradient():
         # the accumulators return minus half the gradient (the Gpufit
         # convention of picasso.fitting.gaussfit)
         assert -2 * grad[p] == pytest.approx(numeric, rel=1e-4, abs=1e-4)
+
+
+# ----------------------------------------------------------------------
+# The spline PSF (Babcock & Zhuang, 2017)
+# ----------------------------------------------------------------------
+
+SPLINE_BOX = 13
+SPLINE_SLICES = 41
+SPLINE_STEP = 20.0  # nm per slice: the calibration spans +-400 nm
+
+
+def _astigmatic_sigmas(z):
+    """PSF sigmas (nm) in x and y of the astigmatic test PSF at z
+    (nm)."""
+    z = np.asarray(z, dtype=np.float64)
+    return (
+        SIGMA * np.sqrt(1 + ((z - 150) / 400) ** 2),
+        SIGMA * np.sqrt(1 + ((z + 150) / 400) ** 2),
+    )
+
+
+def _spline_calibration(model="spline-3d"):
+    """A spline calibration of the astigmatic test PSF integrated over the
+    pixels, built as ``spline.calibrate_spline`` builds one: knots on the
+    pixel grid, the stage z falling as the slice rises, a peak of 1 in
+    focus, and the in-focus sum as the photon scale."""
+    center = (SPLINE_BOX - 1) / 2
+    edges = np.arange(SPLINE_BOX + 1) - 0.5
+    n_slices = SPLINE_SLICES if model == "spline-3d" else 1
+    focus = (n_slices - 1) // 2
+    sx, sy = _astigmatic_sigmas((focus - np.arange(n_slices)) * SPLINE_STEP)
+    volume = np.empty((SPLINE_BOX, SPLINE_BOX, n_slices))
+    for k in range(n_slices):
+        ex, ey = (
+            np.diff(erf((edges - center) / (np.sqrt(2) * s / PIXELSIZE))) / 2
+            for s in (sx[k], sy[k])
+        )
+        volume[:, :, k] = np.outer(ex, ey)
+    volume /= volume[:, :, focus].max()
+    calibration = {
+        "model": model,
+        "oversampling": 1.0,
+        "box": SPLINE_BOX,
+        "pixelsize": PIXELSIZE,
+        "photon_scale": float(volume[:, :, focus].sum()),
+        "effective_sigma": 1.0,
+        "Path": "test_spline.hdf5",
+    }
+    if model == "spline-2d":
+        calibration["coefficients"] = spline.spline_coefficients(
+            volume[:, :, 0]
+        )
+        calibration["n_data"] = [SPLINE_BOX, SPLINE_BOX]
+    else:
+        calibration["coefficients"] = spline.spline_coefficients(volume)
+        calibration["n_data"] = [SPLINE_BOX, SPLINE_BOX, n_slices]
+        calibration.update(
+            z_center=float(focus),
+            z_init=float(focus),
+            z_step_nm=SPLINE_STEP,
+            magnification_factor=1.0,
+        )
+    return calibration
+
+
+def _spline_singles(model, z=None, seed=1):
+    """Single emitters of the astigmatic test PSF on a grid over 20
+    frames, at random z within +-300 nm for a 3D calibration (or at
+    ``z``), and their ground truth."""
+    emitters = _grid(20, spacing=1500.0, photons=3000.0, seed=seed)
+    if z is None:
+        rng = np.random.default_rng(seed)
+        z = (
+            rng.uniform(-300.0, 300.0, len(emitters))
+            if model == "spline-3d"
+            else 0.0
+        )
+    z = np.broadcast_to(np.asarray(z, dtype=np.float64), len(emitters))
+    sx, sy = _astigmatic_sigmas(z)
+    emitters = emitters.assign(z=z, sx=sx, sy=sy)
+    return _render(emitters, 20, seed=seed + 1), emitters
+
+
+def _fit_spline(frames, model="spline-3d", parameters=SPLINE, **kwargs):
+    return _fit(
+        frames,
+        parameters=parameters,
+        spline_calibration=_spline_calibration(model),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("model", ["spline-2d", "spline-3d"])
+def test_spline_fit_recovers_the_emitters(model):
+    """Every emitter is found, x, y and z without bias, scattered as much
+    as their Cramer-Rao bounds say, and the photons are the emitter's."""
+    frames, truth = _spline_singles(model)
+    locs, _ = _fit_spline(frames, model)
+    result = _scores(locs, truth, tolerance=100.0)
+    assert result["recall"] == 1.0
+    assert result["fp"] == 0
+    li, ti = _match(locs, truth, tolerance=100.0)
+    columns = [("x", "lpx", 1.5), ("y", "lpy", 1.5)]
+    if model == "spline-3d":
+        columns.append(("z", "lpz", 6.0))
+    for column, bound, bias in columns:
+        error = locs[column].to_numpy()[li] - truth[column].to_numpy()[ti]
+        assert abs(np.mean(error)) < bias
+        assert np.std(error / locs[bound].to_numpy()[li]) == pytest.approx(
+            1.0, abs=0.15
+        )
+    assert locs["photons"].median() == pytest.approx(3000.0, rel=0.03)
+    assert locs["reduced_chi_square"].median() == pytest.approx(1.0, abs=0.1)
+
+
+def test_spline_fit_resolves_close_pairs():
+    """Pairs 2.5 PSF sigma apart are fitted as two emitters, as with the
+    Gaussian."""
+    rows = []
+    rng = np.random.default_rng(3)
+    for frame in range(30):
+        angle = rng.uniform(0, np.pi)
+        for sign in (-1, 1):
+            rows.append(
+                (
+                    frame,
+                    24 + sign * 1.25 * np.cos(angle),
+                    24 + sign * 1.25 * np.sin(angle),
+                    3000,
+                )
+            )
+    truth = _emitters(rows)
+    z = np.zeros(len(truth))
+    sx, sy = _astigmatic_sigmas(z)
+    frames = _render(truth.assign(sx=sx, sy=sy), 30, seed=4)
+    locs, _ = _fit_spline(frames, "spline-2d")
+    result = _scores(locs, truth, tolerance=60.0)
+    assert result["recall"] >= 0.9
+    assert result["precision"] >= 0.9
+    assert (locs["n_emitters"] == 2).mean() >= 0.9
+
+
+def test_spline_z_stays_within_the_calibration():
+    """Emitters beyond the calibrated z range are fitted at its edge."""
+    frames, truth = _spline_singles("spline-3d", z=550.0)
+    locs, _ = _fit_spline(frames)
+    assert len(locs) == len(truth)
+    assert locs["z"].max() <= 400.0 + 1e-3
+    assert locs["z"].median() > 300.0
+
+
+def test_spline_peak_search_planes():
+    """The residual is searched at several z; an emitter starts at the z
+    of its brightest plane and ends where the single plane's do, within a
+    fraction of its bound (another start can end in another optimum of
+    the noise)."""
+    frames, truth = _spline_singles("spline-3d")
+    one, _ = _fit_spline(frames)
+    three, info = _fit_spline(
+        frames,
+        parameters=dataclasses.replace(
+            SPLINE, peak_search_z=(-250.0, 0.0, 250.0)
+        ),
+    )
+    assert len(three) == len(one) == len(truth)
+    difference = np.abs(np.sort(three["z"]) - np.sort(one["z"]))
+    assert np.median(difference) < 0.1
+    assert (difference < 0.5 * one["lpz"].median()).all()
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["Peak Search z (nm)"] == [-250.0, 0.0, 250.0]
+    with pytest.raises(ValueError, match="z range"):
+        _fit_spline(
+            frames,
+            parameters=dataclasses.replace(SPLINE, peak_search_z=(500.0,)),
+        )
+
+
+@pytest.mark.parametrize("model", ["spline-2d", "spline-3d"])
+def test_spline_columns_and_metadata(model):
+    frames, _ = _spline_singles(model)
+    locs, info = _fit_spline(frames[:2], model)
+    z = ["z", "lpz"] if model == "spline-3d" else []
+    # as the single-emitter spline fit: no sx, sy
+    assert list(locs.columns) == [
+        "frame",
+        "x",
+        "y",
+        "photons",
+        "bg",
+        "lpx",
+        "lpy",
+        *z,
+        "photons_unc",
+        "bg_unc",
+        "log_likelihood",
+        "iterations",
+        "reduced_chi_square",
+        "significance",
+        "n_emitters",
+    ]
+    assert np.isfinite(locs.to_numpy(dtype=float)).all()
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "spline"
+    assert entry["Spline calibration model"] == model
+    assert entry["Spline calibration path"] == "test_spline.hdf5"
+    assert "PSF Sigma (nm)" not in entry
+    assert localize.MultiEmitterParameters.from_info(entry) == SPLINE
+
+
+def test_spline_refusals():
+    frames, _ = _spline_singles("spline-2d")
+    calibration = _spline_calibration("spline-2d")
+    with pytest.raises(ValueError, match="psf_sigma"):
+        localize.MultiEmitterParameters(psf_model="spline", psf_sigma=130.0)
+    with pytest.raises(ValueError, match="spline_calibration"):
+        _fit(frames, parameters=SPLINE)
+    with pytest.raises(ValueError, match="spline_calibration"):
+        _fit(frames, spline_calibration=calibration)
+    with pytest.raises(ValueError, match="single-channel"):
+        _fit(
+            frames,
+            parameters=SPLINE,
+            spline_calibration={
+                **calibration,
+                "model": "spline-3d-multichannel",
+            },
+        )
+    with pytest.raises(ValueError, match="oversampling"):
+        _fit(
+            frames,
+            parameters=SPLINE,
+            spline_calibration={**calibration, "oversampling": 2.0},
+        )
+    with pytest.raises(ValueError, match="peak_search_z"):
+        localize.MultiEmitterParameters(peak_search_z=())
+
+
+def test_spline_padding_covers_the_region():
+    psf, _ = localize._multi_emitter_spline(_spline_calibration(), SPLINE)
+    # the calibration box less 2, so that the region stays within the
+    # spline wherever its peak moves inside the pixel
+    assert residualfit.roi_size(1.0, "spline", psf) == SPLINE_BOX - 2
+    assert residualfit.padding(1.0, "spline", psf) >= (SPLINE_BOX - 2) / 2
+
+
+def test_spline_peak_shape():
+    """The PSF of a peak over its region is the spline at its pixels, and
+    its derivatives are those of the spline."""
+    calibration = _spline_calibration()
+    psf, _ = localize._multi_emitter_spline(calibration, SPLINE)
+    coeff = psf.coeff
+    roi = SPLINE_BOX - 2
+    roi_dx, roi_dy = (
+        a.ravel().astype(np.int64) for a in np.indices((roi, roi))[::-1]
+    )
+    n = len(roi_dx)
+    x, y, z, xi, yi = 15.3, 14.8, 17.4, 10, 9
+
+    def shape(x, y, z):
+        out = [np.empty(n) for _ in range(4)]
+        residualfit._spline_peak_shape(
+            coeff, x, y, z, xi, yi, roi_dx, roi_dy, *out
+        )
+        return out
+
+    values, gx, gy, gz = shape(x, y, z)
+    center = (SPLINE_BOX - 1) / 2
+    expected = [
+        splinefit._eval_spline_3d(
+            coeff, 0, xi + a - x + center, yi + b - y + center, z
+        )[0]
+        for a, b in zip(roi_dx, roi_dy)
+    ]
+    np.testing.assert_allclose(values, expected, rtol=1e-10, atol=1e-14)
+    h = 1e-6
+    for gradient, (dx, dy, dz) in zip(
+        (gx, gy, gz), ((h, 0, 0), (0, h, 0), (0, 0, h))
+    ):
+        plus = shape(x + dx, y + dy, z + dz)[0]
+        minus = shape(x - dx, y - dy, z - dz)[0]
+        np.testing.assert_allclose(
+            gradient, (plus - minus) / (2 * h), atol=1e-7
+        )
+
+
+@pytest.mark.parametrize("fit_z", [False, True])
+def test_spline_deviance_gradient(fit_z):
+    """The gradient of the spline peak's step is that of the Poisson
+    deviance of its region, z included for a 3D spline."""
+    psf, _ = localize._multi_emitter_spline(_spline_calibration(), SPLINE)
+    coeff = psf.coeff
+    roi = SPLINE_BOX - 2
+    center = 0.5 * roi
+    dx, dy = [], []
+    for i in range(roi):
+        for j in range(roi):
+            if (j - center + 0.5) ** 2 + (i - center + 0.5) ** 2 <= (
+                center * center
+            ):
+                dx.append(j)
+                dy.append(i)
+    roi_dx = np.array(dx, dtype=np.int64)
+    roi_dy = np.array(dy, dtype=np.int64)
+    rng = np.random.default_rng(6)
+    data = rng.poisson(20, (24, 24)).astype(np.float64) + 1.0
+    theta = np.array([1500.0, 11.3, 12.6, 21.0, 17.4])
+    xi = yi = int(np.floor(11.3 - (0.5 * roi - 1.0)))
+    n = len(roi_dx)
+    buffers = [np.empty(n) for _ in range(4)]
+
+    def deviance(theta):
+        residualfit._spline_peak_shape(
+            coeff, *theta[1:3], theta[4], xi, yi, roi_dx, roi_dy, *buffers
+        )
+        f_data = np.zeros_like(data)
+        bg_data = np.zeros_like(data)
+        counts = np.zeros(data.shape, dtype=np.int64)
+        residualfit._add_peak(
+            theta[0],
+            theta[3],
+            xi,
+            yi,
+            buffers[0],
+            roi_dx,
+            roi_dy,
+            np.zeros((1, 1)),
+            False,
+            f_data,
+            bg_data,
+            counts,
+            1,
+        )
+        error = residualfit._peak_error(
+            xi, yi, roi_dx, roi_dy, data, f_data, bg_data, counts
+        )[1]
+        return error, (f_data, bg_data, counts)
+
+    _, (f_data, bg_data, counts) = deviance(theta)
+    n_par = 5 if fit_z else 4
+    jac = np.empty(n_par)
+    hess = np.empty((n_par, n_par))
+    residualfit._spline_jacobian_hessian(
+        theta[0],
+        xi,
+        yi,
+        roi_dx,
+        roi_dy,
+        *buffers,
+        data,
+        f_data,
+        bg_data,
+        counts,
+        jac,
+        hess,
+    )
+    for p, h in enumerate((1e-3, 1e-6, 1e-6, 1e-5, 1e-6)[:n_par]):
+        plus, minus = theta.copy(), theta.copy()
+        plus[p] += h
+        minus[p] -= h
+        numeric = (deviance(plus)[0] - deviance(minus)[0]) / (2 * h)
+        assert jac[p] == pytest.approx(numeric, rel=1e-4, abs=1e-6)

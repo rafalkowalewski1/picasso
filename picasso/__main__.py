@@ -2189,6 +2189,7 @@ def _localize_process_file(
                 camera_calibration,
                 z_params,
                 lateral_transforms,
+                spline_calibration,
             )
         ]
     if region_fit is not None:
@@ -2251,6 +2252,7 @@ def _multi_emitter_parameters_from_args(args: argparse.Namespace):
         max_cycles=args.max_cycles,
         peak_radius=args.peak_radius,
         background_sigma=args.background_sigma,
+        peak_search_z=tuple(args.peak_search_z),
     )
 
 
@@ -2267,11 +2269,14 @@ def _localize_multi_emitter(
     camera_calibration: dict | None,
     z_params,
     lateral_transforms: list | None,
+    spline_calibration: dict | None,
 ) -> str:
     """Fit one movie with the multi-emitter fitting (``--multi-emitter``),
     then save it and undrift it as any other fit. With ``z_params`` (an
     elliptical fit, see ``_check_multi_emitter_args``), z is read from the
-    fitted sigmas, and the z fit applies the lateral corrections.
+    fitted sigmas, and the z fit applies the lateral corrections. With
+    ``spline_calibration`` (``--psf-model spline``), it is the PSF, and
+    its own lateral corrections are not applied again.
 
     Returns
     -------
@@ -2300,16 +2305,18 @@ def _localize_multi_emitter(
         seed_identification=seed_identification,
         camera_calibration=camera_calibration,
         calibration_3d=calibration_3d,
+        spline_calibration=spline_calibration,
         lateral_transforms=lateral_transforms if calibration_3d else None,
         parallel=True,
         progress="console",
     )
     entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
-    print(
-        f"PSF sigma: {entry['PSF Sigma (nm)']:.1f} nm"
-        + (" (estimated)" if entry["PSF Sigma Estimated"] else "")
-        + ("" if args.psf_model == "fixed" else ", the start of the fit")
-    )
+    if spline_calibration is None:
+        print(
+            f"PSF sigma: {entry['PSF Sigma (nm)']:.1f} nm"
+            + (" (estimated)" if entry["PSF Sigma Estimated"] else "")
+            + ("" if args.psf_model == "fixed" else ", the start of the fit")
+        )
     if calibration_3d is not None:
         info[-1]["Z Calibration Path"] = zpath
         _print_lateral_report(
@@ -2319,7 +2326,7 @@ def _localize_multi_emitter(
         # applied by the z fit
         lateral_transforms = None
     return _localize_finish(
-        locs, info, path, args, None, lateral_transforms, None
+        locs, info, path, args, None, lateral_transforms, spline_calibration
     )
 
 
@@ -2630,18 +2637,25 @@ def _localize_finish(
 
 def _check_multi_emitter_args(args: argparse.Namespace) -> None:
     """Refuse the options the multi-emitter fitting cannot honor: it fits
-    a 2D Gaussian by maximum likelihood, on the CPU, one region of one
-    channel at a time, and gives z only with sigmas in x and y."""
+    by maximum likelihood, on the CPU, one region of one channel at a
+    time, takes a spline calibration only as the PSF of --psf-model
+    spline, and gives z otherwise only with sigmas in x and y."""
     fit_methods = args.fit_method or ["mle"]
     if fit_methods != ["mle"]:
         raise SystemExit(
-            "--multi-emitter fits a 2D Gaussian by maximum likelihood; "
-            "leave out --fit-method."
+            "--multi-emitter fits by maximum likelihood; leave out "
+            "--fit-method."
         )
-    if args.spline_calibration:
+    n_splines = len(args.spline_calibration or [])
+    if args.psf_model == "spline" and n_splines != 1:
         raise SystemExit(
-            "--multi-emitter fits a Gaussian; leave out "
-            "--spline-calibration."
+            "--multi-emitter --psf-model spline needs one "
+            "--spline-calibration, the PSF it fits."
+        )
+    if args.psf_model != "spline" and n_splines:
+        raise SystemExit(
+            "--multi-emitter fits a Gaussian unless --psf-model spline; "
+            "add it, or leave out --spline-calibration."
         )
     if args.zc and args.psf_model != "elliptical":
         raise SystemExit(
@@ -2801,7 +2815,9 @@ def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
                 args.fit_z_gpu = False
 
     spline_calibrations = []
-    if any(method.startswith("spline") for method in fit_methods):
+    if any(method.startswith("spline") for method in fit_methods) or (
+        args.multi_emitter and args.psf_model == "spline"
+    ):
         from .io import load_spline_calibration
 
         if not spline_paths:
@@ -5373,14 +5389,15 @@ def _build_parser() -> (
     )
     multi_emitter.add_argument(
         "--psf-model",
-        choices=["fixed", "spherical", "elliptical"],
+        choices=["fixed", "spherical", "elliptical", "spline"],
         default="fixed",
         help=(
-            "the PSF sigma of each emitter: fixed, the same for all"
-            " (default); spherical, one fitted sigma per emitter; elliptical,"
-            " a fitted sigma in x and one in y per emitter, whose z"
-            " --z-calibration then gives (storm-analysis models 2dfixed, 2d"
-            " and 3d)"
+            "the PSF of each emitter: a Gaussian whose sigma is fixed, the"
+            " same for all (default), spherical, one fitted sigma per"
+            " emitter, or elliptical, a fitted sigma in x and one in y per"
+            " emitter, whose z --z-calibration then gives (storm-analysis"
+            " models 2dfixed, 2d and 3d); or spline, the PSF of the"
+            " --spline-calibration, which gives z directly for a 3D one"
         ),
     )
     multi_emitter.add_argument(
@@ -5426,6 +5443,17 @@ def _build_parser() -> (
         help=(
             "sigma (camera pixels) of the Gaussian low pass that estimates"
             " the background (default 8)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--peak-search-z",
+        type=float,
+        nargs="+",
+        default=[0.0],
+        help=(
+            "z (nm) at which --psf-model spline with a 3D calibration"
+            " filters the residual to find peaks; a new emitter starts at"
+            " the z where it is brightest (default 0)"
         ),
     )
     multi_emitter.add_argument(

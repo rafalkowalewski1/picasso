@@ -161,6 +161,7 @@
   "--max-iterations",
   "--multi-emitter",
   "--peak-radius",
+  "--peak-search-z",
   "--pixelsize",
   "--psf-model",
   "--psf-sigma",

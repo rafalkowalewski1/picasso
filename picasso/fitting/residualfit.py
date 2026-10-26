@@ -19,6 +19,23 @@ A fitted sigma is kept within 0.5 to 5 times the nominal one, and the
 region of a peak is 1.5 times as large as with a fixed sigma, as in
 storm-analysis.
 
+The fourth model, ``"spline"``, is the cubic spline PSF of Babcock &
+Zhuang (2017) in the same analysis: an experimental PSF, a Picasso spline
+calibration (see :func:`spline_psf`), sampled at the pixels, with photons,
+x, y, background and, for a 3D calibration, z fitted per emitter. It is
+implemented from the paper, not ported: storm-analysis's spline fitter
+(``spliner``) is licensed for non-commercial use only. The paper's
+algorithm is the 3D-DAOSTORM one above, differing only where it finds and
+fits the peaks: the residual is filtered with the spline PSF at one or
+more z values (``peak_search_z``), and a new peak starts at the z of the
+plane where it is brightest. Picasso's choices where the paper is silent:
+the region of a peak is the calibration box less 2 pixels, so that it
+stays within the spline wherever the peak moves inside its pixel; z is
+kept within the calibrated range; the PSF sums to one in focus, so its
+amplitude is in photons, as in Picasso's single-emitter spline fit; and
+the calibration's Gaussian-equivalent sigma (``effective_sigma``) takes
+the place of the nominal sigma in pruning and in the neighborhoods.
+
 Every frame is analyzed on its own, in cycles:
 
 1. The background is a broad Gaussian low pass (``background_sigma``) of
@@ -75,6 +92,10 @@ Biomed. Opt. Express 2, 1377-1393 (2011).
 https://doi.org/10.1364/BOE.2.001377 (the Fisher matrix correction for
 close emitters, Eq. 11)
 
+Babcock, H. P. & Zhuang, X. "Analyzing single molecule localization
+microscopy data using cubic splines." Sci. Rep. 7, 552 (2017).
+https://doi.org/10.1038/s41598-017-00622-w (the spline model)
+
 :authors: Rafal Kowalewski
 :copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
 """
@@ -96,6 +117,7 @@ from picasso.fitting.gaussfit import (
 from picasso.fitting.splinefit import (
     _FASTMATH,
     _LAMBDA_INITIAL,
+    _eval_spline_3d,
     _lm_solve_step,
     FIT_STATE_CONVERGED,
     FIT_STATE_NEG_CURVATURE_MLE,
@@ -108,6 +130,9 @@ __all__ = [
     "N_CYCLES",
     "PEAK_RADIUS",
     "BACKGROUND_SIGMA",
+    "SplinePSF",
+    "spline_psf",
+    "NO_SPLINE",
     "roi_size",
     "padding",
     "FrameResult",
@@ -116,8 +141,10 @@ __all__ = [
     "fit_free_sigma",
 ]
 
-#: PSF models, each with the number of sigmas it fits per emitter.
-PSF_MODELS = {"fixed": 0, "spherical": 1, "elliptical": 2}
+#: PSF models and their codes; a Gaussian model's code is the number of
+#: sigmas it fits per emitter.
+PSF_MODELS = {"fixed": 0, "spherical": 1, "elliptical": 2, "spline": 3}
+_SPLINE = PSF_MODELS["spline"]
 #: Default peak threshold, in units of the signal-to-noise ratio, and the
 #: minimum significance a peak keeps. storm-analysis uses 6.
 THRESHOLD = 15.0
@@ -167,6 +194,9 @@ _MAX_NEIGHBORS = 8
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 _INV_SQRT2PI = 1.0 / math.sqrt(2.0 * math.pi)
+# Relative energy of a matched-filter kernel its separable terms may leave
+# out (see spline_psf).
+_KERNEL_TOLERANCE = 1.0e-6
 
 
 def _roi_size(sigma, n_widths):
@@ -180,7 +210,137 @@ def _roi_size(sigma, n_widths):
 _roi_size_jit = numba.njit(nogil=True, cache=True)(_roi_size)
 
 
-def roi_size(sigma: float, psf_model: str = "fixed") -> int:
+class SplinePSF(NamedTuple):
+    """A cubic spline PSF for :func:`analyze_frame`, made by
+    :func:`spline_psf`; :data:`NO_SPLINE` for the Gaussian models."""
+
+    #: Tricubic coefficients ``(1, niz, niy, nix, 4, 4, 4)``, the
+    #: single-channel layout of :mod:`picasso.fitting.splinefit`, indexed
+    #: ``[channel, z cell, y cell, x cell, z power, y power, x power]``,
+    #: of a PSF whose knots lie on the camera pixel grid, centered at
+    #: ``nix / 2``, in units of photons (it sums to one in focus).
+    coeff: np.ndarray
+    #: Whether z is fitted (a 3D spline) or held at 0 (a 2D one).
+    fit_z: bool
+    #: Separable terms of the matched filters: the kernel along x and the
+    #: one along y of each term, and the search plane it belongs to.
+    search_kx: np.ndarray
+    search_ky: np.ndarray
+    search_plane: np.ndarray
+    #: The same for the squared kernels, which filter the variance.
+    variance_kx: np.ndarray
+    variance_ky: np.ndarray
+    variance_plane: np.ndarray
+    #: z (spline slices) of the search planes.
+    search_z: np.ndarray
+
+
+def _empty_spline() -> SplinePSF:
+    kernels = np.zeros((0, 1))
+    planes = np.zeros(0, dtype=np.int64)
+    return SplinePSF(
+        np.zeros((1, 1, 1, 1, 4, 4, 4)),
+        False,
+        kernels,
+        kernels,
+        planes,
+        kernels,
+        kernels,
+        planes,
+        np.zeros(1),
+    )
+
+
+#: The ``spline`` argument of :func:`analyze_frame` for the Gaussian
+#: models.
+NO_SPLINE = _empty_spline()
+
+
+def _separable_terms(kernel: np.ndarray) -> tuple:
+    """Kernels along x and along y whose outer products sum to ``kernel``
+    (rows y, columns x) up to ``_KERNEL_TOLERANCE`` of its energy, by
+    singular value decomposition."""
+    u, s, vt = np.linalg.svd(kernel)
+    energy = np.cumsum(s * s)
+    n = int(np.searchsorted(energy, (1.0 - _KERNEL_TOLERANCE) * energy[-1]))
+    n = min(n + 1, len(s))
+    return vt[:n].copy(), (u[:, :n] * s[:n]).T.copy()
+
+
+def spline_psf(
+    coefficients: np.ndarray,
+    fit_z: bool,
+    search_z: tuple | list | np.ndarray = (0.0,),
+) -> SplinePSF:
+    """A cubic spline PSF for :func:`analyze_frame`, with its matched
+    filters.
+
+    The matched filter of a search plane is the PSF at its z, sampled at
+    the pixels around its center and normalized to sum to one, as a sum of
+    separable terms; the variance is filtered with its square.
+
+    Parameters
+    ----------
+    coefficients : np.ndarray
+        Tricubic coefficients ``(niz, niy, nix, 4, 4, 4)``, indexed ``[z
+        cell, y cell, x cell, z power, y power, x power]``, with knots on
+        the camera pixel grid (see :attr:`SplinePSF.coeff`); a 2D spline
+        has ``niz = 1`` and only z power 0.
+    fit_z : bool
+        Whether z is fitted (3D) or held at 0 (2D).
+    search_z : sequence of float, optional
+        z (spline slices) of the matched-filter planes. Default is (0,).
+
+    Returns
+    -------
+    spline : SplinePSF
+    """
+    coeff = np.ascontiguousarray(coefficients, dtype=np.float64)
+    coeff = coeff.reshape((1,) + coeff.shape)
+    nix = coeff.shape[3]
+    center = 0.5 * nix
+    # odd kernels centered on a pixel, within the spline
+    radius = int(math.floor(center))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    search_z = np.asarray(search_z, dtype=np.float64).ravel()
+    if not fit_z:
+        search_z = np.zeros(1)
+    terms = ([], [], [], [], [], [])
+    for plane, z in enumerate(search_z):
+        kernel = np.array(
+            [
+                [
+                    _eval_spline_3d(coeff, 0, center + dx, center + dy, z)[0]
+                    for dx in offsets
+                ]
+                for dy in offsets
+            ]
+        )
+        total = kernel.sum()
+        if not total > 0.0:
+            raise ValueError(
+                f"The spline PSF at z = {z} slices does not sum to a "
+                "positive value."
+            )
+        kernel /= total
+        for k, values in enumerate((kernel, kernel * kernel)):
+            kx, ky = _separable_terms(values)
+            terms[3 * k].append(kx)
+            terms[3 * k + 1].append(ky)
+            terms[3 * k + 2].append(np.full(len(kx), plane, dtype=np.int64))
+    return SplinePSF(
+        coeff,
+        bool(fit_z),
+        *(np.ascontiguousarray(np.concatenate(t)) for t in terms),
+        np.ascontiguousarray(search_z),
+    )
+
+
+def roi_size(
+    sigma: float,
+    psf_model: str = "fixed",
+    spline: SplinePSF | None = None,
+) -> int:
     """Side length (camera pixels) of the disc a peak is fitted in.
 
     Parameters
@@ -189,17 +349,27 @@ def roi_size(sigma: float, psf_model: str = "fixed") -> int:
         Nominal PSF standard deviation in camera pixels.
     psf_model : str, optional
         One of ``PSF_MODELS``. Default is "fixed".
+    spline : SplinePSF or None, optional
+        The PSF of the "spline" model. Default is None.
 
     Returns
     -------
     roi_size : int
         ``int(8 * sigma)`` for a fixed sigma, 1.5 times that (rounded
-        down) where the sigma is fitted, as in storm-analysis.
+        down) where the sigma is fitted, as in storm-analysis; the
+        calibration box less 2 for the spline, so that the region stays
+        within the spline wherever the peak moves inside its pixel.
     """
+    if psf_model == "spline":
+        return spline.coeff.shape[3] - 1
     return _roi_size(sigma, PSF_MODELS[psf_model])
 
 
-def padding(sigma: float, psf_model: str = "fixed") -> int:
+def padding(
+    sigma: float,
+    psf_model: str = "fixed",
+    spline: SplinePSF | None = None,
+) -> int:
     """Margin (camera pixels) by which a frame is padded, by mirroring.
 
     Parameters
@@ -208,6 +378,8 @@ def padding(sigma: float, psf_model: str = "fixed") -> int:
         Nominal PSF standard deviation in camera pixels.
     psf_model : str, optional
         One of ``PSF_MODELS``. Default is "fixed".
+    spline : SplinePSF or None, optional
+        The PSF of the "spline" model. Default is None.
 
     Returns
     -------
@@ -215,7 +387,7 @@ def padding(sigma: float, psf_model: str = "fixed") -> int:
         ``int(roi_size / 2 + 2)``: the region of a peak on the edge of the
         frame stays within the padded frame.
     """
-    return int(roi_size(sigma, psf_model) / 2 + 2)
+    return int(roi_size(sigma, psf_model, spline) / 2 + 2)
 
 
 # ----------------------------------------------------------------------
@@ -247,6 +419,13 @@ def _gaussian_kernel(sigma: float, size: int, square: bool) -> np.ndarray:
 def _convolve(image, kernel, out, tmp):
     """Separable convolution with wrap-around edges: the circular
     convolution storm-analysis runs by FFT on its padded frames."""
+    _convolve_xy(image, kernel, kernel, out, tmp)
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _convolve_xy(image, kernel, kernel_y, out, tmp):
+    """:func:`_convolve` with ``kernel`` along x and ``kernel_y`` along y,
+    both of the same odd length."""
     height, width = image.shape
     radius = len(kernel) // 2
     # The kernel taps are the outer loops and the pixels of a row the
@@ -277,9 +456,26 @@ def _convolve(image, kernel, out, tmp):
                 yy += height
             elif yy >= height:
                 yy -= height
-            weight = kernel[k]
+            weight = kernel_y[k]
             for x in range(width):
                 out[y, x] += weight * tmp[yy, x]
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _filter_plane(image, kx, ky, planes, plane, out, conv, tmp):
+    """``image`` filtered with the separable terms of one search plane
+    (see :class:`SplinePSF`), summed into ``out``."""
+    height, width = image.shape
+    for y in range(height):
+        for x in range(width):
+            out[y, x] = 0.0
+    for t in range(len(planes)):
+        if planes[t] != plane:
+            continue
+        _convolve_xy(image, kx[t], ky[t], conv, tmp)
+        for y in range(height):
+            for x in range(width):
+                out[y, x] += conv[y, x]
 
 
 # ----------------------------------------------------------------------
@@ -438,6 +634,85 @@ def _peak_shape(
 
 
 # ----------------------------------------------------------------------
+# The cubic spline PSF of a peak over its region (Babcock & Zhuang 2017,
+# Eqs. 7-11)
+# ----------------------------------------------------------------------
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _spline_peak_shape(
+    coeff, x, y, z, xi, yi, roi_dx, roi_dy, psf, gx, gy, gz
+):
+    """Fill ``psf`` with the spline PSF of a peak at ``(x, y)`` and ``z``
+    (spline slices), sampled at the pixels of the disc of its region,
+    which starts at ``(xi, yi)``, and ``gx``, ``gy``, ``gz`` with its
+    derivatives with respect to ``x``, ``y`` and ``z``. The spline is
+    evaluated as in the single-emitter spline fit
+    (:func:`picasso.fitting.splinefit._eval_spline_3d`)."""
+    center = 0.5 * coeff.shape[3]
+    # spline coordinates of the region's first pixel
+    ux = xi - x + center
+    uy = yi - y + center
+    for j in range(len(roi_dx)):
+        value, dvx, dvy, dvz = _eval_spline_3d(
+            coeff, 0, ux + roi_dx[j], uy + roi_dy[j], z
+        )
+        psf[j] = value
+        # the spline coordinate falls as the peak moves up
+        gx[j] = -dvx
+        gy[j] = -dvy
+        gz[j] = dvz
+
+
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
+def _spline_jacobian_hessian(
+    photons,
+    xi,
+    yi,
+    roi_dx,
+    roi_dy,
+    psf,
+    gx,
+    gy,
+    gz,
+    x_data,
+    f_data,
+    bg_data,
+    bg_counts,
+    jac,
+    hess,
+):
+    """:func:`_jacobian_hessian` of the spline PSF, with respect to
+    ``[photons, x, y, bg]`` followed by z if ``jac`` has room for it."""
+    n_par = len(jac)
+    for p in range(n_par):
+        jac[p] = 0.0
+        for q in range(n_par):
+            hess[p, q] = 0.0
+    jt = np.empty(n_par)
+    for j in range(len(roi_dx)):
+        row = yi + roi_dy[j]
+        col = xi + roi_dx[j]
+        fi = f_data[row, col] + bg_data[row, col] / bg_counts[row, col]
+        xv = x_data[row, col]
+        jt[0] = psf[j]
+        jt[1] = photons * gx[j]
+        jt[2] = photons * gy[j]
+        jt[3] = 1.0
+        if n_par == 5:
+            jt[4] = photons * gz[j]
+        t1 = 2.0 * (1.0 - xv / fi)
+        t2 = 2.0 * xv / (fi * fi)
+        for p in range(n_par):
+            jac[p] += t1 * jt[p]
+            for q in range(p, n_par):
+                hess[p, q] += t2 * jt[p] * jt[q]
+    for p in range(n_par):
+        for q in range(p):
+            hess[p, q] = hess[q, p]
+
+
+# ----------------------------------------------------------------------
 # The fit image (multi_fit.c: mFitAddPeak, mFitSubtractPeak, mFitCalcErr)
 # ----------------------------------------------------------------------
 
@@ -591,9 +866,12 @@ class FrameResult(NamedTuple):
     y: np.ndarray
     photons: np.ndarray
     bg: np.ndarray
-    #: PSF sigma in x and in y (camera pixels), fitted or fixed.
+    #: PSF sigma in x and in y (camera pixels), fitted or fixed; NaN for
+    #: the spline.
     sx: np.ndarray
     sy: np.ndarray
+    #: z (spline slices) of a 3D spline; NaN otherwise.
+    z: np.ndarray
     significance: np.ndarray
     #: Poisson deviance of the fit over the emitter's region.
     error: np.ndarray
@@ -602,9 +880,9 @@ class FrameResult(NamedTuple):
     n_pixels: np.ndarray
     #: Number of fitted parameters per emitter.
     n_parameters: int
-    #: Cramer-Rao variances of photons, x, y, bg, sx and sy, from the
-    #: joint Fisher matrix of the emitter and its neighbors; NaN for a
-    #: fixed sigma, the same in sx and sy for one fitted sigma.
+    #: Cramer-Rao variances of photons, x, y, bg, sx, sy and z, from the
+    #: joint Fisher matrix of the emitter and its neighbors; NaN where not
+    #: fitted, the same in sx and sy for one fitted sigma.
     crlb: np.ndarray
     #: Emitters in that matrix: the emitter itself and its neighbors
     #: within 4 nominal PSF sigma, at most the 8 nearest.
@@ -637,6 +915,7 @@ def _compact(
     p_bg,
     p_sx,
     p_sy,
+    p_z,
     p_xi,
     p_yi,
     p_status,
@@ -658,6 +937,7 @@ def _compact(
                 p_bg[m] = p_bg[i]
                 p_sx[m] = p_sx[i]
                 p_sy[m] = p_sy[i]
+                p_z[m] = p_z[i]
                 p_xi[m] = p_xi[i]
                 p_yi[m] = p_yi[i]
                 p_status[m] = p_status[i]
@@ -680,6 +960,7 @@ def _iterate(
     p_bg,
     p_sx,
     p_sy,
+    p_z,
     p_xi,
     p_yi,
     p_status,
@@ -709,14 +990,22 @@ def _iterate(
     dey,
     dsy,
     psf,
+    spline,
+    coeff,
+    n_z,
+    gx,
+    gy,
+    gz,
 ):
     """One Levenberg-Marquardt step of every running peak, the others held
     fixed, then recenter the regions (multi_fit.c: mFitIterateLM,
     mFitRecenterPeaks). ``n_widths`` sigmas per peak are fitted (0, 1 or
     2, see ``PSF_MODELS``), clamped to ``[sigma_min, sigma_max]``
-    (dao_fit.c: daoCheck2D, daoCheck3D)."""
+    (dao_fit.c: daoCheck2D, daoCheck3D). With a ``spline`` PSF
+    (``coeff``), z is fitted if ``n_z`` is 1, within the spline."""
     height, width = x_data.shape
-    n_par = 4 + n_widths
+    n_par = 4 + n_widths + n_z
+    z_max = float(coeff.shape[1])
     jac = np.empty(n_par)
     hess = np.empty((n_par, n_par))
     w_jac = np.empty(n_par)
@@ -735,27 +1024,60 @@ def _iterate(
             bg_data,
             bg_counts,
         )
-        _profile(p_x[i], p_xi[i], roi, p_sx[i], ex, dex, dsx)
-        _profile(p_y[i], p_yi[i], roi, p_sy[i], ey, dey, dsy)
-        _jacobian_hessian(
-            p_n[i],
-            p_xi[i],
-            p_yi[i],
-            roi_dx,
-            roi_dy,
-            ex,
-            dex,
-            dsx,
-            ey,
-            dey,
-            dsy,
-            x_data,
-            f_data,
-            bg_data,
-            bg_counts,
-            jac,
-            hess,
-        )
+        if spline:
+            _spline_peak_shape(
+                coeff,
+                p_x[i],
+                p_y[i],
+                p_z[i],
+                p_xi[i],
+                p_yi[i],
+                roi_dx,
+                roi_dy,
+                psf,
+                gx,
+                gy,
+                gz,
+            )
+            _spline_jacobian_hessian(
+                p_n[i],
+                p_xi[i],
+                p_yi[i],
+                roi_dx,
+                roi_dy,
+                psf,
+                gx,
+                gy,
+                gz,
+                x_data,
+                f_data,
+                bg_data,
+                bg_counts,
+                jac,
+                hess,
+            )
+        else:
+            _profile(p_x[i], p_xi[i], roi, p_sx[i], ex, dex, dsx)
+            _profile(p_y[i], p_yi[i], roi, p_sy[i], ey, dey, dsy)
+            _jacobian_hessian(
+                p_n[i],
+                p_xi[i],
+                p_yi[i],
+                roi_dx,
+                roi_dy,
+                ex,
+                dex,
+                dsx,
+                ey,
+                dey,
+                dsy,
+                x_data,
+                f_data,
+                bg_data,
+                bg_counts,
+                jac,
+                hess,
+            )
         # the peak leaves the fit image while it is improved
         _add_peak(
             p_n[i],
@@ -780,6 +1102,7 @@ def _iterate(
         w_bg = p_bg[i]
         w_sx = p_sx[i]
         w_sy = p_sy[i]
+        w_z = p_z[i]
         w_xi = p_xi[i]
         w_yi = p_yi[i]
         error = start_error
@@ -811,6 +1134,9 @@ def _iterate(
             elif n_widths == 2:
                 w_sx = min(max(p_sx[i] - w_jac[4], sigma_min), sigma_max)
                 w_sy = min(max(p_sy[i] - w_jac[5], sigma_min), sigma_max)
+            if n_z == 1:
+                # within the calibrated range
+                w_z = min(max(p_z[i] - w_jac[4], 0.0), z_max)
             w_xi = p_xi[i]
             w_yi = p_yi[i]
             # mFitUpdate: move the region with the peak
@@ -828,27 +1154,44 @@ def _iterate(
                 or w_yi >= height - roi
                 or w_n < 0.0
                 or not np.isfinite(w_x + w_y + w_n + w_bg + w_sx + w_sy)
+                or not np.isfinite(w_z)
             ):
                 lam *= _LAMBDA_UP
                 status = _ERROR
                 continue
-            _peak_shape(
-                w_x,
-                w_y,
-                w_xi,
-                w_yi,
-                w_sx,
-                w_sy,
-                roi_dx,
-                roi_dy,
-                ex,
-                dex,
-                dsx,
-                ey,
-                dey,
-                dsy,
-                psf,
-            )
+            if spline:
+                _spline_peak_shape(
+                    coeff,
+                    w_x,
+                    w_y,
+                    w_z,
+                    w_xi,
+                    w_yi,
+                    roi_dx,
+                    roi_dy,
+                    psf,
+                    gx,
+                    gy,
+                    gz,
+                )
+            else:
+                _peak_shape(
+                    w_x,
+                    w_y,
+                    w_xi,
+                    w_yi,
+                    w_sx,
+                    w_sy,
+                    roi_dx,
+                    roi_dy,
+                    ex,
+                    dex,
+                    dsx,
+                    ey,
+                    dey,
+                    dsy,
+                    psf,
+                )
             _add_peak(
                 w_n,
                 w_bg,
@@ -933,6 +1276,7 @@ def _iterate(
             p_bg[i] = w_bg
             p_sx[i] = w_sx
             p_sy[i] = w_sy
+            p_z[i] = w_z
             p_xi[i] = w_xi
             p_yi[i] = w_yi
             p_error[i] = error
@@ -976,23 +1320,39 @@ def _iterate(
                 p_status[i] = _ERROR
                 p_added[i] = False
             else:
-                _peak_shape(
-                    p_x[i],
-                    p_y[i],
-                    p_xi[i],
-                    p_yi[i],
-                    p_sx[i],
-                    p_sy[i],
-                    roi_dx,
-                    roi_dy,
-                    ex,
-                    dex,
-                    dsx,
-                    ey,
-                    dey,
-                    dsy,
-                    psf,
-                )
+                if spline:
+                    _spline_peak_shape(
+                        coeff,
+                        p_x[i],
+                        p_y[i],
+                        p_z[i],
+                        p_xi[i],
+                        p_yi[i],
+                        roi_dx,
+                        roi_dy,
+                        psf,
+                        gx,
+                        gy,
+                        gz,
+                    )
+                else:
+                    _peak_shape(
+                        p_x[i],
+                        p_y[i],
+                        p_xi[i],
+                        p_yi[i],
+                        p_sx[i],
+                        p_sy[i],
+                        roi_dx,
+                        roi_dy,
+                        ex,
+                        dex,
+                        dsx,
+                        ey,
+                        dey,
+                        dsy,
+                        psf,
+                    )
                 for j in range(len(roi_dx)):
                     p_psf[i, j] = psf[j]
                 _add_peak(
@@ -1061,6 +1421,7 @@ def _do_fit(
     p_bg,
     p_sx,
     p_sy,
+    p_z,
     p_xi,
     p_yi,
     p_status,
@@ -1090,6 +1451,12 @@ def _do_fit(
     dey,
     dsy,
     psf,
+    spline,
+    coeff,
+    n_z,
+    gx,
+    gy,
+    gz,
 ):
     """Iterate until no peak is running (MultiFitter.doFit)."""
     i = -1
@@ -1102,6 +1469,7 @@ def _do_fit(
             p_bg,
             p_sx,
             p_sy,
+            p_z,
             p_xi,
             p_yi,
             p_status,
@@ -1131,6 +1499,12 @@ def _do_fit(
             dey,
             dsy,
             psf,
+            spline,
+            coeff,
+            n_z,
+            gx,
+            gy,
+            gz,
         )
         i += 1
 
@@ -1262,9 +1636,13 @@ def _local_crlb(
     p_y,
     p_sx,
     p_sy,
+    p_z,
     p_xi,
     p_yi,
     n_widths,
+    spline,
+    coeff,
+    n_z,
     roi,
     roi_dx,
     roi_dy,
@@ -1281,13 +1659,14 @@ def _local_crlb(
     max_neighbors,
     out_var,
 ):
-    """Cramer-Rao variances of ``[photons, x, y, bg, sx, sy]`` of peak
-    ``i`` (NaN for a sigma not fitted) from the Fisher matrix of it and
-    its nearest neighbors (at most ``max_neighbors`` within
+    """Cramer-Rao variances of ``[photons, x, y, bg, sx, sy, z]`` of peak
+    ``i`` (NaN for a sigma or z not fitted) from the Fisher matrix of it
+    and its nearest neighbors (at most ``max_neighbors`` within
     ``neighbor_distance``) over their regions, with ``n_widths`` fitted
-    sigmas per peak among the parameters; where that matrix is singular,
-    Huang et al.'s correction of the x-x and y-y terms of close emitters
-    (Eq. 11). Returns the number of emitters in the matrix."""
+    sigmas, or with a ``spline`` PSF ``n_z`` fitted z, per peak among the
+    parameters; where that matrix is singular, Huang et al.'s correction
+    of the x-x and y-y terms of close emitters (Eq. 11). Returns the
+    number of emitters in the matrix."""
     candidates = np.empty(n, dtype=np.int64)
     m = _neighbors(
         p_x[i],
@@ -1316,7 +1695,7 @@ def _local_crlb(
     members = np.empty(n_local, dtype=np.int64)
     for k in range(n_local):
         members[k] = candidates[order[k]]
-    stride = 4 + n_widths
+    stride = 4 + n_widths + n_z
     n_par = stride * n_local
     fisher = np.zeros((n_par, n_par))
     # the union of the regions: a pixel enters once
@@ -1332,10 +1711,41 @@ def _local_crlb(
     grad = np.zeros(n_par)
     profiles = np.empty((n_local, 6, roi))
     disc = np.zeros((roi, roi), dtype=np.bool_)
+    # the pixel of the disc at each place of the region
+    disc_index = np.full((roi, roi), -1, dtype=np.int64)
     for r in range(len(roi_dx)):
         disc[roi_dy[r], roi_dx[r]] = True
+        disc_index[roi_dy[r], roi_dx[r]] = r
+    n_roi = len(roi_dx)
+    # the spline PSF of each emitter and its x, y and z derivatives
+    images = np.empty((n_local if spline else 0, 4, n_roi))
+    psf = np.empty(n_roi)
+    gx = np.empty(n_roi)
+    gy = np.empty(n_roi)
+    gz = np.empty(n_roi)
     for k in range(n_local):
         j = members[k]
+        if spline:
+            _spline_peak_shape(
+                coeff,
+                p_x[j],
+                p_y[j],
+                p_z[j],
+                p_xi[j],
+                p_yi[j],
+                roi_dx,
+                roi_dy,
+                psf,
+                gx,
+                gy,
+                gz,
+            )
+            for r in range(n_roi):
+                images[k, 0, r] = psf[r]
+                images[k, 1, r] = gx[r]
+                images[k, 2, r] = gy[r]
+                images[k, 3, r] = gz[r]
+            continue
         _profile(p_x[j], p_xi[j], roi, p_sx[j], ex, dex, dsx)
         _profile(p_y[j], p_yi[j], roi, p_sy[j], ey, dey, dsy)
         for c in range(roi):
@@ -1370,6 +1780,16 @@ def _local_crlb(
                 a = col - p_xi[jj]
                 b = row - p_yi[jj]
                 if a < 0 or b < 0 or a >= roi or b >= roi or not disc[b, a]:
+                    continue
+                if spline:
+                    r = disc_index[b, a]
+                    base = stride * kk
+                    grad[base] = images[kk, 0, r]
+                    grad[base + 1] = p_n[jj] * images[kk, 1, r]
+                    grad[base + 2] = p_n[jj] * images[kk, 2, r]
+                    grad[base + 3] = 1.0 / count
+                    if n_z == 1:
+                        grad[base + 4] = p_n[jj] * images[kk, 3, r]
                     continue
                 exv = profiles[kk, 0, a]
                 dexv = profiles[kk, 1, a]
@@ -1436,6 +1856,7 @@ def _local_crlb(
         out_var[p] = cov[p, p]
     out_var[4] = cov[4, 4] if n_widths > 0 else np.nan
     out_var[5] = cov[3 + n_widths, 3 + n_widths] if n_widths > 0 else np.nan
+    out_var[6] = cov[4, 4] if n_z > 0 else np.nan
     return n_local
 
 
@@ -1448,11 +1869,12 @@ def analyze_frame(
     seed_x,
     seed_y,
     sigma,
-    n_widths,
+    psf_model,
     threshold,
     n_cycles,
     peak_radius,
     background_sigma,
+    spline,
 ):
     """Find and fit the emitters of one frame.
 
@@ -1477,10 +1899,12 @@ def analyze_frame(
         instead of the peak finder; empty for none.
     sigma : float
         Nominal PSF standard deviation in camera pixels: fixed, or the
-        start of a fitted one. The peaks are found and pruned with it.
-    n_widths : int
-        Sigmas fitted per emitter: 0 (fixed), 1 (the same in x and y) or 2
-        (one in x, one in y), see ``PSF_MODELS``.
+        start of a fitted one. The peaks are found and pruned with it. For
+        the spline, its Gaussian-equivalent sigma, which only prunes.
+    psf_model : int
+        Code of the PSF model (``PSF_MODELS``); a Gaussian model's code is
+        the number of sigmas it fits per emitter: 0 (fixed), 1 (the same
+        in x and y) or 2 (one in x, one in y).
     threshold : float
         Peak threshold and minimum significance, in units of the
         signal-to-noise ratio.
@@ -1491,6 +1915,9 @@ def analyze_frame(
         maximum.
     background_sigma : float
         Width (camera pixels) of the background low pass.
+    spline : SplinePSF
+        The PSF of the "spline" model (see :func:`spline_psf`), and
+        :data:`NO_SPLINE` for the others.
 
     Returns
     -------
@@ -1498,7 +1925,14 @@ def analyze_frame(
         The emitters, in the coordinates of the padded frame.
     """
     height, width = frame.shape
-    roi = _roi_size_jit(sigma, n_widths)
+    is_spline = psf_model == _SPLINE
+    n_widths = 0 if is_spline else psf_model
+    n_z = 1 if is_spline and spline.fit_z else 0
+    coeff = spline.coeff
+    if is_spline:
+        roi = coeff.shape[3] - 1
+    else:
+        roi = _roi_size_jit(sigma, n_widths)
     margin = int(roi / 2 + 2)
     xoff = 0.5 * roi - 1.0
     sigma_min = _SIGMA_RANGE[0] * sigma
@@ -1553,6 +1987,7 @@ def analyze_frame(
     p_bg = np.zeros(capacity)
     p_sx = np.zeros(capacity)
     p_sy = np.zeros(capacity)
+    p_z = np.zeros(capacity)
     p_xi = np.zeros(capacity, dtype=np.int64)
     p_yi = np.zeros(capacity, dtype=np.int64)
     p_status = np.zeros(capacity, dtype=np.int64)
@@ -1569,6 +2004,15 @@ def analyze_frame(
     dey = np.empty(roi)
     dsy = np.empty(roi)
     psf = np.empty(n_roi)
+    gx = np.empty(n_roi)
+    gy = np.empty(n_roi)
+    gz = np.empty(n_roi)
+    # the spline's matched filters: one more filtered image, and the
+    # search plane each pixel is brightest in
+    filter_shape = (height, width) if is_spline else (1, 1)
+    conv = np.empty(filter_shape)
+    acc = np.empty(filter_shape)
+    best_plane = np.zeros(filter_shape, dtype=np.int64)
     significance = np.zeros(capacity)
     max_new = height * width // 4 + 16
     new_x = np.empty(max_new, dtype=np.int64)
@@ -1598,15 +2042,53 @@ def analyze_frame(
                         var += variance[y, x]
                     work[y, x] = var
                     work2[y, x] = image[y, x] - background[y, x] - f_data[y, x]
-            _convolve(work, fg_kernel2, snr, tmp)
-            _convolve(work2, fg_kernel, fg, tmp)
-            for y in range(height):
-                for x in range(width):
-                    var = snr[y, x]
-                    if var <= _VARIANCE_FLOOR:
-                        var = _VARIANCE_FLOOR
-                    value = fg[y, x] / math.sqrt(var)
-                    snr[y, x] = value if peak_mask[y, x] else 0.0
+            if is_spline:
+                # the residual filtered with the PSF at every search
+                # plane; a pixel keeps its best ratio and that plane
+                for plane in range(len(spline.search_z)):
+                    _filter_plane(
+                        work2,
+                        spline.search_kx,
+                        spline.search_ky,
+                        spline.search_plane,
+                        plane,
+                        fg,
+                        conv,
+                        tmp,
+                    )
+                    _filter_plane(
+                        work,
+                        spline.variance_kx,
+                        spline.variance_ky,
+                        spline.variance_plane,
+                        plane,
+                        acc,
+                        conv,
+                        tmp,
+                    )
+                    for y in range(height):
+                        for x in range(width):
+                            var = acc[y, x]
+                            if var <= _VARIANCE_FLOOR:
+                                var = _VARIANCE_FLOOR
+                            value = fg[y, x] / math.sqrt(var)
+                            if plane == 0 or value > snr[y, x]:
+                                snr[y, x] = value
+                                best_plane[y, x] = plane
+                for y in range(height):
+                    for x in range(width):
+                        if not peak_mask[y, x]:
+                            snr[y, x] = 0.0
+            else:
+                _convolve(work, fg_kernel2, snr, tmp)
+                _convolve(work2, fg_kernel, fg, tmp)
+                for y in range(height):
+                    for x in range(width):
+                        var = snr[y, x]
+                        if var <= _VARIANCE_FLOOR:
+                            var = _VARIANCE_FLOOR
+                        value = fg[y, x] / math.sqrt(var)
+                        snr[y, x] = value if peak_mask[y, x] else 0.0
             n_new = _find_maxima(
                 snr, threshold, peak_radius, margin + 1, taken, new_x, new_y
             )
@@ -1634,6 +2116,7 @@ def analyze_frame(
             p_bg = _grow(p_bg, capacity)
             p_sx = _grow(p_sx, capacity)
             p_sy = _grow(p_sy, capacity)
+            p_z = _grow(p_z, capacity)
             p_xi = _grow(p_xi, capacity)
             p_yi = _grow(p_yi, capacity)
             p_status = _grow(p_status, capacity)
@@ -1660,6 +2143,15 @@ def analyze_frame(
             p_bg[i] = 1.0
             p_sx[i] = sigma
             p_sy[i] = sigma
+            if n_z == 1:
+                # the search plane the peak is brightest in; seeds start
+                # at the first
+                plane = 0
+                if not (cycle == 0 and len(seed_x) > 0):
+                    plane = best_plane[new_y[k], new_x[k]]
+                p_z[i] = spline.search_z[plane]
+            else:
+                p_z[i] = 0.0
             n += 1
             if (
                 p_xi[i] < 0
@@ -1669,23 +2161,39 @@ def analyze_frame(
             ):
                 p_status[i] = _ERROR
                 continue
-            _peak_shape(
-                p_x[i],
-                p_y[i],
-                p_xi[i],
-                p_yi[i],
-                sigma,
-                sigma,
-                roi_dx,
-                roi_dy,
-                ex,
-                dex,
-                dsx,
-                ey,
-                dey,
-                dsy,
-                psf,
-            )
+            if is_spline:
+                _spline_peak_shape(
+                    coeff,
+                    p_x[i],
+                    p_y[i],
+                    p_z[i],
+                    p_xi[i],
+                    p_yi[i],
+                    roi_dx,
+                    roi_dy,
+                    psf,
+                    gx,
+                    gy,
+                    gz,
+                )
+            else:
+                _peak_shape(
+                    p_x[i],
+                    p_y[i],
+                    p_xi[i],
+                    p_yi[i],
+                    sigma,
+                    sigma,
+                    roi_dx,
+                    roi_dy,
+                    ex,
+                    dex,
+                    dsx,
+                    ey,
+                    dey,
+                    dsy,
+                    psf,
+                )
             bg_sum = 0.0
             sp = 0.0
             sx = 0.0
@@ -1746,6 +2254,7 @@ def analyze_frame(
             p_bg,
             p_sx,
             p_sy,
+            p_z,
             p_xi,
             p_yi,
             p_status,
@@ -1775,6 +2284,12 @@ def analyze_frame(
             dey,
             dsy,
             psf,
+            is_spline,
+            coeff,
+            n_z,
+            gx,
+            gy,
+            gz,
         )
         keep = p_status[:n] != _ERROR
         n = _compact(
@@ -1786,6 +2301,7 @@ def analyze_frame(
             p_bg,
             p_sx,
             p_sy,
+            p_z,
             p_xi,
             p_yi,
             p_status,
@@ -1848,6 +2364,7 @@ def analyze_frame(
                 p_bg,
                 p_sx,
                 p_sy,
+                p_z,
                 p_xi,
                 p_yi,
                 p_status,
@@ -1866,6 +2383,7 @@ def analyze_frame(
                 p_bg,
                 p_sx,
                 p_sy,
+                p_z,
                 p_xi,
                 p_yi,
                 p_status,
@@ -1895,6 +2413,12 @@ def analyze_frame(
                 dey,
                 dsy,
                 psf,
+                is_spline,
+                coeff,
+                n_z,
+                gx,
+                gy,
+                gz,
             )
             keep = p_status[:n] != _ERROR
             n = _compact(
@@ -1906,6 +2430,7 @@ def analyze_frame(
                 p_bg,
                 p_sx,
                 p_sy,
+                p_z,
                 p_xi,
                 p_yi,
                 p_status,
@@ -1945,6 +2470,7 @@ def analyze_frame(
         p_bg,
         p_sx,
         p_sy,
+        p_z,
         p_xi,
         p_yi,
         p_status,
@@ -1979,14 +2505,14 @@ def analyze_frame(
             bg_data,
             bg_counts,
         )
-    crlb = np.full((n, 6), np.nan)
+    crlb = np.full((n, 7), np.nan)
     n_emitters = np.ones(n, dtype=np.int64)
     if n > 0:
         neighbor_distance = _NEIGHBOR_DISTANCE * sigma
         cells, counts, order, nx, ny, x0, y0 = _build_grid(
             p_x, p_y, n, neighbor_distance
         )
-        out_var = np.empty(6)
+        out_var = np.empty(7)
         for i in range(n):
             n_emitters[i] = _local_crlb(
                 i,
@@ -1996,9 +2522,13 @@ def analyze_frame(
                 p_y,
                 p_sx,
                 p_sy,
+                p_z,
                 p_xi,
                 p_yi,
                 n_widths,
+                is_spline,
+                coeff,
+                n_z,
                 roi,
                 roi_dx,
                 roi_dy,
@@ -2015,21 +2545,30 @@ def analyze_frame(
                 _MAX_NEIGHBORS,
                 out_var,
             )
-            for p in range(6):
+            for p in range(7):
                 crlb[i, p] = out_var[p]
     n_pixels = np.full(n, n_roi, dtype=np.int64)
+    sx_out = p_sx[:n].copy()
+    sy_out = p_sy[:n].copy()
+    z_out = p_z[:n].copy()
+    if is_spline:
+        sx_out[:] = np.nan
+        sy_out[:] = np.nan
+    if n_z == 0:
+        z_out[:] = np.nan
     return FrameResult(
         p_x[:n].copy(),
         p_y[:n].copy(),
         p_n[:n].copy(),
         p_bg[:n].copy(),
-        p_sx[:n].copy(),
-        p_sy[:n].copy(),
+        sx_out,
+        sy_out,
+        z_out,
         significance[:n].copy(),
         p_error[:n].copy(),
         p_iter[:n].copy(),
         n_pixels,
-        4 + n_widths,
+        4 + n_widths + n_z,
         crlb,
         n_emitters,
     )
