@@ -388,8 +388,8 @@ MODEL_TOOLTIP = (
     "Gaussian with one common width for x and y.\n\n"
     "2D Gaussian, overlapping emitters:\n"
     "Fits all emitters of a frame at once, so that emitters closer than\n"
-    "about two PSF widths are localized separately. Finds the spots itself\n"
-    "(no identification), with a PSF width fixed for the movie. For 2D\n"
+    "about 2 PSF sigma are localized separately. Finds the spots itself\n"
+    "(no identification), with a PSF sigma fixed for the movie. For 2D\n"
     "data with emitters in focus, e.g., DNA-PAINT at high imager\n"
     "concentration. MLE on the CPU.\n\n"
     "Experimental PSF (cubic spline):\n"
@@ -4643,7 +4643,7 @@ class ParametersDialog(lib.Dialog):
             "Fits all emitters of a frame at once: in cycles, peaks are\n"
             "found where the fit leaves photons unexplained, fitted with\n"
             "every other emitter in place, and subtracted. Of two emitters\n"
-            "closer than the PSF width, only the brighter is kept.\n\n"
+            "closer than 1 PSF sigma, only the brighter is kept.\n\n"
             "Babcock, H., Sigal, Y. M. & Zhuang, X. A high-density 3D\n"
             "localization algorithm for stochastic optical reconstruction\n"
             "microscopy. Optical Nanoscopy 1, 6 (2012), ported from its\n"
@@ -4675,8 +4675,8 @@ class ParametersDialog(lib.Dialog):
         sigma_label = QtWidgets.QLabel("PSF sigma (nm):")
         sigma_tip = (
             "Standard deviation of the PSF, fixed in the fit. Estimated\n"
-            "from the movie unless unticked: the median width of isolated\n"
-            "emitters fitted with a free width. The last estimate is shown\n"
+            "from the movie unless unticked: the median sigma of isolated\n"
+            "emitters fitted with a free sigma. The last estimate is shown\n"
             "and used by the preview."
         )
         sigma_label.setToolTip(sigma_tip)
@@ -4726,7 +4726,7 @@ class ParametersDialog(lib.Dialog):
         me_grid.addWidget(self.peak_radius_spinbox, 3, 1)
         background_label = QtWidgets.QLabel("Background filter sigma:")
         background_tip = (
-            "Width (camera pixels) of the Gaussian low pass that estimates\n"
+            "Sigma (camera pixels) of the Gaussian low pass that estimates\n"
             "the background from the frame minus the fit."
         )
         background_label.setToolTip(background_tip)
@@ -5248,9 +5248,9 @@ class ParametersDialog(lib.Dialog):
     def multi_emitter_parameters(
         self, estimate: bool | None = None
     ) -> localize.MultiEmitterParameters:
-        """The multi-emitter settings on the dialog. The PSF width is left
+        """The multi-emitter settings on the dialog. The PSF sigma is left
         to the estimate while "Estimate" is ticked, unless ``estimate`` is
-        False (the preview, which uses the width shown)."""
+        False (the preview, which uses the sigma shown)."""
         if estimate is None:
             estimate = self.psf_sigma_estimate_checkbox.isChecked()
         return localize.MultiEmitterParameters(
@@ -5262,7 +5262,7 @@ class ParametersDialog(lib.Dialog):
         )
 
     def on_psf_sigma_estimate_changed(self) -> None:
-        """The PSF width is typed in only when it is not estimated."""
+        """The PSF sigma is typed in only when it is not estimated."""
         self.psf_sigma_spinbox.setEnabled(
             not self.psf_sigma_estimate_checkbox.isChecked()
         )
@@ -10199,7 +10199,7 @@ class Window(QtWidgets.QMainWindow):
 
     def draw_multi_emitter_preview(self) -> None:
         """Fit the current frame with the multi-emitter settings and draw
-        the emitters, with the PSF width shown on the dialog."""
+        the emitters, with the PSF sigma shown on the dialog."""
         dialog = self.parameters_dialog
         camera_info = self.camera_info
         sigma = dialog.psf_sigma_spinbox.value() / camera_info["Pixelsize"]
@@ -12787,7 +12787,7 @@ class Window(QtWidgets.QMainWindow):
         fit_z: bool,
         calibrate_z: bool,
     ) -> None:
-        """Show the PSF width the fit used, which the preview then uses,
+        """Show the PSF sigma the fit used, which the preview then uses,
         and finish as any fit."""
         sigma = info[-1].get("PSF Sigma (nm)") if info else None
         if sigma is None:

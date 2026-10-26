@@ -28,7 +28,7 @@ SIZE = 48
 
 
 def _movie() -> np.ndarray:
-    """Four single emitters and two pairs (2.5 PSF widths apart) per
+    """Four single emitters and two pairs (2.5 PSF sigma apart) per
     frame, on a baseline of 100 counts."""
     rows = []
     for frame in range(FRAMES):

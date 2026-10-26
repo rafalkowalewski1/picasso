@@ -192,7 +192,7 @@ The localizations have no ``net_gradient`` column. See
 Overlapping emitters
 ~~~~~~~~~~~~~~~~~~~~
 ``--multi-emitter`` (``-me``) fits all emitters of a frame at once, so that
-emitters closer than about two PSF widths are localized separately, instead
+emitters closer than about 2 PSF σ are localized separately, instead
 of one emitter per identified box (3D-DAOSTORM, `Babcock et al., Optical
 Nanoscopy, 2012 <https://doi.org/10.1186/2192-2853-1-6>`__). It finds the
 spots itself, so the identification options are ignored, and it fits a 2D
@@ -204,7 +204,7 @@ combined with it. See :ref:`localize-multi-emitter`.
    The peak threshold and the minimum significance of an emitter, in units of
    the signal-to-noise ratio (default 6).
 ``--psf-sigma``
-   The PSF width (standard deviation) in nm, fixed in the fit. Estimated from
+   The PSF σ (standard deviation) in nm, fixed in the fit. Estimated from
    the movie by default.
 ``--max-cycles``, ``--peak-radius``, ``--background-sigma``
    The cycles of finding, fitting and subtracting per frame (20), the radius

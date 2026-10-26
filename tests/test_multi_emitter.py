@@ -108,7 +108,7 @@ def singles():
 def test_reproduces_storm_analysis():
     """storm-analysis v2.4.1 (3D-DAOSTORM, 2dfixed, MLE) on
     tests/data/multi_emitter_movie.npy: three single emitters and two
-    pairs (2 and 3 PSF widths apart) in each of four frames. The port
+    pairs (2 and 3 PSF sigma apart) in each of four frames. The port
     finds the same emitters at the same positions; it integrates the PSF
     over the pixels where storm-analysis samples it at their centers,
     with the width of the sampled Gaussian matched."""
@@ -138,7 +138,7 @@ def test_reproduces_storm_analysis():
 
 @pytest.mark.parametrize("n_emitters", [1, 2, 3, 4])
 def test_recovers_close_emitters(n_emitters):
-    """1 to 4 emitters, neighbors 2.5 PSF widths apart, are all found;
+    """1 to 4 emitters, neighbors 2.5 PSF sigma apart, are all found;
     single-emitter fitting would merge them."""
     rng = np.random.default_rng(n_emitters)
     rows = []
@@ -298,7 +298,7 @@ def test_progress_phases(singles):
         parallel=True,
     )
     assert_phases_complete(
-        tracker, ["Estimating the PSF width", "Fitting frames"]
+        tracker, ["Estimating the PSF sigma", "Fitting frames"]
     )
 
 

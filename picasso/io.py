@@ -7161,7 +7161,8 @@ def _read_smap_loc(path: str) -> dict:
 
 
 def _smap_psf_widths(loc: dict, n: int, pixelsize: float):
-    """Return ``(sx, sy)`` PSF widths in nm, as SMAP stores them.
+    """Return ``(sx, sy)``, the PSF sigma in x and y in nm, as SMAP
+    stores them.
 
     A neutral default of one camera pixel (``pixelsize`` nm) is used
     when the corresponding field is absent.
@@ -7686,7 +7687,7 @@ def import_pyme(
       ``Camera.ElectronsPerCount / Camera.TrueEMGain`` from the
       metadata. **If the metadata does not store the camera
       conversion, the photons are given in camera counts.** 1 if there
-      is no amplitude or PSF width.
+      is no amplitude or PSF sigma.
     - ``bg``: ``bg`` (files exported by Picasso), otherwise
       ``fitResults_background + subtractedBackground`` (camera counts
       per pixel, converted to photons as above), otherwise 0.

@@ -9626,14 +9626,14 @@ def _process_fitting_futures(
 # Multi-emitter fitting
 #
 # Whole frames are fitted with all their emitters at once, so that spots
-# closer than about two PSF widths are localized separately rather than
+# closer than about 2 PSF sigma are localized separately rather than
 # merged into one biased localization: the 3D-DAOSTORM analysis of Babcock,
 # Sigal & Zhuang (2012), run by ``picasso.fitting.residualfit``.
 # ----------------------------------------------------------------------
 
-#: Most frames sampled to estimate the PSF width of a movie.
+#: Most frames sampled to estimate the PSF sigma of a movie.
 _PSF_SIGMA_SAMPLE_FRAMES = 200
-#: Provisional PSF width (camera pixels) the emitters for the estimate are
+#: Provisional PSF sigma (camera pixels) the emitters for the estimate are
 #: first found with.
 _PSF_SIGMA_START = 1.0
 #: Fewest isolated, well fitted emitters the estimate needs.
@@ -9663,8 +9663,8 @@ class MultiEmitterParameters:
         threshold lets more noise through.
     psf_sigma : float or None, optional
         Standard deviation of the PSF in nm, fixed in the fit. None (the
-        default) estimates it from the movie, as the median width of
-        isolated emitters fitted with a free width.
+        default) estimates it from the movie, as the median sigma of
+        isolated emitters fitted with a free sigma.
     max_cycles : int, optional
         Most cycles of finding, fitting and subtracting per frame. Default
         is 20.
@@ -9672,7 +9672,7 @@ class MultiEmitterParameters:
         Radius (camera pixels) within which a new peak must be the
         maximum of the residual. Default is 5.
     background_sigma : float, optional
-        Width (camera pixels) of the Gaussian low pass that estimates the
+        Sigma (camera pixels) of the Gaussian low pass that estimates the
         background from the frame minus the fit. Default is 8.
 
     Raises
@@ -9727,7 +9727,7 @@ class MultiEmitterParameters:
         """The settings under the keys of the fit's metadata.
 
         ``"PSF Sigma (nm)"`` is only recorded when it was given; the fit
-        records the width it used either way.
+        records the sigma it used either way.
 
         Returns
         -------
@@ -9749,7 +9749,7 @@ class MultiEmitterParameters:
         :meth:`to_info`, e.g., the metadata of a multi-emitter fit.
 
         Missing keys take the defaults. The metadata of a fit records the
-        PSF width it used, so the settings read from it reproduce the fit.
+        PSF sigma it used, so the settings read from it reproduce the fit.
 
         Parameters
         ----------
@@ -9843,12 +9843,12 @@ def _estimate_psf_sigma(
     progress: lib.Progress,
     abort_callback: Callable[[], bool] | None,
 ) -> float | None:
-    """PSF standard deviation (camera pixels) of a movie: the median width
-    of isolated emitters fitted with a free width, in frames sampled
+    """PSF standard deviation (camera pixels) of a movie: the median sigma
+    of isolated emitters fitted with a free sigma, in frames sampled
     evenly from ``frame_numbers``.
 
     The emitters are found as in the first cycle of the multi-emitter fit,
-    with a provisional width; if the estimate is more than 20 % off it,
+    with a provisional sigma; if the estimate is more than 20 % off it,
     they are found once more with the estimate. Returns None if aborted.
 
     Raises
@@ -9866,7 +9866,7 @@ def _estimate_psf_sigma(
     window = getattr(movie, "filled_window", None)
     lock = threading.Lock()
     sigma = _PSF_SIGMA_START
-    lib.start_phase(progress, "Estimating the PSF width", 2 * len(sample))
+    lib.start_phase(progress, "Estimating the PSF sigma", 2 * len(sample))
     for attempt in range(2):
         half = int(math.ceil(3.0 * sigma))
         box = 2 * half + 1
@@ -9933,8 +9933,8 @@ def _estimate_psf_sigma(
         if clean.sum() < _PSF_SIGMA_MIN_SPOTS:
             raise ValueError(
                 f"Only {int(clean.sum())} isolated, well fitted emitters "
-                "were found to estimate the PSF width of the movie, too "
-                "few. Give the width as psf_sigma (nm) in the "
+                "were found to estimate the PSF sigma of the movie, too "
+                "few. Give the PSF sigma as psf_sigma (nm) in the "
                 "MultiEmitterParameters."
             )
         estimate = float(np.median(thetas[clean, 3]))
@@ -10178,18 +10178,18 @@ def localize_multi_emitter(
     frame at once.
 
     Single-emitter fitting (:func:`localize`) fits one PSF per box, so
-    two emitters closer than about two PSF widths in the same frame give
+    two emitters closer than about 2 PSF sigma in the same frame give
     one biased localization. This fits whole frames instead, in cycles of
     finding peaks in what the current fit leaves unexplained, fitting
     them with all others in place, and subtracting: the 3D-DAOSTORM
     analysis of Babcock, Sigal & Zhuang (2012), ported from its reference
     implementation, storm-analysis. It replaces the identification - the
     peaks are found in the residual of the fit, by their signal-to-noise
-    ratio - and fits a Gaussian PSF of fixed width, integrated over the
+    ratio - and fits a Gaussian PSF of fixed sigma, integrated over the
     pixels, by maximum likelihood.
 
-    Of two emitters closer than the PSF width, only the brighter is
-    kept, so pairs closer than about 1.5 PSF widths are seldom resolved.
+    Of two emitters closer than 1 PSF sigma, only the brighter is
+    kept, so pairs closer than about 1.5 PSF sigma are seldom resolved.
     See the multi-emitter page of the documentation for when to use it.
 
     Parameters
@@ -10203,7 +10203,7 @@ def localize_multi_emitter(
         "Pixelsize".
     parameters : MultiEmitterParameters or None, optional
         The settings of the fit. None (the default) uses the defaults,
-        which estimate the PSF width from the movie.
+        which estimate the PSF sigma from the movie.
     roi : tuple or list of tuples, optional
         Region(s) of interest in camera pixels, as in :func:`localize`:
         emitters are only found inside them, and the localizations get a
@@ -10234,7 +10234,7 @@ def localize_multi_emitter(
         Progress tracker, see ``picasso.lib.Progress``: e.g. a
         ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
         or None for no reporting. Reports the phases "Estimating the PSF
-        width" over twice the sampled frames (only without
+        sigma" over twice the sampled frames (only without
         ``parameters.psf_sigma``), "Identifying spots" (only with
         ``seed_identification``, see :func:`identify`) and "Fitting
         frames" over the frames. Default is None.
@@ -10247,12 +10247,12 @@ def localize_multi_emitter(
     locs : pd.DataFrame or None
         One localization per emitter, with every length in nm: ``frame``,
         ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the fixed PSF
-        width), ``bg``, the Cramer-Rao bounds ``lpx``, ``lpy``,
+        sigma), ``bg``, the Cramer-Rao bounds ``lpx``, ``lpy``,
         ``photons_unc`` and ``bg_unc`` (from the Fisher matrix of the
         emitter and its neighbors), ``log_likelihood``, ``iterations`` and
         ``reduced_chi_square`` of the emitter's region, its
         ``significance`` and ``n_emitters``, the number of emitters
-        within four PSF widths, the emitter itself included (1 for an
+        within 4 PSF sigma, the emitter itself included (1 for an
         isolated one). None if aborted.
     info : list of dicts
         Metadata of the localizations: ``info`` with an entry recording
@@ -10262,7 +10262,7 @@ def localize_multi_emitter(
     Raises
     ------
     ValueError
-        If ``camera_info`` lacks a positive "Pixelsize", or the PSF width
+        If ``camera_info`` lacks a positive "Pixelsize", or the PSF sigma
         is to be estimated and the movie has too few isolated emitters.
     TypeError
         If ``parameters`` or ``seed_identification`` is of the wrong
@@ -10285,7 +10285,7 @@ def localize_multi_emitter(
     ...     movie, movie_info, camera_info=camera_info
     ... )
 
-    Isolated emitters only (no other within four PSF widths):
+    Isolated emitters only (no other within 4 PSF sigma):
 
     >>> isolated = locs[locs["n_emitters"] == 1]
     """

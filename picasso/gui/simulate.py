@@ -503,8 +503,8 @@ class Window(QtWidgets.QMainWindow):
             laserpower = QtWidgets.QLabel("Laser power")
         psf = QtWidgets.QLabel("PSF")
         psf.setToolTip(
-            "Point Spread Function (PSF) width (Gaussian \u03c3) in camera "
-            "pixels."
+            "Point Spread Function (PSF) \u03c3 (standard deviation of the "
+            "Gaussian) in camera pixels."
         )
         psf_fwhm = QtWidgets.QLabel("PSF (FWHM)")
         psf_fwhm.setToolTip(

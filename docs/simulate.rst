@@ -34,7 +34,7 @@ Simulate DNA-PAINT image acquisitions
    ON time in a DNA-PAINT system is dependent on the
    DNA duplex properties. For typical 7-bp imager strands, the ON time is
    ~200-300 ms.
-4. In ``Imager parameters``, fluorophore characteristics such as PSF width and
+4. In ``Imager parameters``, fluorophore characteristics such as the PSF σ (standard deviation) and
    photon budget can be set. Adjusting the ``Power density`` field affects the
    simulation analogously to changing the laser power in an experiment: the
    photon rate is the power density times the ``Photon detection rate``, shown

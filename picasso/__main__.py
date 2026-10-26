@@ -5329,7 +5329,7 @@ def _build_parser() -> (
     multi_emitter = localize_parser.add_argument_group(
         "multi-emitter fitting",
         "fit all emitters of a frame at once, so that emitters closer than"
-        " about two PSF widths are localized separately (3D-DAOSTORM,"
+        " about 2 PSF sigma are localized separately (3D-DAOSTORM,"
         " Babcock et al., Optical Nanoscopy 2012). The peaks are found in"
         " the residual of the fit, so the identification options are not"
         " used, except with --seed-identification",
@@ -5381,7 +5381,7 @@ def _build_parser() -> (
         type=float,
         default=8.0,
         help=(
-            "width (camera pixels) of the Gaussian low pass that estimates"
+            "sigma (camera pixels) of the Gaussian low pass that estimates"
             " the background (default 8)"
         ),
     )

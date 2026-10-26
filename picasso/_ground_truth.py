@@ -327,7 +327,8 @@ def render_movie(
         One row per emitter and frame: ``frame``, ``x`` and ``y`` (nm,
         Picasso's frame) and ``photons``, the number of photons emitted
         in that frame. Optional ``sx`` and ``sy`` (nm) give the emitter
-        its own PSF widths, e.g., for an astigmatic or mismatched PSF.
+        its own PSF sigma in x and y, e.g., for an astigmatic or
+        mismatched PSF.
     n_frames, width, height : int
         Size of the movie, in frames and camera pixels.
     pixelsize : float

@@ -21,7 +21,7 @@ Every frame is analyzed on its own, in cycles:
    Poisson deviance of its region (a disc of ``roi_size`` pixels). Peaks
    near a new peak or near a removed one are fitted again, until all have
    converged.
-4. Of two peaks closer than the PSF width, the dimmer one is removed, and
+4. Of two peaks closer than 1 PSF sigma, the dimmer one is removed, and
    so is every peak whose significance is not above ``threshold``.
 
 The cycles stop at the first cycle that finds no new peak, or after
@@ -109,7 +109,7 @@ THRESHOLD = 6.0
 N_CYCLES = 20
 #: Default radius (camera pixels) within which a peak must be the maximum.
 PEAK_RADIUS = 5.0
-#: Default width (camera pixels) of the Gaussian that estimates the
+#: Default sigma (camera pixels) of the Gaussian that estimates the
 #: background.
 BACKGROUND_SIGMA = 8.0
 
@@ -129,7 +129,7 @@ _LAMBDA_UP = 4.0
 _TOLERANCE = 1.0e-6
 # Most fitting sweeps over the running peaks per call (MultiFitter.doFit).
 _MAX_FIT_ITERATIONS = 2000
-# Peaks closer than this many PSF widths to a new or a removed peak are
+# Peaks closer than this many PSF sigma to a new or a removed peak are
 # fitted again (PeakFinderFitter.unconverged_dist).
 _NEIGHBORHOOD = 5.0
 # Floor of the variance the residual is divided by (PeakFinderGaussian).
@@ -138,7 +138,7 @@ _VARIANCE_FLOOR = 0.1
 _KERNEL_TRUNCATE = 4.0
 # The region of a peak is a disc of int(8 sigma) pixels (PeakFinderGaussian).
 _ROI_SIZE_FACTOR = 8.0
-# Emitters closer than this many PSF widths are fitted jointly in the
+# Emitters closer than this many PSF sigma are fitted jointly in the
 # Cramer-Rao bound and counted in ``n_emitters``.
 _NEIGHBOR_DISTANCE = 4.0
 # Most neighbors (nearest first) in an emitter's joint Fisher matrix.
@@ -159,7 +159,7 @@ def roi_size(sigma: float) -> int:
     Returns
     -------
     roi_size : int
-        ``int(8 * sigma)``, as storm-analysis uses for a fixed width.
+        ``int(8 * sigma)``, as storm-analysis uses for a fixed sigma.
     """
     return int(_ROI_SIZE_FACTOR * sigma)
 
@@ -548,7 +548,7 @@ class FrameResult(NamedTuple):
     n_pixels: np.ndarray
     #: Cramer-Rao variances of photons, x, y and bg, see :func:`crlb`.
     crlb: np.ndarray
-    #: Emitters within 4 PSF widths, the emitter itself included.
+    #: Emitters within 4 PSF sigma, the emitter itself included.
     n_emitters: np.ndarray
 
 
@@ -1319,7 +1319,7 @@ def _local_crlb(
         # terms scaled by A / (A + 1), A = (theta_p - theta_q)^2 /
         # (sigma_p sigma_q). Applied only here: with free photons and
         # backgrounds it can make a regular matrix indefinite, and the
-        # pruning keeps emitters a PSF width apart, where the plain bound
+        # pruning keeps emitters 1 PSF sigma apart, where the plain bound
         # holds (their Fig. 4a).
         zeroed = fisher.copy()
         for a in range(n_local):
@@ -1904,7 +1904,7 @@ def analyze_frame(
 
 # ----------------------------------------------------------------------
 # Peaks of the first cycle, and single emitters with a free width: the
-# PSF width of a movie is the median width of its isolated emitters.
+# PSF sigma of a movie is the median sigma of its isolated emitters.
 # ----------------------------------------------------------------------
 
 
