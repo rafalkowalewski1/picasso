@@ -4808,6 +4808,27 @@ class ParametersDialog(lib.Dialog):
             self.on_multi_emitter_changed
         )
         me_grid.addWidget(self.peak_search_z_edit, 6, 1)
+        self.fit_region_label = QtWidgets.QLabel("Fit region:")
+        fit_region_tip = (
+            "Side length of the disc each emitter is fitted in, cropped\n"
+            "from the spline calibration as the box of the single-emitter\n"
+            "fit is: at most the calibration box less 2. Auto takes it\n"
+            "from the calibration's PSF sigma: 8 sigma, 12 sigma for a 3D\n"
+            "calibration."
+        )
+        self.fit_region_label.setToolTip(fit_region_tip)
+        me_grid.addWidget(self.fit_region_label, 7, 0)
+        self.fit_region_spinbox = QtWidgets.QSpinBox()
+        # 2 reads as "Auto"; a region has at least 3 pixels
+        self.fit_region_spinbox.setRange(2, 99)
+        self.fit_region_spinbox.setSuffix(" px")
+        self.fit_region_spinbox.setSpecialValueText("Auto")
+        self.fit_region_spinbox.setValue(2)
+        self.fit_region_spinbox.setToolTip(fit_region_tip)
+        self.fit_region_spinbox.valueChanged.connect(
+            self.on_multi_emitter_changed
+        )
+        me_grid.addWidget(self.fit_region_spinbox, 7, 1)
         self.on_psf_sigma_estimate_changed()
 
         # 3D via astigmatism (Gaussian models); shown for non-spline fits
@@ -5324,6 +5345,8 @@ class ParametersDialog(lib.Dialog):
             )
             self.peak_search_z_label.setVisible(search_z)
             self.peak_search_z_edit.setVisible(search_z)
+            self.fit_region_label.setVisible(spline_psf)
+            self.fit_region_spinbox.setVisible(spline_psf)
         if self.channel_registration_groupbox is not None:
             self.channel_registration_groupbox.setVisible(needs_registration)
         if self.multi_emitter_groupbox is not None:
@@ -5378,9 +5401,12 @@ class ParametersDialog(lib.Dialog):
         if estimate is None:
             estimate = self.psf_sigma_estimate_checkbox.isChecked()
         psf_model = self.multi_emitter_psf_model()
+        fit_region_size = None
         if psf_model == "spline":
             # its PSF comes from the calibration
             estimate = True
+            if self.fit_region_spinbox.value() > 2:  # not "Auto"
+                fit_region_size = self.fit_region_spinbox.value()
         return localize.MultiEmitterParameters(
             psf_model=psf_model,
             snr_threshold=self.snr_threshold_spinbox.value(),
@@ -5389,6 +5415,7 @@ class ParametersDialog(lib.Dialog):
             peak_radius=self.peak_radius_spinbox.value(),
             background_sigma=self.background_sigma_spinbox.value(),
             peak_search_z=self.peak_search_z(),
+            fit_region_size=fit_region_size,
         )
 
     def peak_search_z(self) -> tuple[float, ...]:
@@ -7379,6 +7406,7 @@ class Window(QtWidgets.QMainWindow):
             ("max_cycles", dialog.max_cycles_spinbox),
             ("peak_radius", dialog.peak_radius_spinbox),
             ("background_sigma", dialog.background_sigma_spinbox),
+            ("fit_region_size", dialog.fit_region_spinbox),
         ):
             value = saved.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -7463,6 +7491,8 @@ class Window(QtWidgets.QMainWindow):
             "peak_radius": dialog.peak_radius_spinbox.value(),
             "background_sigma": dialog.background_sigma_spinbox.value(),
             "peak_search_z": dialog.peak_search_z_edit.text(),
+            # 2 is "Auto"
+            "fit_region_size": dialog.fit_region_spinbox.value(),
         }
         settings["Localize"]["Columns to save"] = {
             column: checkbox.isChecked()

@@ -29,10 +29,12 @@ algorithm is the 3D-DAOSTORM one above, differing only where it finds and
 fits the peaks: the residual is filtered with the spline PSF at one or
 more z values (``peak_search_z``), and a new peak starts at the z of the
 plane where it is brightest. Picasso's choices where the paper is silent:
-the region of a peak is the calibration box less 2 pixels, so that it
-stays within the spline wherever the peak moves inside its pixel; z is
-kept within the calibrated range; the PSF sums to one in focus, so its
-amplitude is in photons, as in Picasso's single-emitter spline fit; and
+the region of a peak, and the matched filter, are set apart from the
+calibration box (``roi`` of :func:`spline_psf`), at most the box less 2
+pixels, so that the region stays within the spline wherever the peak
+moves inside its pixel; z is kept within the calibrated range; the PSF
+sums to one in focus, so its amplitude is in photons, as in Picasso's
+single-emitter spline fit; and
 the calibration's Gaussian-equivalent sigma (``effective_sigma``) takes
 the place of the nominal sigma in pruning and in the neighborhoods.
 
@@ -222,6 +224,8 @@ class SplinePSF(NamedTuple):
     coeff: np.ndarray
     #: Whether z is fitted (a 3D spline) or held at 0 (a 2D one).
     fit_z: bool
+    #: Side length (camera pixels) of the disc a peak is fitted in.
+    roi: int
     #: Separable terms of the matched filters: the kernel along x and the
     #: one along y of each term, and the search plane it belongs to.
     search_kx: np.ndarray
@@ -241,6 +245,7 @@ def _empty_spline() -> SplinePSF:
     return SplinePSF(
         np.zeros((1, 1, 1, 1, 4, 4, 4)),
         False,
+        0,
         kernels,
         kernels,
         planes,
@@ -271,36 +276,54 @@ def spline_psf(
     coefficients: np.ndarray,
     fit_z: bool,
     search_z: tuple | list | np.ndarray = (0.0,),
+    roi: int | None = None,
 ) -> SplinePSF:
     """A cubic spline PSF for :func:`analyze_frame`, with its matched
     filters.
 
     The matched filter of a search plane is the PSF at its z, sampled at
-    the pixels around its center and normalized to sum to one, as a sum of
-    separable terms; the variance is filtered with its square.
+    the pixels of the region of a peak centered on a pixel and normalized
+    to sum to one, as a sum of separable terms; the variance is filtered
+    with its square.
 
     Parameters
     ----------
     coefficients : np.ndarray
-        Tricubic coefficients ``(niz, niy, nix, 4, 4, 4)``, indexed ``[z
-        cell, y cell, x cell, z power, y power, x power]``, with knots on
-        the camera pixel grid (see :attr:`SplinePSF.coeff`); a 2D spline
-        has ``niz = 1`` and only z power 0.
+        Tricubic coefficients ``(1, niz, niy, nix, 4, 4, 4)`` with knots
+        on the camera pixel grid, see :attr:`SplinePSF.coeff`; a 2D
+        spline has ``niz = 1`` and only z power 0.
     fit_z : bool
         Whether z is fitted (3D) or held at 0 (2D).
     search_z : sequence of float, optional
         z (spline slices) of the matched-filter planes. Default is (0,).
+    roi : int or None, optional
+        Side length (camera pixels) of the disc a peak is fitted in, from
+        3 to ``nix - 1``, the calibration box less 2, so that the region
+        stays within the spline wherever the peak moves inside its
+        pixel. None (the default) takes ``nix - 1``.
 
     Returns
     -------
     spline : SplinePSF
+
+    Raises
+    ------
+    ValueError
+        If ``roi`` is out of range, or the PSF at a search plane does not
+        sum to a positive value.
     """
     coeff = np.ascontiguousarray(coefficients, dtype=np.float64)
-    coeff = coeff.reshape((1,) + coeff.shape)
     nix = coeff.shape[3]
+    if roi is None:
+        roi = nix - 1
+    if not 3 <= roi <= nix - 1:
+        raise ValueError(
+            f"The region of a peak must be 3 to {nix - 1} pixels, the "
+            f"calibration box ({nix + 1}) less 2; got {roi}."
+        )
     center = 0.5 * nix
-    # odd kernels centered on a pixel, within the spline
-    radius = int(math.floor(center))
+    # odd kernels centered on a pixel, within the region
+    radius = int(roi) // 2
     offsets = np.arange(-radius, radius + 1, dtype=np.float64)
     search_z = np.asarray(search_z, dtype=np.float64).ravel()
     if not fit_z:
@@ -331,6 +354,7 @@ def spline_psf(
     return SplinePSF(
         coeff,
         bool(fit_z),
+        int(roi),
         *(np.ascontiguousarray(np.concatenate(t)) for t in terms),
         np.ascontiguousarray(search_z),
     )
@@ -357,11 +381,10 @@ def roi_size(
     roi_size : int
         ``int(8 * sigma)`` for a fixed sigma, 1.5 times that (rounded
         down) where the sigma is fitted, as in storm-analysis; the
-        calibration box less 2 for the spline, so that the region stays
-        within the spline wherever the peak moves inside its pixel.
+        spline's ``roi`` (see :func:`spline_psf`).
     """
     if psf_model == "spline":
-        return spline.coeff.shape[3] - 1
+        return spline.roi
     return _roi_size(sigma, PSF_MODELS[psf_model])
 
 
@@ -1930,7 +1953,7 @@ def analyze_frame(
     n_z = 1 if is_spline and spline.fit_z else 0
     coeff = spline.coeff
     if is_spline:
-        roi = coeff.shape[3] - 1
+        roi = spline.roi
     else:
         roi = _roi_size_jit(sigma, n_widths)
     margin = int(roi / 2 + 2)

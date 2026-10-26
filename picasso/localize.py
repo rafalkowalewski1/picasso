@@ -9710,6 +9710,15 @@ class MultiEmitterParameters:
         brightest. More than one helps only for PSFs whose shape changes
         with z beyond a blur, e.g., the double helix (Babcock & Zhuang,
         2017). Ignored by the other models. Default is (0.0,).
+    fit_region_size : int or None, optional
+        Side length (camera pixels) of the disc each emitter is fitted
+        in with the spline: a crop of the calibration, as the box of the
+        single-emitter spline fit is, of at most the calibration box less
+        2. None (the default) takes it from the calibration's
+        Gaussian-equivalent sigma, as the Gaussian models do from theirs:
+        ``int(8 * sigma)``, or 1.5 times that (rounded down) for a 3D
+        calibration, whose PSF widens with z; within the calibration box
+        less 2. Must be None for the other models.
 
     Raises
     ------
@@ -9717,8 +9726,10 @@ class MultiEmitterParameters:
         If ``psf_model`` is not one of the models, ``snr_threshold``,
         ``peak_radius`` or ``background_sigma`` not a positive number,
         ``max_cycles`` not a positive integer, ``psf_sigma`` neither None
-        nor a positive number or given for the spline, or
-        ``peak_search_z`` not one or more finite numbers.
+        nor a positive number or given for the spline,
+        ``peak_search_z`` not one or more finite numbers, or
+        ``fit_region_size`` neither None nor an integer of at least 3 or
+        given for a Gaussian model.
 
     Examples
     --------
@@ -9730,9 +9741,12 @@ class MultiEmitterParameters:
 
     >>> parameters = localize.MultiEmitterParameters(psf_model="spherical")
 
-    An experimental PSF, from a spline calibration:
+    An experimental PSF, from a spline calibration, fitted within 11
+    pixels:
 
-    >>> parameters = localize.MultiEmitterParameters(psf_model="spline")
+    >>> parameters = localize.MultiEmitterParameters(
+    ...     psf_model="spline", fit_region_size=11
+    ... )
     """
 
     psf_model: Literal["fixed", "spherical", "elliptical", "spline"] = "fixed"
@@ -9742,6 +9756,7 @@ class MultiEmitterParameters:
     peak_radius: float = residualfit.PEAK_RADIUS
     background_sigma: float = residualfit.BACKGROUND_SIGMA
     peak_search_z: tuple[float, ...] = (0.0,)
+    fit_region_size: int | None = None
 
     def __post_init__(self) -> None:
         if self.psf_model not in residualfit.PSF_MODELS:
@@ -9800,12 +9815,31 @@ class MultiEmitterParameters:
                 f"got {self.peak_search_z!r}."
             )
         object.__setattr__(self, "peak_search_z", values)
+        size = self.fit_region_size
+        if size is not None:
+            if (
+                isinstance(size, (bool, np.bool_))
+                or not isinstance(size, (int, np.integer))
+                or size < 3
+            ):
+                raise ValueError(
+                    "fit_region_size must be None (from the calibration) "
+                    f"or an integer of at least 3 pixels, got {size!r}."
+                )
+            object.__setattr__(self, "fit_region_size", int(size))
+            if self.psf_model != "spline":
+                raise ValueError(
+                    "fit_region_size applies to psf_model='spline' only; "
+                    "the Gaussian models take their region from the PSF "
+                    "sigma."
+                )
 
     def to_info(self) -> dict:
         """The settings under the keys of the fit's metadata.
 
-        ``"PSF Sigma (nm)"`` is only recorded when it was given; the fit
-        records the sigma it used either way.
+        ``"PSF Sigma (nm)"`` and ``"Fit Region Size"`` are only recorded
+        when they were given; the fit records the values it used either
+        way.
 
         Returns
         -------
@@ -9813,7 +9847,7 @@ class MultiEmitterParameters:
             ``"PSF Model"``, ``"SNR Threshold"``, ``"PSF Sigma (nm)"``,
             ``"Max. Cycles"``, ``"Peak Search Radius"``, ``"Background
             Filter Sigma"`` and, for the spline, ``"Peak Search z
-            (nm)"``.
+            (nm)"`` and ``"Fit Region Size"``.
         """
         info = {
             "PSF Model": self.psf_model,
@@ -9826,6 +9860,8 @@ class MultiEmitterParameters:
         info["Background Filter Sigma"] = self.background_sigma
         if self.psf_model == "spline":
             info["Peak Search z (nm)"] = list(self.peak_search_z)
+            if self.fit_region_size is not None:
+                info["Fit Region Size"] = self.fit_region_size
         return info
 
     @classmethod
@@ -9834,7 +9870,8 @@ class MultiEmitterParameters:
         :meth:`to_info`, e.g., the metadata of a multi-emitter fit.
 
         Missing keys take the defaults. The metadata of a fit records the
-        PSF sigma it used, so the settings read from it reproduce the fit.
+        PSF sigma and, for the spline, the fit region size it used, so the
+        settings read from it reproduce the fit.
 
         Parameters
         ----------
@@ -9858,6 +9895,7 @@ class MultiEmitterParameters:
                 "Background Filter Sigma", residualfit.BACKGROUND_SIGMA
             ),
             peak_search_z=info.get("Peak Search z (nm)", (0.0,)),
+            fit_region_size=info.get("Fit Region Size"),
         )
 
 
@@ -10087,7 +10125,7 @@ def _multi_emitter_spline(
 ) -> tuple[residualfit.SplinePSF, float]:
     """The PSF of a "spline" multi-emitter fit from a spline calibration,
     and the Gaussian-equivalent sigma (camera pixels) the fit prunes
-    with.
+    with, which also sets the default ``fit_region_size``.
 
     The PSF is divided by the calibration's ``photon_scale``, the sum of
     its in-focus slice, so the fitted amplitude is in photons, as in the
@@ -10105,14 +10143,15 @@ def _multi_emitter_spline(
             "knots on the camera pixels (oversampling 1), got oversampling "
             f"{calibration.get('oversampling')}."
         )
-    coeff = precision._spline_coeff_reshaped(calibration)[0]
+    # (1, niz, niy, nix, 4, 4, 4), the layout of the single-emitter fit
+    coeff = precision._spline_coeff_reshaped(calibration)
     if model == "spline-2d":
         # a 2D spline is a 3D one of a single z cell, held at z = 0
-        niy, nix = coeff.shape[:2]
-        lifted = np.zeros((1, niy, nix, 4, 4, 4))
-        lifted[0, :, :, 0] = coeff
+        niy, nix = coeff.shape[1:3]
+        lifted = np.zeros((1, 1, niy, nix, 4, 4, 4))
+        lifted[0, 0, :, :, 0] = coeff[0]
         coeff = lifted
-    box = coeff.shape[2] + 1
+    box = coeff.shape[3] + 1
     if box < 5:
         raise ValueError(
             "The multi-emitter fit needs a spline calibration box of at "
@@ -10125,7 +10164,7 @@ def _multi_emitter_spline(
         if fit_z
         else np.zeros(1)
     )
-    n_slices = coeff.shape[0]
+    n_slices = coeff.shape[1]
     if fit_z and (search_z.min() < 0 or search_z.max() > n_slices):
         z_min, z_max = _spline_z_nm(
             -np.array([0.0, float(n_slices)]), np.zeros(2), calibration
@@ -10135,7 +10174,6 @@ def _multi_emitter_spline(
             f"{min(z_min, z_max):.0f} to {max(z_min, z_max):.0f} nm, got "
             f"{list(parameters.peak_search_z)}."
         )
-    spline = residualfit.spline_psf(coeff, fit_z, search_z)
     sigma = calibration.get("effective_sigma")
     if sigma is None:
         # from the second moments of the PSF at its sharpest slice
@@ -10144,7 +10182,7 @@ def _multi_emitter_spline(
             [
                 [
                     splinefit._eval_spline_3d(
-                        spline.coeff, 0, float(i), float(j), z_focus
+                        coeff, 0, float(i), float(j), z_focus
                     )[0]
                     for i in range(box)
                 ]
@@ -10162,6 +10200,20 @@ def _multi_emitter_spline(
                 + (weights.sum(axis=1) * grid).sum()
             )
         )
+    size = parameters.fit_region_size
+    if size is None:
+        # as the Gaussian models from their sigma; a 3D PSF widens with z
+        # as a fitted sigma does
+        size = residualfit.roi_size(
+            float(sigma), "elliptical" if fit_z else "fixed"
+        )
+        size = min(max(size, 3), box - 2)
+    elif size > box - 2:
+        raise ValueError(
+            f"fit_region_size must be at most {box - 2} pixels with this "
+            f"calibration, its box ({box}) less 2, got {size}."
+        )
+    spline = residualfit.spline_psf(coeff, fit_z, search_z, size)
     return spline, float(sigma)
 
 
@@ -10436,10 +10488,9 @@ def localize_multi_emitter(
         "spline-3d" (see ``picasso.spline.calibrate_spline`` and
         ``io.load_spline_calibration``), or the path of its file: the PSF
         of the "spline" model, which needs it. A 3D calibration gives z
-        directly, and its own lateral corrections are applied. The region
-        each emitter is fitted in is the calibration box less 2 pixels,
-        so the box should cover the PSF and its tails, e.g., 13 pixels.
-        Default is None.
+        directly, and its own lateral corrections are applied. Each
+        emitter is fitted in a disc of ``parameters.fit_region_size``
+        pixels, a crop of the calibration box. Default is None.
     lateral_transforms : dict, list, str or None, optional
         Lateral (x, y) corrections applied to the localizations after the
         fit, as in :func:`fit`: a calibration with an ``"Affine
@@ -10732,6 +10783,8 @@ def localize_multi_emitter(
             **parameters.to_info(),
         }
         if is_spline:
+            # the region the fit used, given or from the calibration
+            entry["Fit Region Size"] = spline.roi
             entry["Spline calibration model"] = spline_calibration.get("model")
             entry["Spline calibration path"] = spline_calibration.get(
                 "Path", "N/A"

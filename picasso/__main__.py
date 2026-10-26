@@ -2253,6 +2253,7 @@ def _multi_emitter_parameters_from_args(args: argparse.Namespace):
         peak_radius=args.peak_radius,
         background_sigma=args.background_sigma,
         peak_search_z=tuple(args.peak_search_z),
+        fit_region_size=args.fit_region_size,
     )
 
 
@@ -2656,6 +2657,11 @@ def _check_multi_emitter_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--multi-emitter fits a Gaussian unless --psf-model spline; "
             "add it, or leave out --spline-calibration."
+        )
+    if args.psf_model != "spline" and args.fit_region_size is not None:
+        raise SystemExit(
+            "--multi-emitter takes the fit region of a Gaussian from its "
+            "sigma; leave out --fit-region-size, or add --psf-model spline."
         )
     if args.zc and args.psf_model != "elliptical":
         raise SystemExit(
@@ -5454,6 +5460,17 @@ def _build_parser() -> (
             "z (nm) at which --psf-model spline with a 3D calibration"
             " filters the residual to find peaks; a new emitter starts at"
             " the z where it is brightest (default 0)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--fit-region-size",
+        type=int,
+        default=None,
+        help=(
+            "side length (camera pixels) of the disc each emitter is fitted"
+            " in with --psf-model spline, cropped from the calibration: at"
+            " most its box less 2. Default: from the calibration's PSF"
+            " sigma, 8 sigma (12 for a 3D calibration)"
         ),
     )
     multi_emitter.add_argument(

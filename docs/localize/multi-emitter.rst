@@ -70,7 +70,7 @@ A fitted σ starts at the ``PSF sigma`` and stays within 0.5 to 5 times it, and 
 
 **Astigmatic 3D.** With ``Fitted sx and sy`` and a 3D calibration (see :ref:`localize-3d-calibration`), z is read from each emitter's ``sx`` and ``sy`` after the fit, as storm-analysis's ``3d`` model does.
 
-**Spline PSF.** With ``Experimental PSF (cubic spline)``, every emitter is the PSF of a single-channel spline calibration (see :ref:`localize-spline`), sampled at its pixels, with its photons, x, y, background and, for a 3D calibration, z fitted, as in Babcock & Zhuang (2017). It is implemented from the paper, not ported from storm-analysis's ``spliner``. Peaks are found by filtering with the PSF at the ``Peak search z`` (by default only at 0 nm), and a new emitter starts at the z where it is brightest; the paper found more than one plane useful only for PSFs that change their shape with z beyond a blur, such as the double helix. z stays within the calibrated range. Each emitter is fitted in a disc of the calibration box less 2 pixels, so build the calibration with a box that holds the PSF's tails, e.g., 13 pixels. Its Gaussian-equivalent σ in focus takes the place of the ``PSF sigma`` in removing close emitters and in ``n_emitters``.
+**Spline PSF.** With ``Experimental PSF (cubic spline)``, every emitter is the PSF of a single-channel spline calibration (see :ref:`localize-spline`), sampled at its pixels, with its photons, x, y, background and, for a 3D calibration, z fitted, as in Babcock & Zhuang (2017). It is implemented from the paper, not ported from storm-analysis's ``spliner``. Peaks are found by filtering with the PSF at the ``Peak search z`` (by default only at 0 nm), and a new emitter starts at the z where it is brightest; the paper found more than one plane useful only for PSFs that change their shape with z beyond a blur, such as the double helix. z stays within the calibrated range. Each emitter is fitted in a disc of ``Fit region`` pixels, cropped from the calibration as the box of the single-emitter spline fit is, so a calibration with a large box, e.g., 25 pixels, can be fitted in a smaller region; the region must be at least 2 pixels smaller than the calibration box. ``Auto`` takes it from the calibration's Gaussian-equivalent σ in focus, as for the Gaussian models: 8 σ, or 12 σ for a 3D calibration, whose PSF widens with z (e.g., 12 pixels for σ = 1 pixel). The peaks are found with the PSF within the same region. The Gaussian-equivalent σ takes the place of the ``PSF sigma`` in removing close emitters and in ``n_emitters``.
 
 .. _localize-multi-emitter-gui:
 
@@ -79,7 +79,7 @@ In Picasso: Localize
 
 In the ``Parameters`` dialog, under ``Fit Settings``, select the model ``Overlapping emitters``. The optimizer is MLE; the identification settings (box, method, filters) disappear, since the fit finds the spots itself, while the ROIs and the frame range still apply. Its settings are under ``Overlapping emitters``:
 
-- ``PSF model`` (default ``Fixed sigma``): the PSF of each emitter, see :ref:`localize-multi-emitter-models`. With ``Fitted sx and sy``, the ``3D via Astigmatism`` section appears, to get z as for the single-emitter fits (see :ref:`localize-3d-calibration`). With ``Experimental PSF (cubic spline)``, the ``Experimental PSF (spline)`` section appears instead, to load the calibration (see :ref:`localize-spline-fitting`), and the ``PSF sigma`` gives way to the ``Peak search z (nm)`` for a 3D calibration: the z of the filter planes, separated by commas.
+- ``PSF model`` (default ``Fixed sigma``): the PSF of each emitter, see :ref:`localize-multi-emitter-models`. With ``Fitted sx and sy``, the ``3D via Astigmatism`` section appears, to get z as for the single-emitter fits (see :ref:`localize-3d-calibration`). With ``Experimental PSF (cubic spline)``, the ``Experimental PSF (spline)`` section appears instead, to load the calibration (see :ref:`localize-spline-fitting`), and the ``PSF sigma`` gives way to the ``Fit region`` (``Auto`` by default) and, for a 3D calibration, the ``Peak search z (nm)``: the z of the filter planes, separated by commas.
 - ``SNR threshold`` (default 15): the peak threshold and the minimum significance of an emitter. storm-analysis uses 6, which on real data also finds dim spots on out-of-focus background; on dense frames with a flat background, lower values (down to 6) find more emitters.
 - ``PSF sigma (nm)`` (Gaussian models): σ for a fixed σ, and the start of a fitted one; peaks are always found with it. With ``Estimate`` ticked (the default), σ is estimated from the movie as the median σ of isolated emitters fitted with a free σ; as soon as σ is estimated, before the frames are fitted, it is shown in the spin box and in the status bar. Untick ``Estimate`` to give σ.
 - ``Max. cycles`` (default 20): the most find-fit-subtract cycles per frame. A frame stops earlier, at the first cycle that finds no new peak; sparse frames need two or three cycles. A lower value saves time on very dense frames but leaves the emitters that later cycles would have found.
@@ -100,7 +100,7 @@ One localization per emitter, with the columns of an MLE fit (see :ref:`files-lo
 - ``significance``: the signal of the emitter over the square root of the background it sits on, both weighted by the PSF.
 - ``n_emitters``: the number of emitters within 4 PSF σ, the emitter itself included, counting at most its 8 nearest neighbors (so at most 9); 1 for an isolated emitter. These are the emitters its precision is computed from (see below). To keep the isolated ones only, filter by ``n_emitters == 1``.
 
-For the Gaussian models, ``sx`` and ``sy`` hold the PSF σ, fixed or fitted; a fitted σ adds its uncertainties ``sx_unc`` and ``sy_unc``. With a 3D calibration, ``z``, ``d_zcalib`` and ``lpz`` are added, as for the single-emitter fits. The spline has no ``sx`` and ``sy``, and a 3D spline calibration adds ``z`` and ``lpz``, as the single-emitter spline fit does. The localization precisions ``lpx``, ``lpy`` and, for the spline, ``lpz``, and the uncertainties ``photons_unc``, ``bg_unc``, ``sx_unc`` and ``sy_unc`` are Cramer-Rao bounds, as in `Huang et al., Biomed. Opt. Express, 2011 <https://doi.org/10.1364/BOE.2.001377>`_: each comes from the joint Fisher matrix of the emitter and its neighbors within 4 PSF σ (at most the 8 nearest), so the bounds grow where emitters overlap; a fitted σ or z is among the parameters of each emitter. Where that matrix is singular, Huang et al.'s approximation (their Eq. 11) is used instead. ``log_likelihood`` and ``reduced_chi_square`` describe the fit of the region around the emitter, its neighbors included. The settings, and the PSF σ that was used (or, for a fitted σ, started from), are recorded in the ``Fit multi-emitter`` entry of the metadata, for the spline with the calibration's model and path.
+For the Gaussian models, ``sx`` and ``sy`` hold the PSF σ, fixed or fitted; a fitted σ adds its uncertainties ``sx_unc`` and ``sy_unc``. With a 3D calibration, ``z``, ``d_zcalib`` and ``lpz`` are added, as for the single-emitter fits. The spline has no ``sx`` and ``sy``, and a 3D spline calibration adds ``z`` and ``lpz``, as the single-emitter spline fit does. The localization precisions ``lpx``, ``lpy`` and, for the spline, ``lpz``, and the uncertainties ``photons_unc``, ``bg_unc``, ``sx_unc`` and ``sy_unc`` are Cramer-Rao bounds, as in `Huang et al., Biomed. Opt. Express, 2011 <https://doi.org/10.1364/BOE.2.001377>`_: each comes from the joint Fisher matrix of the emitter and its neighbors within 4 PSF σ (at most the 8 nearest), so the bounds grow where emitters overlap; a fitted σ or z is among the parameters of each emitter. Where that matrix is singular, Huang et al.'s approximation (their Eq. 11) is used instead. ``log_likelihood`` and ``reduced_chi_square`` describe the fit of the region around the emitter, its neighbors included. The settings, and the PSF σ that was used (or, for a fitted σ, started from), are recorded in the ``Fit multi-emitter`` entry of the metadata, for the spline with the fit region that was used and the calibration's model and path.
 
 .. _localize-multi-emitter-cli:
 
@@ -111,9 +111,9 @@ Command line
 
    picasso localize movie.tif --multi-emitter -px 130 -bl 100 -s 0.5
    picasso localize movie.tif --multi-emitter -px 130 -bl 100 -s 0.5 --psf-model elliptical -zc 3d_calib.yaml -mf 0.79
-   picasso localize movie.tif --multi-emitter -px 130 -bl 100 -s 0.5 --psf-model spline -sc spline_calib.hdf5
+   picasso localize movie.tif --multi-emitter -px 130 -bl 100 -s 0.5 --psf-model spline -sc spline_calib.hdf5 --fit-region-size 11
 
-Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``spline``; with ``elliptical``, ``--z-calibration`` gives z; ``spline`` takes one ``--spline-calibration``), ``--peak-search-z`` (nm, for a 3D spline; 0), ``--snr-threshold`` (15), ``--psf-sigma`` (nm; estimated by default), ``--max-cycles`` (20), ``--peak-radius`` (5), ``--background-sigma`` (8) and ``--seed-identification``, which starts each frame from the spots the identification options find instead of the first cycle's peaks. See :ref:`cmd-localize`.
+Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``spline``; with ``elliptical``, ``--z-calibration`` gives z; ``spline`` takes one ``--spline-calibration``), ``--peak-search-z`` (nm, for a 3D spline; 0), ``--fit-region-size`` (camera pixels, for the spline; from the calibration), ``--snr-threshold`` (15), ``--psf-sigma`` (nm; estimated by default), ``--max-cycles`` (20), ``--peak-radius`` (5), ``--background-sigma`` (8) and ``--seed-identification``, which starts each frame from the spots the identification options find instead of the first cycle's peaks. See :ref:`cmd-localize`.
 
 .. dropdown:: Python
    :icon: code
@@ -156,7 +156,8 @@ Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``
           calibration_3d="3d_calib.yaml",
       )
 
-   A measured PSF: a spline calibration, or its path; a 3D one gives z:
+   A measured PSF: a spline calibration, or its path; a 3D one gives z.
+   Here each emitter is fitted in a disc of 11 pixels:
 
    .. code-block:: python
 
@@ -164,7 +165,9 @@ Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``
           movie,
           info,
           camera_info=camera_info,
-          parameters=localize.MultiEmitterParameters(psf_model="spline"),
+          parameters=localize.MultiEmitterParameters(
+              psf_model="spline", fit_region_size=11
+          ),
           spline_calibration="spline_calib.hdf5",
       )
 

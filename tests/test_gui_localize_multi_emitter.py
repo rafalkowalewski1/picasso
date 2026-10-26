@@ -108,12 +108,13 @@ def test_the_psf_model_selects_the_fit_and_its_z(window):
 
 
 def test_the_spline_takes_its_psf_from_the_calibration(window):
-    """The spline shows the calibration loader instead of the PSF sigma,
-    and the peak search in z for a 3D calibration."""
+    """The spline shows the calibration loader and its fit region instead
+    of the PSF sigma, and the peak search in z for a 3D calibration."""
     dialog = window.parameters_dialog
     _select(window)
     assert dialog.spline_groupbox.isHidden()
     assert not dialog.psf_sigma_spinbox.isHidden()
+    assert dialog.fit_region_spinbox.isHidden()
     dialog.psf_model_combo.setCurrentText("Experimental PSF (cubic spline)")
     assert not dialog.spline_groupbox.isHidden()
     for widget in (
@@ -122,6 +123,12 @@ def test_the_spline_takes_its_psf_from_the_calibration(window):
         dialog.psf_sigma_estimate_checkbox,
     ):
         assert widget.isHidden()
+    assert not dialog.fit_region_spinbox.isHidden()
+    # "Auto": from the calibration
+    assert dialog.fit_region_spinbox.text() == "Auto"
+    assert dialog.multi_emitter_parameters().fit_region_size is None
+    dialog.fit_region_spinbox.setValue(11)
+    assert dialog.multi_emitter_parameters().fit_region_size == 11
     # no calibration, or a 2D one: no z to search
     assert dialog.peak_search_z_edit.isHidden()
     dialog.spline_calibration = _spline_calibration("spline-3d")
@@ -135,7 +142,10 @@ def test_the_spline_takes_its_psf_from_the_calibration(window):
     dialog.psf_model_combo.setCurrentText("Fixed sigma")
     assert dialog.spline_groupbox.isHidden()
     assert dialog.peak_search_z_edit.isHidden()
+    assert dialog.fit_region_spinbox.isHidden()
     assert not dialog.psf_sigma_spinbox.isHidden()
+    # the Gaussians take their region from the sigma
+    assert dialog.multi_emitter_parameters().fit_region_size is None
 
 
 def test_the_spline_fit_gives_z(loaded, tmp_path, monkeypatch):
@@ -368,6 +378,7 @@ def test_the_settings_are_kept(qt_offscreen):
     dialog.peak_radius_spinbox.setValue(4.0)
     dialog.background_sigma_spinbox.setValue(10.0)
     dialog.peak_search_z_edit.setText("-300, 0")
+    dialog.fit_region_spinbox.setValue(9)
     first.close()
     second = gui_localize.Window()
     try:
@@ -380,5 +391,6 @@ def test_the_settings_are_kept(qt_offscreen):
         assert dialog.peak_radius_spinbox.value() == 4.0
         assert dialog.background_sigma_spinbox.value() == 10.0
         assert dialog.peak_search_z() == (-300.0, 0.0)
+        assert dialog.fit_region_spinbox.value() == 9
     finally:
         second.close()

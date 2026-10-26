@@ -308,7 +308,10 @@ def test_spline_reproduces_storm_analysis():
     }
     locs, _ = _fit(
         frames,
-        parameters=dataclasses.replace(SPLINE, snr_threshold=6.0),
+        # spliner fits within the whole spline
+        parameters=dataclasses.replace(
+            SPLINE, snr_threshold=6.0, fit_region_size=n - 2
+        ),
         spline_calibration=calibration,
     )
     reference = pd.DataFrame(
@@ -983,17 +986,17 @@ def _astigmatic_sigmas(z):
     )
 
 
-def _spline_calibration(model="spline-3d"):
+def _spline_calibration(model="spline-3d", box=SPLINE_BOX):
     """A spline calibration of the astigmatic test PSF integrated over the
     pixels, built as ``spline.calibrate_spline`` builds one: knots on the
     pixel grid, the stage z falling as the slice rises, a peak of 1 in
     focus, and the in-focus sum as the photon scale."""
-    center = (SPLINE_BOX - 1) / 2
-    edges = np.arange(SPLINE_BOX + 1) - 0.5
+    center = (box - 1) / 2
+    edges = np.arange(box + 1) - 0.5
     n_slices = SPLINE_SLICES if model == "spline-3d" else 1
     focus = (n_slices - 1) // 2
     sx, sy = _astigmatic_sigmas((focus - np.arange(n_slices)) * SPLINE_STEP)
-    volume = np.empty((SPLINE_BOX, SPLINE_BOX, n_slices))
+    volume = np.empty((box, box, n_slices))
     for k in range(n_slices):
         ex, ey = (
             np.diff(erf((edges - center) / (np.sqrt(2) * s / PIXELSIZE))) / 2
@@ -1004,7 +1007,7 @@ def _spline_calibration(model="spline-3d"):
     calibration = {
         "model": model,
         "oversampling": 1.0,
-        "box": SPLINE_BOX,
+        "box": box,
         "pixelsize": PIXELSIZE,
         "photon_scale": float(volume[:, :, focus].sum()),
         "effective_sigma": 1.0,
@@ -1014,10 +1017,10 @@ def _spline_calibration(model="spline-3d"):
         calibration["coefficients"] = spline.spline_coefficients(
             volume[:, :, 0]
         )
-        calibration["n_data"] = [SPLINE_BOX, SPLINE_BOX]
+        calibration["n_data"] = [box, box]
     else:
         calibration["coefficients"] = spline.spline_coefficients(volume)
-        calibration["n_data"] = [SPLINE_BOX, SPLINE_BOX, n_slices]
+        calibration["n_data"] = [box, box, n_slices]
         calibration.update(
             z_center=float(focus),
             z_init=float(focus),
@@ -1168,7 +1171,13 @@ def test_spline_columns_and_metadata(model):
     assert entry["Spline calibration model"] == model
     assert entry["Spline calibration path"] == "test_spline.hdf5"
     assert "PSF Sigma (nm)" not in entry
-    assert localize.MultiEmitterParameters.from_info(entry) == SPLINE
+    # the region used, from the calibration's sigma of 1 pixel: 8 pixels,
+    # 12 for a 3D calibration, within the box less 2
+    size = 11 if model == "spline-3d" else 8
+    assert entry["Fit Region Size"] == size
+    assert localize.MultiEmitterParameters.from_info(
+        entry
+    ) == dataclasses.replace(SPLINE, fit_region_size=size)
 
 
 def test_spline_refusals():
@@ -1197,14 +1206,74 @@ def test_spline_refusals():
         )
     with pytest.raises(ValueError, match="peak_search_z"):
         localize.MultiEmitterParameters(peak_search_z=())
+    for size in (2, 11.0, True):
+        with pytest.raises(ValueError, match="fit_region_size"):
+            localize.MultiEmitterParameters(
+                psf_model="spline", fit_region_size=size
+            )
+    with pytest.raises(ValueError, match="fit_region_size"):
+        localize.MultiEmitterParameters(fit_region_size=11)
+    # the region stays within the calibration box less 2
+    with pytest.raises(ValueError, match="at most 11"):
+        _fit(
+            frames,
+            parameters=dataclasses.replace(
+                SPLINE, fit_region_size=SPLINE_BOX - 1
+            ),
+            spline_calibration=calibration,
+        )
 
 
-def test_spline_padding_covers_the_region():
-    psf, _ = localize._multi_emitter_spline(_spline_calibration(), SPLINE)
-    # the calibration box less 2, so that the region stays within the
-    # spline wherever its peak moves inside the pixel
-    assert residualfit.roi_size(1.0, "spline", psf) == SPLINE_BOX - 2
-    assert residualfit.padding(1.0, "spline", psf) >= (SPLINE_BOX - 2) / 2
+@pytest.mark.parametrize(
+    "model, box, size, expected",
+    [
+        # 8 sigma for a 2D calibration, as the fixed Gaussian
+        ("spline-2d", SPLINE_BOX, None, 8),
+        # 12 sigma for a 3D one, as a fitted sigma, within the box less 2
+        ("spline-3d", SPLINE_BOX, None, SPLINE_BOX - 2),
+        ("spline-3d", 25, None, 12),
+        ("spline-3d", 25, 7, 7),
+    ],
+)
+def test_spline_fit_region(model, box, size, expected):
+    """The region an emitter is fitted in, and the frame's padding."""
+    psf, _ = localize._multi_emitter_spline(
+        _spline_calibration(model, box),
+        dataclasses.replace(SPLINE, fit_region_size=size),
+    )
+    assert residualfit.roi_size(1.0, "spline", psf) == expected
+    assert residualfit.padding(1.0, "spline", psf) >= expected / 2
+    # the matched filters reach as far as the region
+    assert psf.search_kx.shape[1] == 2 * (expected // 2) + 1
+
+
+def test_spline_fit_region_crops_a_large_calibration():
+    """A calibration with a large box, fitted in a smaller region, gives
+    the localizations of one with a box that just holds the region: the
+    region is a crop of the calibration, as the box of the single-emitter
+    spline fit is."""
+    frames, truth = _spline_singles("spline-3d")
+    parameters = dataclasses.replace(SPLINE, fit_region_size=SPLINE_BOX - 2)
+    small, _ = _fit(
+        frames,
+        parameters=parameters,
+        spline_calibration=_spline_calibration(),
+    )
+    large, info = _fit(
+        frames,
+        parameters=parameters,
+        spline_calibration=_spline_calibration(box=25),
+    )
+    assert len(large) == len(small) == len(truth)
+    li, ti = _match(large, small, tolerance=10.0)
+    assert len(li) == len(truth)
+    for column, bound in (("x", "lpx"), ("y", "lpy"), ("z", "lpz")):
+        difference = (
+            large[column].to_numpy()[li] - small[column].to_numpy()[ti]
+        )
+        assert np.abs(difference).max() < 0.01 * small[bound].median()
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["Fit Region Size"] == SPLINE_BOX - 2
 
 
 def test_spline_peak_shape():

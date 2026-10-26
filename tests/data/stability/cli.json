@@ -150,6 +150,7 @@
   "--database",
   "--drift",
   "--fit-method",
+  "--fit-region-size",
   "--fit-z-gpu",
   "--frame-bounds",
   "--gain",

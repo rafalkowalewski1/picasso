@@ -1585,6 +1585,8 @@ def test_localize_multi_emitter_spline_gives_z(tmp_path, monkeypatch):
         -200,
         0,
         200,
+        "--fit-region-size",
+        9,
         "-px",
         160,
         "-d",
@@ -1597,6 +1599,7 @@ def test_localize_multi_emitter_spline_gives_z(tmp_path, monkeypatch):
     entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
     assert entry["PSF Model"] == "spline"
     assert entry["Peak Search z (nm)"] == [-200.0, 0.0, 200.0]
+    assert entry["Fit Region Size"] == 9
     assert entry["Spline calibration path"] == calibration
 
 
@@ -1612,6 +1615,8 @@ def test_localize_multi_emitter_spline_gives_z(tmp_path, monkeypatch):
         ["--psf-model", "spline"],
         ["--psf-model", "spline", "-sc", "a.hdf5", "-sc", "b.hdf5"],
         ["--psf-model", "spline", "-sc", "spline.hdf5", "-zc", "c.yaml"],
+        # the fit region of a Gaussian follows its sigma
+        ["--fit-region-size", 11],
         ["--regions-separately", "-r", 0, 0, 16, 32, "-r", 16, 0, 32, 32],
     ],
 )

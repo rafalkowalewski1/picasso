@@ -223,6 +223,10 @@ See :ref:`localize-multi-emitter`.
    For ``--psf-model spline`` with a 3D calibration: the z (nm) at which the
    PSF filters the residual to find peaks (default 0); a new emitter starts at
    the z where it is brightest.
+``--fit-region-size``
+   For ``--psf-model spline``: the side length (camera pixels) of the disc each
+   emitter is fitted in, cropped from the calibration, at most its box less 2.
+   By default from the calibration's PSF σ: 8 σ, or 12 σ for a 3D calibration.
 ``--seed-identification``
    Start each frame from the spots the identification options find, instead
    of the first cycle's peaks.
