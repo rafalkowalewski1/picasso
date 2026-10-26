@@ -2187,6 +2187,7 @@ def _localize_process_file(
                 frame_bounds,
                 cam_info,
                 camera_calibration,
+                z_params,
                 lateral_transforms,
             )
         ]
@@ -2244,6 +2245,7 @@ def _multi_emitter_parameters_from_args(args: argparse.Namespace):
     from .localize import MultiEmitterParameters
 
     return MultiEmitterParameters(
+        psf_model=args.psf_model,
         snr_threshold=args.snr_threshold,
         psf_sigma=args.psf_sigma,
         max_cycles=args.max_cycles,
@@ -2263,10 +2265,13 @@ def _localize_multi_emitter(
     frame_bounds,
     camera_info: dict,
     camera_calibration: dict | None,
+    z_params,
     lateral_transforms: list | None,
 ) -> str:
     """Fit one movie with the multi-emitter fitting (``--multi-emitter``),
-    then save it and undrift it as any other fit.
+    then save it and undrift it as any other fit. With ``z_params`` (an
+    elliptical fit, see ``_check_multi_emitter_args``), z is read from the
+    fitted sigmas, and the z fit applies the lateral corrections.
 
     Returns
     -------
@@ -2280,6 +2285,11 @@ def _localize_multi_emitter(
         seed_identification = _identification_parameters_from_args(
             args, box, min_net_gradient
         )
+    calibration_3d = None
+    if z_params is not None:
+        zpath, magnification_factor, z_calibration = z_params
+        calibration_3d = dict(z_calibration)
+        calibration_3d["Magnification factor"] = magnification_factor
     locs, info = localize_multi_emitter(
         movie,
         info,
@@ -2289,13 +2299,25 @@ def _localize_multi_emitter(
         frame_bounds=frame_bounds,
         seed_identification=seed_identification,
         camera_calibration=camera_calibration,
+        calibration_3d=calibration_3d,
+        lateral_transforms=lateral_transforms if calibration_3d else None,
         parallel=True,
         progress="console",
     )
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
     print(
-        f"PSF sigma: {info[-1]['PSF Sigma (nm)']:.1f} nm"
-        + (" (estimated)" if info[-1]["PSF Sigma Estimated"] else "")
+        f"PSF sigma: {entry['PSF Sigma (nm)']:.1f} nm"
+        + (" (estimated)" if entry["PSF Sigma Estimated"] else "")
+        + ("" if args.psf_model == "fixed" else ", the start of the fit")
     )
+    if calibration_3d is not None:
+        info[-1]["Z Calibration Path"] = zpath
+        _print_lateral_report(
+            info[-1].get("Lateral corrections applied"),
+            info[-1].get("Lateral corrections skipped"),
+        )
+        # applied by the z fit
+        lateral_transforms = None
     return _localize_finish(
         locs, info, path, args, None, lateral_transforms, None
     )
@@ -2516,7 +2538,6 @@ def _localize_finish(
         from . import zfit
 
         zpath, magnification_factor, z_calibration = z_params
-        z_calibration["Magnification Factor"] = magnification_factor
         print("------------------------------------------")
         print("Fitting 3D...")
         method = "gausslq" if "mle" not in method_name else "gaussmle"
@@ -2534,6 +2555,8 @@ def _localize_finish(
                 locs=locs,
                 info=info,
                 calibration=z_calibration,
+                # --magnification-factor, over the calibration's own
+                magnification_factor=magnification_factor,
                 fitting_method=method,
                 filter=0,
                 lateral_transforms=lateral_transforms,
@@ -2608,17 +2631,23 @@ def _localize_finish(
 def _check_multi_emitter_args(args: argparse.Namespace) -> None:
     """Refuse the options the multi-emitter fitting cannot honor: it fits
     a 2D Gaussian by maximum likelihood, on the CPU, one region of one
-    channel at a time."""
+    channel at a time, and gives z only with sigmas in x and y."""
     fit_methods = args.fit_method or ["mle"]
     if fit_methods != ["mle"]:
         raise SystemExit(
             "--multi-emitter fits a 2D Gaussian by maximum likelihood; "
             "leave out --fit-method."
         )
-    if args.zc or args.spline_calibration:
+    if args.spline_calibration:
         raise SystemExit(
-            "--multi-emitter fits in 2D; leave out --z-calibration and "
+            "--multi-emitter fits a Gaussian; leave out "
             "--spline-calibration."
+        )
+    if args.zc and args.psf_model != "elliptical":
+        raise SystemExit(
+            "--multi-emitter reads z from the sigmas in x and y it fits "
+            "with --psf-model elliptical; add it, or leave out "
+            "--z-calibration."
         )
     if args.regions_separately:
         raise SystemExit(
@@ -2754,7 +2783,9 @@ def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
     max_iterations = args.max_iterations
 
     z_params = None
-    if "-3d" in args.fit_method:
+    # the multi-emitter fit reads z from the sigmas of --psf-model
+    # elliptical (see _check_multi_emitter_args)
+    if "-3d" in args.fit_method or (args.multi_emitter and args.zc):
         z_params = _localize_load_3d_calibration(args)
         if args.fit_z_gpu:
             from . import zfit
@@ -5341,6 +5372,18 @@ def _build_parser() -> (
         help="fit overlapping emitters instead of one emitter per box",
     )
     multi_emitter.add_argument(
+        "--psf-model",
+        choices=["fixed", "spherical", "elliptical"],
+        default="fixed",
+        help=(
+            "the PSF sigma of each emitter: fixed, the same for all"
+            " (default); spherical, one fitted sigma per emitter; elliptical,"
+            " a fitted sigma in x and one in y per emitter, whose z"
+            " --z-calibration then gives (storm-analysis models 2dfixed, 2d"
+            " and 3d)"
+        ),
+    )
+    multi_emitter.add_argument(
         "--snr-threshold",
         type=float,
         default=15.0,
@@ -5354,8 +5397,8 @@ def _build_parser() -> (
         type=float,
         default=None,
         help=(
-            "standard deviation of the PSF in nm, fixed in the fit."
-            " Default: estimated from the movie"
+            "standard deviation of the PSF in nm: fixed in the fit, or the"
+            " start of a fitted one. Default: estimated from the movie"
         ),
     )
     multi_emitter.add_argument(

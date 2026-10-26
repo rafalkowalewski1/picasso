@@ -35,6 +35,12 @@ CAMERA_INFO = {
     "Pixelsize": PIXELSIZE,
 }
 FIXED_SIGMA = localize.MultiEmitterParameters(psf_sigma=SIGMA)
+MODELS = list(residualfit.PSF_MODELS)
+
+
+def _model(model):
+    """``FIXED_SIGMA`` with the PSF model ``model``."""
+    return dataclasses.replace(FIXED_SIGMA, psf_model=model)
 
 
 def _movie(frames: np.ndarray):
@@ -60,15 +66,25 @@ def _render(
 ):
     """A movie in photons: each emitter's Gaussian integrated over the
     pixels (pixel centers on integers), plus a flat background, with
-    Poisson noise and an optional camera baseline."""
+    Poisson noise and an optional camera baseline. The emitters' PSF
+    sigmas (nm) are ``sigma``, or their ``sx`` and ``sy`` columns."""
     edges = np.arange(size + 1) - 0.5
     expected = np.full((n_frames, size, size), float(background))
-    s = sigma / PIXELSIZE * np.sqrt(2.0)
-    for frame, x, y, photons in zip(
-        emitters["frame"], emitters["x"], emitters["y"], emitters["photons"]
+    n = len(emitters["x"])
+    sigmas_x = emitters["sx"] if "sx" in emitters else np.full(n, sigma)
+    sigmas_y = emitters["sy"] if "sy" in emitters else sigmas_x
+    for frame, x, y, photons, sx, sy in zip(
+        emitters["frame"],
+        emitters["x"],
+        emitters["y"],
+        emitters["photons"],
+        sigmas_x,
+        sigmas_y,
     ):
-        ex = np.diff(erf((edges - x / PIXELSIZE) / s)) / 2.0
-        ey = np.diff(erf((edges - y / PIXELSIZE) / s)) / 2.0
+        s_x = sx / PIXELSIZE * np.sqrt(2.0)
+        s_y = sy / PIXELSIZE * np.sqrt(2.0)
+        ex = np.diff(erf((edges - x / PIXELSIZE) / s_x)) / 2.0
+        ey = np.diff(erf((edges - y / PIXELSIZE) / s_y)) / 2.0
         expected[int(frame)] += photons * np.outer(ey, ex)
     movie = np.random.default_rng(seed).poisson(expected) + baseline
     return np.clip(movie, 0, 2**16 - 1).astype(np.uint16)
@@ -198,6 +214,61 @@ def test_reproduces_storm_analysis():
     assert distance.max() < 5.0
 
 
+@pytest.mark.parametrize(
+    "model, storm_model", [("spherical", "2d"), ("elliptical", "3d")]
+)
+def test_reproduces_storm_analysis_with_fitted_sigmas(model, storm_model):
+    """storm-analysis v2.4.1 (3D-DAOSTORM, models 2d and 3d, MLE) on
+    tests/data/multi_emitter_widths_movie.npy: per frame, two round
+    emitters narrower and wider than the nominal sigma, two astigmatic
+    ones and a pair 2.7 sigma apart. The port finds the same emitters
+    with the same positions, sigmas and photons; storm-analysis's sigmas
+    are those of the sampled Gaussian, sqrt(s^2 + 1/12) for the pixel-
+    integrated PSF of sigma s. Both models are as the reference fits
+    them: the round one splits the astigmatic emitters in two, the
+    elliptical one takes one of the pairs for a single wide emitter."""
+    frames = np.load("tests/data/multi_emitter_widths_movie.npy")
+    reference = pd.read_csv(
+        f"tests/data/multi_emitter_widths_storm_{storm_model}.csv",
+        comment="#",
+    )
+    reference = pd.DataFrame(
+        {
+            "frame": reference["frame"],
+            "x": reference["x"] * PIXELSIZE,
+            "y": reference["y"] * PIXELSIZE,
+            "sx": np.sqrt(reference["xsigma"] ** 2 - 1 / 12) * PIXELSIZE,
+            "sy": np.sqrt(reference["ysigma"] ** 2 - 1 / 12) * PIXELSIZE,
+            "photons": reference["sum"],
+        }
+    )
+    locs, _ = _fit(
+        frames,
+        parameters=localize.MultiEmitterParameters(
+            psf_model=model, psf_sigma=SIGMA, snr_threshold=6.0
+        ),
+    )
+    li, ti = _match(locs, reference, tolerance=30.0)
+    # at a threshold of 6, one dim peak next to a pair (significance 6.6)
+    # is kept by storm-analysis only
+    assert len(li) >= len(reference) - 1
+    assert len(locs) - len(li) <= 1
+    distance = np.hypot(
+        locs["x"].to_numpy()[li] - reference["x"].to_numpy()[ti],
+        locs["y"].to_numpy()[li] - reference["y"].to_numpy()[ti],
+    )
+    assert np.median(distance) < 0.5  # nm
+    for column in ("sx", "sy"):
+        difference = (
+            locs[column].to_numpy()[li] - reference[column].to_numpy()[ti]
+        )
+        assert np.median(np.abs(difference)) < 1.0  # nm
+    ratio = (
+        locs["photons"].to_numpy()[li] / reference["photons"].to_numpy()[ti]
+    )
+    assert np.median(np.abs(ratio - 1)) < 0.005
+
+
 # ----------------------------------------------------------------------
 # Recovery, false splits and uncertainties
 # ----------------------------------------------------------------------
@@ -247,18 +318,20 @@ def test_background_is_counted_once():
     assert locs["photons"].median() == pytest.approx(3000.0, rel=0.05)
 
 
-def test_single_emitters_are_not_split(singles):
+@pytest.mark.parametrize("model", MODELS)
+def test_single_emitters_are_not_split(singles, model):
     frames, truth = singles
-    locs, _ = _fit(frames)
+    locs, _ = _fit(frames, parameters=_model(model))
     result = _scores(locs, truth, tolerance=100.0)
     assert result["recall"] == 1.0
     assert result["fp"] == 0
     assert (locs["n_emitters"] == 1).all()
 
 
-def test_uncertainties_match_the_scatter(singles):
+@pytest.mark.parametrize("model", MODELS)
+def test_uncertainties_match_the_scatter(singles, model):
     frames, truth = singles
-    locs, _ = _fit(frames)
+    locs, _ = _fit(frames, parameters=_model(model))
     li, ti = _match(locs, truth, tolerance=100.0)
     zx = (locs["x"].to_numpy()[li] - truth["x"].to_numpy()[ti]) / locs[
         "lpx"
@@ -269,6 +342,93 @@ def test_uncertainties_match_the_scatter(singles):
     assert np.std(np.r_[zx, zy]) == pytest.approx(1.0, abs=0.15)
     # the background a reduced chi-square of 1 implies
     assert locs["reduced_chi_square"].median() == pytest.approx(1.0, abs=0.1)
+
+
+# ----------------------------------------------------------------------
+# PSF models
+# ----------------------------------------------------------------------
+
+
+def _wide_singles(sx, sy):
+    """Single emitters on a grid whose PSF sigmas (nm) differ from the
+    nominal ``SIGMA``."""
+    emitters = _grid(20, spacing=1500.0, photons=3000.0, seed=1)
+    emitters = emitters.assign(sx=sx, sy=sy)
+    return _render(emitters, 20, seed=2), emitters
+
+
+@pytest.mark.parametrize(
+    "model, sx, sy",
+    [("spherical", 170.0, 170.0), ("elliptical", 170.0, 110.0)],
+)
+def test_fitted_sigmas_recover_the_psf(model, sx, sy):
+    frames, truth = _wide_singles(sx, sy)
+    locs, _ = _fit(frames, parameters=_model(model))
+    result = _scores(locs, truth, tolerance=100.0)
+    assert result["recall"] == 1.0
+    assert result["fp"] == 0
+    assert locs["sx"].median() == pytest.approx(sx, rel=0.02)
+    assert locs["sy"].median() == pytest.approx(sy, rel=0.02)
+    assert locs["photons"].median() == pytest.approx(3000, rel=0.03)
+    # a fitted sigma stays within 0.5 to 5 times the nominal one
+    for column in ("sx", "sy"):
+        assert locs[column].between(0.5 * SIGMA, 5 * SIGMA).all()
+    if model == "spherical":
+        np.testing.assert_array_equal(locs["sx"], locs["sy"])
+    # a fixed sigma narrower than the PSF loses photons to the background
+    fixed, _ = _fit(frames)
+    assert fixed["photons"].median() < 0.95 * locs["photons"].median()
+
+
+def test_elliptical_fit_gives_z():
+    """Astigmatic emitters at three z, rendered with the widths of the
+    shared test calibration: z is recovered from the fitted sigmas, which
+    the z fit is given as the widths of the sampled Gaussian the
+    calibration records."""
+    from tests.conftest import CALIB_3D
+
+    emitters = _grid(20, spacing=1500.0, photons=5000.0, seed=1)
+    column = np.round(emitters["x"] / 1500.0).astype(int) - 1
+    z = np.array([-300.0, 0.0, 300.0])[column]
+    blur = PIXELSIZE**2 / 12
+    emitters = emitters.assign(
+        sx=np.sqrt(np.polyval(CALIB_3D["X Coefficients"], z) ** 2 - blur),
+        sy=np.sqrt(np.polyval(CALIB_3D["Y Coefficients"], z) ** 2 - blur),
+        z=z * CALIB_3D["Magnification factor"],
+    )
+    frames = _render(emitters, 20, seed=2)
+    tracker = RecordingProgress()
+    locs, info = _fit(
+        frames,
+        parameters=_model("elliptical"),
+        calibration_3d=dict(CALIB_3D),
+        progress=tracker,
+    )
+    assert_phases_complete(tracker, ["Fitting frames", "Fitting z"])
+    assert {"z", "d_zcalib", "lpz"} <= set(locs.columns)
+    assert [entry.get("Step") for entry in info[-2:]] == [
+        "Fit multi-emitter",
+        "Fit 3D",
+    ]
+    li, ti = _match(locs, emitters, tolerance=100.0)
+    assert len(li) == len(emitters)
+    error = locs["z"].to_numpy()[li] - emitters["z"].to_numpy()[ti]
+    for level in np.unique(emitters["z"]):
+        at = emitters["z"].to_numpy()[ti] == level
+        assert np.median(error[at]) == pytest.approx(0.0, abs=10.0)
+    # the localizations keep the PSF sigmas
+    assert locs["sx"].to_numpy()[li] == pytest.approx(
+        emitters["sx"].to_numpy()[ti], rel=0.05
+    )
+
+
+@pytest.mark.parametrize("model", ["fixed", "spherical"])
+def test_z_needs_the_elliptical_model(singles, model):
+    from tests.conftest import CALIB_3D
+
+    frames, _ = singles
+    with pytest.raises(ValueError, match="elliptical"):
+        _fit(frames, parameters=_model(model), calibration_3d=CALIB_3D)
 
 
 def test_no_emitters():
@@ -283,9 +443,10 @@ def test_no_emitters():
 # ----------------------------------------------------------------------
 
 
-def test_columns_and_dtypes(singles):
+@pytest.mark.parametrize("model", MODELS)
+def test_columns_and_dtypes(singles, model):
     frames, _ = singles
-    locs, info = _fit(frames)
+    locs, info = _fit(frames, parameters=_model(model))
     assert list(locs.columns) == [
         "frame",
         "x",
@@ -307,7 +468,10 @@ def test_columns_and_dtypes(singles):
     assert locs["frame"].dtype == np.uint32
     assert locs["x"].dtype == np.float32
     assert (np.diff(locs["frame"].to_numpy().astype(int)) >= 0).all()
-    np.testing.assert_allclose(locs["sx"], SIGMA, rtol=1e-6)
+    if model == "fixed":
+        np.testing.assert_allclose(locs[["sx", "sy"]], SIGMA, rtol=1e-6)
+    else:
+        assert locs["sx"].median() == pytest.approx(SIGMA, rel=0.02)
     assert np.isfinite(locs.to_numpy(dtype=float)).all()
     # every new column is documented and offered in the save dialog
     assert {"significance", "n_emitters"} <= set(
@@ -315,10 +479,11 @@ def test_columns_and_dtypes(singles):
     )
 
 
-def test_parallel_equals_serial(singles):
+@pytest.mark.parametrize("model", MODELS)
+def test_parallel_equals_serial(singles, model):
     frames, _ = singles
-    serial, _ = _fit(frames, parallel=False)
-    parallel, _ = _fit(frames, parallel=True)
+    serial, _ = _fit(frames, parameters=_model(model), parallel=False)
+    parallel, _ = _fit(frames, parameters=_model(model), parallel=True)
     pd.testing.assert_frame_equal(serial, parallel)
 
 
@@ -486,6 +651,7 @@ class TestMultiEmitterParameters:
     def test_defaults_are_3d_daostorm(self):
         # except the threshold, 6 in storm-analysis
         parameters = localize.MultiEmitterParameters()
+        assert parameters.psf_model == "fixed"
         assert parameters.snr_threshold == 15.0
         assert parameters.psf_sigma is None
         assert parameters.max_cycles == 20
@@ -512,6 +678,8 @@ class TestMultiEmitterParameters:
             {"max_cycles": True},
             {"peak_radius": -1},
             {"background_sigma": 0},
+            {"psf_model": "3d"},
+            {"psf_model": None},
         ],
     )
     def test_rejects_invalid(self, kwargs):
@@ -520,9 +688,13 @@ class TestMultiEmitterParameters:
 
     def test_info_round_trip(self):
         parameters = localize.MultiEmitterParameters(
-            snr_threshold=8, psf_sigma=140, max_cycles=10
+            psf_model="elliptical",
+            snr_threshold=8,
+            psf_sigma=140,
+            max_cycles=10,
         )
         info = parameters.to_info()
+        assert info["PSF Model"] == "elliptical"
         assert info["PSF Sigma (nm)"] == 140.0
         assert localize.MultiEmitterParameters.from_info(info) == parameters
         assert "PSF Sigma (nm)" not in (
@@ -554,9 +726,15 @@ def test_fit_free_sigma_recovers_the_width():
     assert np.isfinite(deviance).all()
 
 
-def test_padding_covers_the_region():
+@pytest.mark.parametrize("model", list(residualfit.PSF_MODELS))
+def test_padding_covers_the_region(model):
     for sigma in (0.8, 1.0, 1.3, 2.0):
-        assert residualfit.padding(sigma) >= residualfit.roi_size(sigma) / 2
+        assert residualfit.padding(sigma, model) >= (
+            residualfit.roi_size(sigma, model) / 2
+        )
+    # storm-analysis's larger region where the sigma is fitted
+    if model != "fixed":
+        assert residualfit.roi_size(1.0, model) == int(1.5 * 8)
 
 
 # ----------------------------------------------------------------------
@@ -566,17 +744,16 @@ def test_padding_covers_the_region():
 
 def test_profile_derivative():
     size = 8
-    e = np.empty((1, size))
-    de = np.empty((1, size))
-    e_plus = np.empty((1, size))
-    e_minus = np.empty((1, size))
+    e, de, ds = np.empty(size), np.empty(size), np.empty(size)
+    plus, minus, scratch = np.empty(size), np.empty(size), np.empty(size)
     h = 1e-6
-    residualfit._profile(3.3, 0, size, 1.2, e[0], de[0])
-    residualfit._profile(3.3 + h, 0, size, 1.2, e_plus[0], de[0].copy())
-    residualfit._profile(3.3 - h, 0, size, 1.2, e_minus[0], de[0].copy())
-    np.testing.assert_allclose(
-        de[0], (e_plus[0] - e_minus[0]) / (2 * h), atol=1e-7
-    )
+    residualfit._profile(3.3, 0, size, 1.2, e, de, ds)
+    residualfit._profile(3.3 + h, 0, size, 1.2, plus, scratch, scratch)
+    residualfit._profile(3.3 - h, 0, size, 1.2, minus, scratch, scratch)
+    np.testing.assert_allclose(de, (plus - minus) / (2 * h), atol=1e-7)
+    residualfit._profile(3.3, 0, size, 1.2 + h, plus, scratch, scratch)
+    residualfit._profile(3.3, 0, size, 1.2 - h, minus, scratch, scratch)
+    np.testing.assert_allclose(ds, (plus - minus) / (2 * h), atol=1e-7)
     # the profile integrates the unit Gaussian over the pixels, here
     # [-0.5, 7.5]
     from scipy.special import erf
@@ -585,14 +762,13 @@ def test_profile_derivative():
         erf((7.5 - 3.3) / (np.sqrt(2) * 1.2))
         - erf((-0.5 - 3.3) / (np.sqrt(2) * 1.2))
     )
-    assert e[0].sum() == pytest.approx(expected, rel=1e-9)
+    assert e.sum() == pytest.approx(expected, rel=1e-9)
 
 
-def _one_peak(photons, x, y, bg, data):
+def _one_peak(photons, x, y, bg, data, sx=1.0, sy=1.0):
     """The fit image of one peak in an otherwise empty frame and its
     deviance, as ``residualfit`` holds them."""
-    sigma = 1.0
-    roi = residualfit.roi_size(sigma)
+    roi = residualfit.roi_size(1.0)
     xoff = 0.5 * roi - 1.0
     center = 0.5 * roi
     dx, dy = [], []
@@ -607,10 +783,11 @@ def _one_peak(photons, x, y, bg, data):
     roi_dy = np.array(dy, dtype=np.int64)
     xi = int(np.floor(x - xoff))
     yi = int(np.floor(y - xoff))
-    ex, dex, ey, dey = (np.empty(roi) for _ in range(4))
+    profiles = [np.empty(roi) for _ in range(6)]
+    ex, dex, dsx, ey, dey, dsy = profiles
     psf = np.empty(len(roi_dx))
     residualfit._peak_shape(
-        x, y, xi, yi, sigma, roi_dx, roi_dy, ex, dex, ey, dey, psf
+        x, y, xi, yi, sx, sy, roi_dx, roi_dy, *profiles, psf
     )
     f_data = np.zeros_like(data)
     bg_data = np.zeros_like(data)
@@ -635,31 +812,36 @@ def _one_peak(photons, x, y, bg, data):
     )
     return (
         error,
-        (xi, yi, roi_dx, roi_dy, ex, dex, ey, dey, f_data, bg_data, bg_counts),
+        (xi, yi, roi_dx, roi_dy, *profiles, f_data, bg_data, bg_counts),
     )
 
 
-def test_deviance_gradient():
+@pytest.mark.parametrize("n_widths", [0, 1, 2])
+def test_deviance_gradient(n_widths):
     """The gradient each peak's Levenberg-Marquardt step follows is the
-    gradient of the Poisson deviance of its region."""
+    gradient of the Poisson deviance of its region, the fitted sigmas
+    included."""
     rng = np.random.default_rng(4)
     data = rng.poisson(20, (24, 24)).astype(np.float64) + 1.0
-    theta = np.array([1500.0, 11.3, 12.6, 21.0])
-    error, (xi, yi, roi_dx, roi_dy, ex, dex, ey, dey, f, bg, counts) = (
-        _one_peak(*theta, data)
-    )
-    jac = np.empty(4)
-    hess = np.empty((4, 4))
+    theta = np.array([1500.0, 11.3, 12.6, 21.0, 1.1, 0.9])[: 4 + n_widths]
+
+    def deviance(theta, peak=False):
+        sx = theta[4] if n_widths else 1.0
+        sy = theta[5] if n_widths == 2 else sx
+        result = _one_peak(*theta[:4], data, sx=sx, sy=sy)
+        return result if peak else result[0]
+
+    _, (xi, yi, roi_dx, roi_dy, *rest) = deviance(theta, peak=True)
+    profiles, (f, bg, counts) = rest[:6], rest[6:]
+    jac = np.empty(4 + n_widths)
+    hess = np.empty((4 + n_widths, 4 + n_widths))
     residualfit._jacobian_hessian(
         theta[0],
         xi,
         yi,
         roi_dx,
         roi_dy,
-        ex,
-        dex,
-        ey,
-        dey,
+        *profiles,
         data,
         f,
         bg,
@@ -667,13 +849,11 @@ def test_deviance_gradient():
         jac,
         hess,
     )
-    for p, h in enumerate((1e-3, 1e-6, 1e-6, 1e-5)):
+    for p, h in enumerate((1e-3, 1e-6, 1e-6, 1e-5, 1e-6, 1e-6)[: len(theta)]):
         plus, minus = theta.copy(), theta.copy()
         plus[p] += h
         minus[p] -= h
-        numeric = (_one_peak(*plus, data)[0] - _one_peak(*minus, data)[0]) / (
-            2 * h
-        )
+        numeric = (deviance(plus) - deviance(minus)) / (2 * h)
         assert jac[p] == pytest.approx(numeric, rel=1e-4, abs=1e-6)
 
 

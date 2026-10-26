@@ -9654,6 +9654,15 @@ class MultiEmitterParameters:
 
     Parameters
     ----------
+    psf_model : {"fixed", "spherical", "elliptical"}, optional
+        The PSF sigma of each emitter: "fixed" (the default) is the same
+        for every emitter, ``psf_sigma``; "spherical" fits one sigma per
+        emitter, the same in x and y; "elliptical" fits a sigma in x and
+        one in y per emitter, e.g., for astigmatic 3D data, whose z an
+        astigmatic calibration then gives (see
+        :func:`localize_multi_emitter`). These are the storm-analysis
+        models ``2dfixed``, ``2d`` and ``3d``. A fitted sigma stays within
+        0.5 to 5 times ``psf_sigma``.
     snr_threshold : float, optional
         Peaks are found where the residual of the fit, smoothed with the
         PSF, exceeds this many times its expected noise, and an emitter
@@ -9662,9 +9671,11 @@ class MultiEmitterParameters:
         counting; on EMCCD camera it is larger by the excess noise factor,
         so the same threshold lets more noise through.
     psf_sigma : float or None, optional
-        Standard deviation of the PSF in nm, fixed in the fit. None (the
-        default) estimates it from the movie, as the median sigma of
-        isolated emitters fitted with a free sigma.
+        Standard deviation of the PSF in nm: fixed in the fit, or, where
+        it is fitted, its starting value. Peaks are found, and those
+        closer than it pruned, with it in every model. None (the default)
+        estimates it from the movie, as the median sigma of isolated
+        emitters fitted with a free sigma.
     max_cycles : int, optional
         Most cycles of finding, fitting and subtracting per frame. Default
         is 20.
@@ -9678,17 +9689,23 @@ class MultiEmitterParameters:
     Raises
     ------
     ValueError
-        If ``snr_threshold``, ``peak_radius`` or ``background_sigma`` is
-        not a positive number, ``max_cycles`` not a positive integer, or
-        ``psf_sigma`` neither None nor a positive number.
+        If ``psf_model`` is not one of the models, ``snr_threshold``,
+        ``peak_radius`` or ``background_sigma`` not a positive number,
+        ``max_cycles`` not a positive integer, or ``psf_sigma`` neither
+        None nor a positive number.
 
     Examples
     --------
     >>> from picasso import localize
     >>> parameters = localize.MultiEmitterParameters(snr_threshold=8.0)
     >>> parameters = localize.MultiEmitterParameters(psf_sigma=140.0)
+
+    A sigma per emitter, e.g., where the emitters are not all in focus:
+
+    >>> parameters = localize.MultiEmitterParameters(psf_model="spherical")
     """
 
+    psf_model: Literal["fixed", "spherical", "elliptical"] = "fixed"
     snr_threshold: float = residualfit.THRESHOLD
     psf_sigma: float | None = None
     max_cycles: int = residualfit.N_CYCLES
@@ -9696,6 +9713,12 @@ class MultiEmitterParameters:
     background_sigma: float = residualfit.BACKGROUND_SIGMA
 
     def __post_init__(self) -> None:
+        if self.psf_model not in residualfit.PSF_MODELS:
+            raise ValueError(
+                "psf_model must be one of "
+                f"{', '.join(map(repr, residualfit.PSF_MODELS))}, got "
+                f"{self.psf_model!r}."
+            )
         # frozen: normalize the values through object.__setattr__
         for name in ("snr_threshold", "peak_radius", "background_sigma"):
             value = getattr(self, name)
@@ -9732,10 +9755,14 @@ class MultiEmitterParameters:
         Returns
         -------
         info : dict
-            ``"SNR Threshold"``, ``"PSF Sigma (nm)"``, ``"Max. Cycles"``,
-            ``"Peak Search Radius"`` and ``"Background Filter Sigma"``.
+            ``"PSF Model"``, ``"SNR Threshold"``, ``"PSF Sigma (nm)"``,
+            ``"Max. Cycles"``, ``"Peak Search Radius"`` and ``"Background
+            Filter Sigma"``.
         """
-        info = {"SNR Threshold": self.snr_threshold}
+        info = {
+            "PSF Model": self.psf_model,
+            "SNR Threshold": self.snr_threshold,
+        }
         if self.psf_sigma is not None:
             info["PSF Sigma (nm)"] = self.psf_sigma
         info["Max. Cycles"] = self.max_cycles
@@ -9762,6 +9789,7 @@ class MultiEmitterParameters:
             The settings found in ``info``.
         """
         return cls(
+            psf_model=info.get("PSF Model", "fixed"),
             snr_threshold=info.get("SNR Threshold", residualfit.THRESHOLD),
             psf_sigma=info.get("PSF Sigma (nm)"),
             max_cycles=info.get("Max. Cycles", residualfit.N_CYCLES),
@@ -9961,7 +9989,7 @@ def _multi_emitter_frame(
     results are in the coordinates of the padded frame. ``seeds`` are
     ``(n, 2)`` integer x, y pixel positions that start the first cycle
     instead of the peak finder, or None."""
-    pad = residualfit.padding(sigma)
+    pad = residualfit.padding(sigma, parameters.psf_model)
     photons = np.pad(
         _frame_photons(frame, camera_info, offset, gain),
         pad,
@@ -9984,6 +10012,7 @@ def _multi_emitter_frame(
         seed_x,
         seed_y,
         sigma,
+        residualfit.PSF_MODELS[parameters.psf_model],
         parameters.snr_threshold,
         parameters.max_cycles,
         parameters.peak_radius,
@@ -10087,11 +10116,12 @@ def _locs_from_multi_emitter_fits(
     frame_numbers: np.ndarray,
     results: list,
     sigma: float,
+    psf_model: str,
     pixelsize: float,
     em: bool,
 ) -> pd.DataFrame:
     """One localization per emitter, with every length in nm."""
-    pad = residualfit.padding(sigma)
+    pad = residualfit.padding(sigma, psf_model)
     excess_noise = 2.0 if em else 1.0
     tables = []
     for frame_number, result in zip(frame_numbers, results):
@@ -10103,8 +10133,8 @@ def _locs_from_multi_emitter_fits(
                 "x": result.x - pad,
                 "y": result.y - pad,
                 "photons": result.photons,
-                "sx": np.full(n, sigma),
-                "sy": np.full(n, sigma),
+                "sx": result.sx,
+                "sy": result.sy,
                 "bg": result.bg,
                 "lpx": np.sqrt(crlb[:, 1]),
                 "lpy": np.sqrt(crlb[:, 2]),
@@ -10115,7 +10145,10 @@ def _locs_from_multi_emitter_fits(
                 # the deviance of the emitter's region over its degrees of
                 # freedom, see reduced_chi_square
                 "reduced_chi_square": result.error
-                / (excess_noise * np.maximum(result.n_pixels - 4, 1)),
+                / (
+                    excess_noise
+                    * np.maximum(result.n_pixels - result.n_parameters, 1)
+                ),
                 "significance": result.significance,
                 "n_emitters": result.n_emitters.astype(np.int32),
             }
@@ -10169,6 +10202,7 @@ def localize_multi_emitter(
     frame_bounds: tuple[int, int] | list | None = None,
     seed_identification: IdentificationParameters | None = None,
     camera_calibration: dict | None = None,
+    calibration_3d: dict | str | None = None,
     lateral_transforms: dict | list | str | None = None,
     parallel: bool = True,
     progress: lib.Progress | Literal["console"] | None = None,
@@ -10186,8 +10220,9 @@ def localize_multi_emitter(
     analysis of Babcock, Sigal & Zhuang (2012), ported from its reference
     implementation, storm-analysis. It replaces the identification - the
     peaks are found in the residual of the fit, by their signal-to-noise
-    ratio - and fits a Gaussian PSF of fixed sigma, integrated over the
-    pixels, by maximum likelihood.
+    ratio - and fits a Gaussian PSF integrated over the pixels, by
+    maximum likelihood, with a fixed sigma or, per emitter, a fitted one
+    or a fitted one in x and in y (``parameters.psf_model``).
 
     Of two emitters closer than 1 PSF sigma, only the brighter is
     kept, so pairs closer than about 1.5 PSF sigma are seldom resolved.
@@ -10226,6 +10261,12 @@ def localize_multi_emitter(
         replace the scalar "Baseline" (and "Sensitivity"), and the
         readout variance enters the noise model of the fit and of the
         peak threshold. Default is None.
+    calibration_3d : dict, str or None, optional
+        Astigmatic 3D calibration (see ``picasso.zfit.calibrate_z`` and
+        ``io.load_calibration``), or the path of its file, to read z from
+        the sigmas in x and y of an "elliptical" fit after it (see
+        ``picasso.zfit.zfit``), as storm-analysis's ``3d`` model does.
+        Default is None.
     lateral_transforms : dict, list, str or None, optional
         Lateral (x, y) corrections applied to the localizations after the
         fit, as in :func:`fit`: a calibration with an ``"Affine
@@ -10241,15 +10282,17 @@ def localize_multi_emitter(
         or None for no reporting. Reports the phases "Estimating the PSF
         sigma" over twice the sampled frames (only without
         ``parameters.psf_sigma``), "Identifying spots" (only with
-        ``seed_identification``, see :func:`identify`) and "Fitting
-        frames" over the frames. Default is None.
+        ``seed_identification``, see :func:`identify`), "Fitting
+        frames" over the frames and "Fitting z" over the localizations
+        (only with ``calibration_3d``). Default is None.
     abort_callback : callable or None, optional
         Polled throughout; returning True stops the fit and the function
         returns None for the localizations. Default is None.
     psf_sigma_callback : callable or None, optional
-        Called with the PSF sigma (nm) the fit uses as soon as it is
-        known, i.e., once estimated, or right away when
-        ``parameters.psf_sigma`` is given, before the frames are fitted.
+        Called with the PSF sigma (nm) as soon as it is known, i.e.,
+        once estimated, or right away when ``parameters.psf_sigma`` is
+        given, before the frames are fitted: the sigma of a "fixed" fit,
+        or the start of a fitted one.
         It is called on the thread that runs this function. Default is
         None.
 
@@ -10257,24 +10300,29 @@ def localize_multi_emitter(
     -------
     locs : pd.DataFrame or None
         One localization per emitter, with every length in nm: ``frame``,
-        ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the fixed PSF
-        sigma), ``bg``, the Cramer-Rao bounds ``lpx``, ``lpy``,
+        ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the PSF sigma in x
+        and in y, fixed or fitted), ``bg``, the Cramer-Rao bounds ``lpx``,
+        ``lpy``,
         ``photons_unc`` and ``bg_unc`` (see Notes), ``log_likelihood``,
         ``iterations`` and ``reduced_chi_square`` of the emitter's region,
         its ``significance`` and ``n_emitters``, the number of emitters
         the bounds were computed from: the emitter itself and its
         neighbors within 4 PSF sigma, at most the 8 nearest (1 for an
-        isolated emitter, at most 9). None if aborted.
+        isolated emitter, at most 9). With ``calibration_3d``, also ``z``,
+        ``d_zcalib`` and ``lpz`` (see ``picasso.zfit.zfit``). None if
+        aborted.
     info : list of dicts
         Metadata of the localizations: ``info`` with an entry recording
         the fit and ``camera_info`` appended (see ``lib.append_metadata``),
-        and one recording ``lateral_transforms`` if any were applied.
+        one recording the z fit if ``calibration_3d`` was given, and one
+        recording ``lateral_transforms`` if any were applied without it.
 
     Raises
     ------
     ValueError
-        If ``camera_info`` lacks a positive "Pixelsize", or the PSF sigma
-        is to be estimated and the movie has too few isolated emitters.
+        If ``camera_info`` lacks a positive "Pixelsize", the PSF sigma is
+        to be estimated and the movie has too few isolated emitters, or
+        ``calibration_3d`` is given for a model other than "elliptical".
     TypeError
         If ``parameters`` or ``seed_identification`` is of the wrong
         type.
@@ -10285,9 +10333,11 @@ def localize_multi_emitter(
     ``photons_unc`` and ``bg_unc``) is the Cramer-Rao lower bound of the
     fitted model, which storm-analysis does not report. An emitter's
     bound comes from the Poisson Fisher information matrix of it and its
-    nearest neighbors jointly (Huang et al., 2011), with photons, x, y
-    and background of each as parameters, over the union of their fit
-    regions and evaluated at the fitted values. Inverting the joint
+    nearest neighbors jointly (Huang et al., 2011), with photons, x, y,
+    background and the fitted sigmas of each as parameters, over the
+    union of their fit regions and evaluated at the fitted values. A
+    fitted sigma costs some precision, most where the emitters overlap.
+    Inverting the joint
     matrix makes a close neighbor raise the bound, as the overlap costs
     precision. Where the matrix is singular, the approximation of
     Huang et al.'s Eq. 11 is used instead. An sCMOS calibration's
@@ -10319,6 +10369,19 @@ def localize_multi_emitter(
     Isolated emitters only (no other within 4 PSF sigma):
 
     >>> isolated = locs[locs["n_emitters"] == 1]
+
+    Astigmatic 3D: a sigma in x and one in y per emitter, and z from a
+    calibration:
+
+    >>> locs, info = localize.localize_multi_emitter(
+    ...     movie,
+    ...     movie_info,
+    ...     camera_info=camera_info,
+    ...     parameters=localize.MultiEmitterParameters(
+    ...         psf_model="elliptical"
+    ...     ),
+    ...     calibration_3d="3d_calib.yaml",
+    ... )
     """
     if parameters is None:
         parameters = MultiEmitterParameters()
@@ -10356,6 +10419,17 @@ def localize_multi_emitter(
             ),
             dtype=np.float64,
         )
+    if calibration_3d is not None:
+        if parameters.psf_model != "elliptical":
+            raise ValueError(
+                "calibration_3d needs psf_model='elliptical': z is read from "
+                "the sigmas in x and y each emitter is fitted with, got "
+                f"psf_model={parameters.psf_model!r}."
+            )
+        if isinstance(calibration_3d, str):
+            calibration_3d = io.load_calibration(
+                calibration_3d, pixelsize=pixelsize
+            )
     em = camera_info["Gain"] > 1
     n_frames = len(movie)
     frame_numbers = np.array(
@@ -10408,7 +10482,7 @@ def localize_multi_emitter(
                         dtype=np.int64
                     )
         if sigma is not None:
-            pad = residualfit.padding(sigma)
+            pad = residualfit.padding(sigma, parameters.psf_model)
             height, width = np.shape(movie[0])
             mask = _peak_mask(
                 (height, width),
@@ -10437,25 +10511,85 @@ def localize_multi_emitter(
                 progress,
                 abort_callback,
             )
-    entry = {**lib.step_info("Fit multi-emitter"), **parameters.to_info()}
-    if sigma is not None:
-        # the width the fit used, given or estimated
-        entry["PSF Sigma (nm)"] = sigma * pixelsize
-    entry["PSF Sigma Estimated"] = parameters.psf_sigma is None
-    if seed_identification is not None:
-        entry["Seed Identification"] = seed_identification.to_info()
-    entry["ROI"] = roi
-    entry["Frame Bounds"] = frame_bounds
-    entry.update(camera_calibration_info(camera_calibration))
-    info = lib.append_metadata(info, entry | camera_info)
-    if results is None:  # aborted
-        return None, info
-    locs = _locs_from_multi_emitter_fits(
-        frame_numbers, results, sigma, pixelsize, em
+        entry = {
+            **lib.step_info("Fit multi-emitter"),
+            **parameters.to_info(),
+        }
+        if sigma is not None:
+            # the sigma the fit used (or started from), given or estimated
+            entry["PSF Sigma (nm)"] = sigma * pixelsize
+        entry["PSF Sigma Estimated"] = parameters.psf_sigma is None
+        if seed_identification is not None:
+            entry["Seed Identification"] = seed_identification.to_info()
+        entry["ROI"] = roi
+        entry["Frame Bounds"] = frame_bounds
+        entry.update(camera_calibration_info(camera_calibration))
+        info = lib.append_metadata(info, entry | camera_info)
+        if results is None:  # aborted
+            return None, info
+        locs = _locs_from_multi_emitter_fits(
+            frame_numbers, results, sigma, parameters.psf_model, pixelsize, em
+        )
+        # before the lateral corrections, which move x and y
+        locs = add_roi_id(locs, roi, pixelsize=pixelsize)
+        if calibration_3d is None:
+            return _apply_extra_affine(locs, info, lateral_transforms)
+        return _fit_z_multi_emitter(
+            locs,
+            info,
+            calibration_3d,
+            lateral_transforms,
+            parallel,
+            progress,
+            abort_callback,
+        )
+
+
+def _fit_z_multi_emitter(
+    locs: pd.DataFrame,
+    info: list[dict],
+    calibration: dict,
+    lateral_transforms: dict | list | str | None,
+    parallel: bool,
+    progress: lib.Progress,
+    abort_callback: Callable[[], bool] | None,
+) -> tuple[pd.DataFrame | None, list[dict]]:
+    """z of the localizations of an elliptical multi-emitter fit from an
+    astigmatic calibration (see ``zfit.zfit``), which also applies the
+    lateral corrections.
+
+    A calibration records the widths of Picasso's single-emitter
+    Gaussian, which is sampled at the pixel centers. Fitted to the pixel-
+    integrated Gaussian of sigma ``s``, that Gaussian has a width of about
+    ``sqrt(s^2 + a^2 / 12)``, ``a`` the pixel size: the z fit is given
+    those widths, and the localizations keep their PSF sigmas. Returns
+    None for the localizations if aborted."""
+    pixelsize = lib.get_from_metadata(info, "Pixelsize")
+    blur = pixelsize**2 / 12.0
+    psf_sx = locs["sx"].to_numpy()
+    psf_sy = locs["sy"].to_numpy()
+    sampled = locs.assign(
+        sx=np.sqrt(psf_sx.astype(np.float64) ** 2 + blur),
+        sy=np.sqrt(psf_sy.astype(np.float64) ** 2 + blur),
+        # carried through the z fit, which may drop localizations
+        _psf_sx=psf_sx,
+        _psf_sy=psf_sy,
     )
-    # before the lateral corrections, which move x and y
-    locs = add_roi_id(locs, roi, pixelsize=pixelsize)
-    return _apply_extra_affine(locs, info, lateral_transforms)
+    z_locs, z_info = zfit.zfit(
+        locs=sampled,
+        info=info,
+        calibration=calibration,
+        fitting_method="gaussmle",
+        filter=0,
+        lateral_transforms=lateral_transforms,
+        parallel=parallel,
+        progress=progress,
+        abort_callback=abort_callback,
+    )
+    if z_locs is None:  # aborted
+        return None, info
+    z_locs = z_locs.assign(sx=z_locs.pop("_psf_sx"), sy=z_locs.pop("_psf_sy"))
+    return z_locs.reset_index(drop=True), z_info
 
 
 def localize(

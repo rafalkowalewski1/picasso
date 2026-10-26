@@ -1496,11 +1496,83 @@ def test_localize_multi_emitter(tmp_path, monkeypatch):
     assert entry["Pixelsize"] == 160
 
 
+def test_localize_3d_takes_the_magnification_factor(tmp_path, monkeypatch):
+    """--magnification-factor overrides the calibration's own (0.79): z
+    scales with it, and the metadata records it."""
+    from tests.conftest import CALIB_3D
+
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "3d_calib.yaml")
+    io.save_calibration(calibration, dict(CALIB_3D))
+    z = {}
+    for factor in (0.79, 0.5):
+        _picasso(
+            monkeypatch,
+            "localize",
+            movie,
+            "-a",
+            "lq-3d",
+            "-zc",
+            calibration,
+            "-mf",
+            factor,
+            "-px",
+            160,
+            "-d",
+            0,
+            "--suffix",
+            f"_{factor}",
+        )
+        locs, info = io.load_locs(_out(movie, f"_{factor}_locs.hdf5"))
+        entry = next(e for e in info if e.get("Step") == "Fit 3D")
+        assert entry["Magnification factor"] == factor
+        z[factor] = locs["z"].to_numpy()
+    np.testing.assert_allclose(z[0.5], z[0.79] * 0.5 / 0.79, rtol=1e-5)
+
+
+def test_localize_multi_emitter_elliptical_gives_z(tmp_path, monkeypatch):
+    from tests.conftest import CALIB_3D
+
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "3d_calib.yaml")
+    io.save_calibration(calibration, dict(CALIB_3D))
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-model",
+        "elliptical",
+        "--psf-sigma",
+        131,
+        "-zc",
+        calibration,
+        "-mf",
+        0.6,
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    locs, info = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert len(locs)
+    assert {"z", "lpz"} <= set(locs.columns)
+    # a sigma in x and one in y per emitter
+    assert (locs["sx"] != locs["sy"]).any()
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "elliptical"
+    z_entry = next(e for e in info if e.get("Step") == "Fit 3D")
+    assert z_entry["Magnification factor"] == 0.6
+    assert z_entry["Z Calibration Path"] == calibration
+
+
 @pytest.mark.parametrize(
     "options",
     [
         ["-a", "lq"],
+        # z needs the sigmas in x and y of --psf-model elliptical
         ["-zc", "calibration.yaml"],
+        ["--psf-model", "spherical", "-zc", "calibration.yaml"],
         ["-sc", "spline.hdf5"],
         ["--regions-separately", "-r", 0, 0, 16, 32, "-r", 16, 0, 32, 32],
     ],

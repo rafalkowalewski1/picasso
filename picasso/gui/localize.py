@@ -329,6 +329,13 @@ GAUSS_LINK_PHOTONS_TIP = (
 MULTI_EMITTER_MODEL = "2D Gaussian, overlapping emitters"
 # its code in ``FIT_MODELS``
 MULTI_EMITTER_CODE = "multi-emitter"
+# its PSF models (``localize.MultiEmitterParameters.psf_model``), by the
+# names the Parameters dialog shows
+MULTI_EMITTER_PSF_MODELS = {
+    "Fixed sigma": "fixed",
+    "Fitted sigma": "spherical",
+    "Fitted sx and sy (astigmatic 3D)": "elliptical",
+}
 
 # Fitting models offered in the GUI, decoupled from the optimizer. Each
 # model maps its optimizer labels to the internal ``fit`` codes;
@@ -389,9 +396,10 @@ MODEL_TOOLTIP = (
     "2D Gaussian, overlapping emitters:\n"
     "Fits all emitters of a frame at once, so that emitters closer than\n"
     "about 2 PSF sigma are localized separately. Finds the spots itself\n"
-    "(no identification), with a PSF sigma fixed for the movie. For 2D\n"
-    "data with emitters in focus, e.g., DNA-PAINT at high imager\n"
-    "concentration. MLE on the CPU.\n\n"
+    "(no identification), with a PSF sigma fixed for the movie or fitted\n"
+    "per emitter (PSF model). For 2D data with emitters in focus, e.g.,\n"
+    "DNA-PAINT at high imager concentration, and astigmatic 3D data.\n"
+    "MLE on the CPU.\n\n"
     "Experimental PSF (cubic spline):\n"
     "Fits a cubic spline interpolation of a measured 3D PSF\n"
     "(requires a spline calibration file).\n"
@@ -524,6 +532,8 @@ def _compile_multi_emitter_fit() -> None:
         empty,
         empty,
         sigma,
+        # one compilation serves every PSF model
+        residualfit.PSF_MODELS["fixed"],
         6.0,
         2,
         5.0,
@@ -4652,6 +4662,29 @@ class ParametersDialog(lib.Dialog):
         vbox.addWidget(me_groupbox)
         me_grid = QtWidgets.QGridLayout(me_groupbox.content)
         me_grid.addWidget(lib.HelpButton(self.MULTI_EMITTER_URL), 0, 2)
+        psf_model_label = QtWidgets.QLabel("PSF model:")
+        psf_model_tip = (
+            "The PSF sigma of each emitter:\n"
+            "Fixed sigma: the same for every emitter, the PSF sigma\n"
+            "below. Resolves close pairs best.\n"
+            "Fitted sigma: one sigma per emitter, the same in x and y,\n"
+            "e.g., for emitters not all in focus.\n"
+            "Fitted sx and sy: a sigma in x and one in y per emitter, for\n"
+            "astigmatic 3D data; z is read from them with the 3D\n"
+            "calibration loaded under '3D via Astigmatism'.\n"
+            "A fitted sigma starts at, and stays within 0.5 to 5 times,\n"
+            "the PSF sigma below. A free sigma can take a close pair for\n"
+            "one wide emitter."
+        )
+        psf_model_label.setToolTip(psf_model_tip)
+        me_grid.addWidget(psf_model_label, 0, 0)
+        self.psf_model_combo = QtWidgets.QComboBox()
+        self.psf_model_combo.addItems(list(MULTI_EMITTER_PSF_MODELS))
+        self.psf_model_combo.setToolTip(psf_model_tip)
+        self.psf_model_combo.currentIndexChanged.connect(
+            self.on_psf_model_changed
+        )
+        me_grid.addWidget(self.psf_model_combo, 0, 1)
         snr_label = QtWidgets.QLabel("SNR threshold:")
         snr_tip = (
             "Peaks are found where the fit's residual, smoothed with the\n"
@@ -4661,7 +4694,7 @@ class ParametersDialog(lib.Dialog):
             "noise factor, so raise it for them."
         )
         snr_label.setToolTip(snr_tip)
-        me_grid.addWidget(snr_label, 0, 0)
+        me_grid.addWidget(snr_label, 1, 0)
         self.snr_threshold_spinbox = QtWidgets.QDoubleSpinBox()
         self.snr_threshold_spinbox.setRange(0.5, 1000.0)
         self.snr_threshold_spinbox.setDecimals(1)
@@ -4671,16 +4704,17 @@ class ParametersDialog(lib.Dialog):
         self.snr_threshold_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
         )
-        me_grid.addWidget(self.snr_threshold_spinbox, 0, 1)
+        me_grid.addWidget(self.snr_threshold_spinbox, 1, 1)
         sigma_label = QtWidgets.QLabel("PSF sigma (nm):")
         sigma_tip = (
-            "Standard deviation of the PSF, fixed in the fit. Estimated\n"
-            "from the movie unless unticked: the median sigma of isolated\n"
-            "emitters fitted with a free sigma. The last estimate is shown\n"
-            "and used by the preview."
+            "Standard deviation of the PSF: fixed in the fit, or the start\n"
+            "of a fitted one; peaks are found with it. Estimated from the\n"
+            "movie unless unticked: the median sigma of isolated emitters\n"
+            "fitted with a free sigma. The last estimate is shown and used\n"
+            "by the preview."
         )
         sigma_label.setToolTip(sigma_tip)
-        me_grid.addWidget(sigma_label, 1, 0)
+        me_grid.addWidget(sigma_label, 2, 0)
         self.psf_sigma_spinbox = QtWidgets.QDoubleSpinBox()
         self.psf_sigma_spinbox.setRange(10.0, 2000.0)
         self.psf_sigma_spinbox.setDecimals(1)
@@ -4690,32 +4724,32 @@ class ParametersDialog(lib.Dialog):
         self.psf_sigma_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
         )
-        me_grid.addWidget(self.psf_sigma_spinbox, 1, 1)
+        me_grid.addWidget(self.psf_sigma_spinbox, 2, 1)
         self.psf_sigma_estimate_checkbox = QtWidgets.QCheckBox("Estimate")
         self.psf_sigma_estimate_checkbox.setToolTip(sigma_tip)
         self.psf_sigma_estimate_checkbox.setChecked(True)
         self.psf_sigma_estimate_checkbox.stateChanged.connect(
             self.on_psf_sigma_estimate_changed
         )
-        me_grid.addWidget(self.psf_sigma_estimate_checkbox, 1, 2)
+        me_grid.addWidget(self.psf_sigma_estimate_checkbox, 2, 2)
         cycles_label = QtWidgets.QLabel("Max. cycles:")
         cycles_tip = (
             "Most cycles of finding, fitting and subtracting per frame."
         )
         cycles_label.setToolTip(cycles_tip)
-        me_grid.addWidget(cycles_label, 2, 0)
+        me_grid.addWidget(cycles_label, 3, 0)
         self.max_cycles_spinbox = QtWidgets.QSpinBox()
         self.max_cycles_spinbox.setRange(1, 1000)
         self.max_cycles_spinbox.setValue(residualfit.N_CYCLES)
         self.max_cycles_spinbox.setToolTip(cycles_tip)
-        me_grid.addWidget(self.max_cycles_spinbox, 2, 1)
+        me_grid.addWidget(self.max_cycles_spinbox, 3, 1)
         radius_label = QtWidgets.QLabel("Peak search radius:")
         radius_tip = (
             "Radius (camera pixels) within which a new peak must be the\n"
             "maximum of the residual."
         )
         radius_label.setToolTip(radius_tip)
-        me_grid.addWidget(radius_label, 3, 0)
+        me_grid.addWidget(radius_label, 4, 0)
         self.peak_radius_spinbox = QtWidgets.QDoubleSpinBox()
         self.peak_radius_spinbox.setRange(1.0, 50.0)
         self.peak_radius_spinbox.setDecimals(1)
@@ -4724,14 +4758,14 @@ class ParametersDialog(lib.Dialog):
         self.peak_radius_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
         )
-        me_grid.addWidget(self.peak_radius_spinbox, 3, 1)
+        me_grid.addWidget(self.peak_radius_spinbox, 4, 1)
         background_label = QtWidgets.QLabel("Background filter sigma:")
         background_tip = (
             "Sigma (camera pixels) of the Gaussian low pass that estimates\n"
             "the background from the frame minus the fit."
         )
         background_label.setToolTip(background_tip)
-        me_grid.addWidget(background_label, 4, 0)
+        me_grid.addWidget(background_label, 5, 0)
         self.background_sigma_spinbox = QtWidgets.QDoubleSpinBox()
         self.background_sigma_spinbox.setRange(1.0, 100.0)
         self.background_sigma_spinbox.setDecimals(1)
@@ -4740,7 +4774,7 @@ class ParametersDialog(lib.Dialog):
         self.background_sigma_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
         )
-        me_grid.addWidget(self.background_sigma_spinbox, 4, 1)
+        me_grid.addWidget(self.background_sigma_spinbox, 5, 1)
         self.on_psf_sigma_estimate_changed()
 
         # 3D via astigmatism (Gaussian models); shown for non-spline fits
@@ -5232,8 +5266,12 @@ class ParametersDialog(lib.Dialog):
         needs_registration = entry.get("needs_channel_registration", False)
         multi_emitter = entry.get("multi_emitter", False)
         if self.z_groupbox is not None:
-            # the multi-emitter fit is 2D: its width is fixed
-            self.z_groupbox.setVisible(not (needs_spline or multi_emitter))
+            # the multi-emitter fit gives z only with sigmas in x and y
+            astigmatic = (
+                not multi_emitter
+                or self.multi_emitter_psf_model() == "elliptical"
+            )
+            self.z_groupbox.setVisible(not needs_spline and astigmatic)
         if self.spline_groupbox is not None:
             self.spline_groupbox.setVisible(needs_spline)
         if self.channel_registration_groupbox is not None:
@@ -5257,6 +5295,22 @@ class ParametersDialog(lib.Dialog):
                 policy.setRetainSizeWhenHidden(not multi_emitter)
                 widget.setSizePolicy(policy)
 
+    def multi_emitter_psf_model(self) -> str:
+        """The PSF model of the multi-emitter fit selected on the dialog
+        (see ``localize.MultiEmitterParameters.psf_model``)."""
+        combo = getattr(self, "psf_model_combo", None)
+        if combo is None:  # while the dialog is built
+            return "fixed"
+        return MULTI_EMITTER_PSF_MODELS[combo.currentText()]
+
+    def on_psf_model_changed(self) -> None:
+        """Show '3D via Astigmatism' for the fit that gives z, and refresh
+        the preview. The dialog grows or shrinks with it."""
+        lib.resize_with_contents(
+            self, self.scroll_area, self._update_calib_group_visibility
+        )
+        self.on_multi_emitter_changed()
+
     def is_multi_emitter(self) -> bool:
         """Whether the selected fit model is the multi-emitter fit."""
         return bool(
@@ -5272,6 +5326,7 @@ class ParametersDialog(lib.Dialog):
         if estimate is None:
             estimate = self.psf_sigma_estimate_checkbox.isChecked()
         return localize.MultiEmitterParameters(
+            psf_model=self.multi_emitter_psf_model(),
             snr_threshold=self.snr_threshold_spinbox.value(),
             psf_sigma=None if estimate else self.psf_sigma_spinbox.value(),
             max_cycles=self.max_cycles_spinbox.value(),
@@ -7258,6 +7313,10 @@ class Window(QtWidgets.QMainWindow):
         estimate = saved.get("estimate_psf_sigma")
         if isinstance(estimate, bool):
             dialog.psf_sigma_estimate_checkbox.setChecked(estimate)
+        model = saved.get("psf_model")
+        for name, value in MULTI_EMITTER_PSF_MODELS.items():
+            if value == model:
+                dialog.psf_model_combo.setCurrentText(name)
 
     def load_user_settings(self) -> None:
         """Load user settings based on the last-used parameters."""
@@ -7318,6 +7377,7 @@ class Window(QtWidgets.QMainWindow):
         ] = self.parameters_dialog.fit_mode_combo.currentText()
         dialog = self.parameters_dialog
         settings["Localize"]["multi_emitter"] = {
+            "psf_model": dialog.multi_emitter_psf_model(),
             "snr_threshold": dialog.snr_threshold_spinbox.value(),
             "psf_sigma": dialog.psf_sigma_spinbox.value(),
             "estimate_psf_sigma": (
@@ -10229,7 +10289,7 @@ class Window(QtWidgets.QMainWindow):
         camera_info = self.camera_info
         sigma = dialog.psf_sigma_spinbox.value() / camera_info["Pixelsize"]
         frame = np.asarray(self.movie[self.curr_frame_number])
-        pad = residualfit.padding(sigma)
+        pad = residualfit.padding(sigma, dialog.multi_emitter_psf_model())
         mask = localize._peak_mask(
             frame.shape,
             pad,
@@ -12789,16 +12849,28 @@ class Window(QtWidgets.QMainWindow):
             )
             return
         dialog = self.parameters_dialog
+        parameters = dialog.multi_emitter_parameters()
+        calibration_3d = None
+        if (
+            parameters.psf_model == "elliptical"
+            and dialog.fit_z_checkbox.isChecked()
+            and dialog.z_calibration
+        ):
+            calibration_3d = dict(dialog.z_calibration)
+            calibration_3d["Magnification factor"] = (
+                dialog.magnification_factor.value()
+            )
         self.status_bar.showMessage("Preparing the multi-emitter fit...")
         worker = MultiEmitterFitWorker(
             self.movie,
             io.strip_mm_metadata(self.info),
             self.camera_info,
-            dialog.multi_emitter_parameters(),
+            parameters,
             _copied_rois(self.view.rois),
             self.frame_range,
             dialog.camera_calibration or None,
-            self._extra_lateral_transforms(None),
+            self._extra_lateral_transforms(calibration_3d),
+            calibration_3d,
         )
         self.fit_worker = worker
         self._fit_status_prefix = ""
@@ -14830,6 +14902,7 @@ class MultiEmitterFitWorker(QtCore.QThread):
         frame_bounds: list | None,
         camera_calibration: dict | None,
         lateral_transforms: list | None,
+        calibration_3d: dict | None = None,
     ) -> None:
         super().__init__()
         self.movie = movie
@@ -14840,6 +14913,8 @@ class MultiEmitterFitWorker(QtCore.QThread):
         self.frame_bounds = frame_bounds
         self.camera_calibration = camera_calibration
         self.lateral_transforms = lateral_transforms or []
+        # astigmatic z from the fitted sigmas, see localize_multi_emitter
+        self.calibration_3d = calibration_3d
 
     def run(self) -> None:
         t0 = time.time()
@@ -14852,6 +14927,7 @@ class MultiEmitterFitWorker(QtCore.QThread):
                 roi=self.rois or None,
                 frame_bounds=self.frame_bounds,
                 camera_calibration=self.camera_calibration,
+                calibration_3d=self.calibration_3d,
                 lateral_transforms=self.lateral_transforms or None,
                 parallel=True,
                 progress=_SignalProgress(

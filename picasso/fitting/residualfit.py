@@ -5,8 +5,19 @@ picasso.fitting.residualfit
 Multi-emitter fitting of whole frames: find the peaks in what the current
 fit leaves unexplained, fit them, and repeat - the 3D-DAOSTORM analysis of
 Babcock, Sigal & Zhuang (2012), ported from its maintained reference
-implementation, storm-analysis (v2.4.1, model ``2dfixed``, maximum
-likelihood).
+implementation, storm-analysis (v2.4.1, maximum likelihood), with three of
+its PSF models (``PSF_MODELS``):
+
+- ``"fixed"`` (storm-analysis ``2dfixed``): every emitter has the same,
+  fixed PSF sigma;
+- ``"spherical"`` (``2d``): one sigma per emitter, the same in x and y,
+  fitted;
+- ``"elliptical"`` (``3d``): a sigma in x and one in y per emitter, both
+  fitted, from which an astigmatic calibration gives z after the fit.
+
+A fitted sigma is kept within 0.5 to 5 times the nominal one, and the
+region of a peak is 1.5 times as large as with a fixed sigma, as in
+storm-analysis.
 
 Every frame is analyzed on its own, in cycles:
 
@@ -16,13 +27,14 @@ Every frame is analyzed on its own, in cycles:
    smoothed with the PSF and divided by its expected noise, i.e., in units
    of the signal-to-noise ratio: local maxima above ``threshold`` within
    ``peak_radius``. A pixel is returned at most once per frame.
-3. The new peaks join the fit. Each peak is fitted on its own, with every
-   other peak held fixed in the model, by Levenberg-Marquardt steps on the
-   Poisson deviance of its region (a disc of ``roi_size`` pixels). Peaks
-   near a new peak or near a removed one are fitted again, until all have
-   converged.
-4. Of two peaks closer than 1 PSF sigma, the dimmer one is removed, and
-   so is every peak whose significance is not above ``threshold``.
+3. The new peaks join the fit, with the nominal sigma. Each peak is
+   fitted on its own, with every other peak held fixed in the model, by
+   Levenberg-Marquardt steps on the Poisson deviance of its region (a disc
+   of ``roi_size`` pixels). Peaks near a new peak or near a removed one
+   are fitted again, until all have converged.
+4. Of two peaks closer than 1 nominal PSF sigma, the dimmer one is
+   removed, and so is every peak whose significance is not above
+   ``threshold``.
 
 The cycles stop at the first cycle that finds no new peak, or after
 ``n_cycles``; peaks that did not converge are dropped. (storm-analysis
@@ -32,14 +44,15 @@ the same.) The model of a pixel is the sum of the photons of every peak
 whose region covers it plus the mean of their backgrounds, so the
 background is counted once, however many peaks overlap.
 
-Picasso's port differs from storm-analysis in three ways. The PSF is the
+Picasso's port differs from storm-analysis in four ways. The PSF is the
 Gaussian integrated over each pixel, with the photon count as its
 amplitude, instead of a Gaussian sampled at the pixel centers with the
-peak height as its amplitude; the filters are separable convolutions with
-wrap-around edges on the frame padded by mirroring, where storm-analysis
-convolves by FFT; and every emitter gets a Cramer-Rao bound from the
-Fisher matrix of itself and its neighbors, which storm-analysis does not
-compute.
+peak height as its amplitude; a fitted width is the sigma itself, where
+storm-analysis fits ``1 / (2 sigma^2)``; the filters are separable
+convolutions with wrap-around edges on the frame padded by mirroring,
+where storm-analysis convolves by FFT; and every emitter gets a
+Cramer-Rao bound from the Fisher matrix of itself and its neighbors,
+which storm-analysis does not compute.
 
 This module is documented for reference only and is not part of the
 public API; :func:`picasso.localize.localize_multi_emitter` runs it.
@@ -90,6 +103,7 @@ from picasso.fitting.splinefit import (
 )
 
 __all__ = [
+    "PSF_MODELS",
     "THRESHOLD",
     "N_CYCLES",
     "PEAK_RADIUS",
@@ -102,6 +116,8 @@ __all__ = [
     "fit_free_sigma",
 ]
 
+#: PSF models, each with the number of sigmas it fits per emitter.
+PSF_MODELS = {"fixed": 0, "spherical": 1, "elliptical": 2}
 #: Default peak threshold, in units of the signal-to-noise ratio, and the
 #: minimum significance a peak keeps. storm-analysis uses 6.
 THRESHOLD = 15.0
@@ -136,8 +152,13 @@ _NEIGHBORHOOD = 5.0
 _VARIANCE_FLOOR = 0.1
 # Filter kernels reach this many standard deviations.
 _KERNEL_TRUNCATE = 4.0
-# The region of a peak is a disc of int(8 sigma) pixels (PeakFinderGaussian).
+# The region of a peak is a disc of int(8 sigma) pixels (PeakFinderGaussian),
+# 1.5 times as large where the sigma is fitted.
 _ROI_SIZE_FACTOR = 8.0
+_ROI_FREE_WIDTH_FACTOR = 1.5
+# A fitted sigma stays within these multiples of the nominal one
+# (find_peaks.py: sigma_range).
+_SIGMA_RANGE = (0.5, 5.0)
 # Emitters closer than this many PSF sigma are fitted jointly in the
 # Cramer-Rao bound and counted in ``n_emitters``.
 _NEIGHBOR_DISTANCE = 4.0
@@ -148,29 +169,45 @@ _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 _INV_SQRT2PI = 1.0 / math.sqrt(2.0 * math.pi)
 
 
-def roi_size(sigma: float) -> int:
+def _roi_size(sigma, n_widths):
+    """``roi_size`` for a model fitting ``n_widths`` sigmas per peak."""
+    size = int(_ROI_SIZE_FACTOR * sigma)
+    if n_widths > 0:
+        size = int(_ROI_FREE_WIDTH_FACTOR * size)
+    return size
+
+
+_roi_size_jit = numba.njit(nogil=True, cache=True)(_roi_size)
+
+
+def roi_size(sigma: float, psf_model: str = "fixed") -> int:
     """Side length (camera pixels) of the disc a peak is fitted in.
 
     Parameters
     ----------
     sigma : float
-        PSF standard deviation in camera pixels.
+        Nominal PSF standard deviation in camera pixels.
+    psf_model : str, optional
+        One of ``PSF_MODELS``. Default is "fixed".
 
     Returns
     -------
     roi_size : int
-        ``int(8 * sigma)``, as storm-analysis uses for a fixed sigma.
+        ``int(8 * sigma)`` for a fixed sigma, 1.5 times that (rounded
+        down) where the sigma is fitted, as in storm-analysis.
     """
-    return int(_ROI_SIZE_FACTOR * sigma)
+    return _roi_size(sigma, PSF_MODELS[psf_model])
 
 
-def padding(sigma: float) -> int:
+def padding(sigma: float, psf_model: str = "fixed") -> int:
     """Margin (camera pixels) by which a frame is padded, by mirroring.
 
     Parameters
     ----------
     sigma : float
-        PSF standard deviation in camera pixels.
+        Nominal PSF standard deviation in camera pixels.
+    psf_model : str, optional
+        One of ``PSF_MODELS``. Default is "fixed".
 
     Returns
     -------
@@ -178,7 +215,7 @@ def padding(sigma: float) -> int:
         ``int(roi_size / 2 + 2)``: the region of a peak on the edge of the
         frame stays within the padded frame.
     """
-    return int(roi_size(sigma) / 2 + 2)
+    return int(roi_size(sigma, psf_model) / 2 + 2)
 
 
 # ----------------------------------------------------------------------
@@ -368,30 +405,34 @@ def _neighbors(qx, qy, radius, x, y, counts, order, nx, ny, x0, y0, cell, out):
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
-def _profile(center, origin, size, sigma, e, de):
+def _profile(center, origin, size, sigma, e, de, ds):
     """Gaussian integrated over the pixels ``origin .. origin + size - 1``
-    (pixel ``c`` spans ``[c - 0.5, c + 0.5]``), and its derivative with
-    respect to ``center``."""
+    (pixel ``c`` spans ``[c - 0.5, c + 0.5]``), and its derivatives with
+    respect to ``center`` and to ``sigma``."""
     inv = _INV_SQRT2 / sigma
     norm = _INV_SQRT2PI / sigma
+    norm_s = norm / sigma
     inv2 = 0.5 / (sigma * sigma)
     for i in range(size):
         a_plus = origin + i - center + 0.5
         a_minus = origin + i - center - 0.5
+        g_plus = math.exp(-a_plus * a_plus * inv2)
+        g_minus = math.exp(-a_minus * a_minus * inv2)
         e[i] = 0.5 * (math.erf(a_plus * inv) - math.erf(a_minus * inv))
-        de[i] = -norm * (
-            math.exp(-a_plus * a_plus * inv2)
-            - math.exp(-a_minus * a_minus * inv2)
-        )
+        de[i] = -norm * (g_plus - g_minus)
+        ds[i] = -norm_s * (a_plus * g_plus - a_minus * g_minus)
 
 
 @numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
-def _peak_shape(x, y, xi, yi, sigma, roi_dx, roi_dy, ex, dex, ey, dey, psf):
-    """Fill ``psf`` with the unit-integral PSF of a peak at ``(x, y)`` over
-    the disc of its region, which starts at ``(xi, yi)``."""
+def _peak_shape(
+    x, y, xi, yi, sx, sy, roi_dx, roi_dy, ex, dex, dsx, ey, dey, dsy, psf
+):
+    """Fill ``psf`` with the unit-integral PSF of a peak at ``(x, y)`` with
+    sigmas ``sx`` and ``sy`` over the disc of its region, which starts at
+    ``(xi, yi)``."""
     size = len(ex)
-    _profile(x, xi, size, sigma, ex, dex)
-    _profile(y, yi, size, sigma, ey, dey)
+    _profile(x, xi, size, sx, ex, dex, dsx)
+    _profile(y, yi, size, sy, ey, dey, dsy)
     for j in range(len(roi_dx)):
         psf[j] = ex[roi_dx[j]] * ey[roi_dy[j]]
 
@@ -453,8 +494,10 @@ def _jacobian_hessian(
     roi_dy,
     ex,
     dex,
+    dsx,
     ey,
     dey,
+    dsy,
     x_data,
     f_data,
     bg_data,
@@ -463,15 +506,18 @@ def _jacobian_hessian(
     hess,
 ):
     """Gradient ``jac`` and Hessian ``hess`` of the deviance of a peak's
-    region with respect to ``[photons, x, y, bg]`` (dao_fit.c:
-    daoCalcJH2DFixed). The background enters with derivative 1, as in
-    storm-analysis, although a pixel averages the backgrounds of the
-    peaks covering it."""
-    for p in range(4):
+    region with respect to ``[photons, x, y, bg]``, followed by its sigma
+    (one free sigma) or its sigmas in x and y (two), as many as ``jac``
+    has room for (dao_fit.c: daoCalcJH2DFixed, daoCalcJH2D, daoCalcJH3D).
+    The background enters with derivative 1, as in storm-analysis,
+    although a pixel averages the backgrounds of the peaks covering
+    it."""
+    n_par = len(jac)
+    for p in range(n_par):
         jac[p] = 0.0
-        for q in range(4):
+        for q in range(n_par):
             hess[p, q] = 0.0
-    jt = np.empty(4)
+    jt = np.empty(n_par)
     for j in range(len(roi_dx)):
         row = yi + roi_dy[j]
         col = xi + roi_dx[j]
@@ -483,13 +529,18 @@ def _jacobian_hessian(
         jt[1] = photons * dex[a] * ey[b]
         jt[2] = photons * ex[a] * dey[b]
         jt[3] = 1.0
+        if n_par == 5:
+            jt[4] = photons * (dsx[a] * ey[b] + ex[a] * dsy[b])
+        elif n_par == 6:
+            jt[4] = photons * dsx[a] * ey[b]
+            jt[5] = photons * ex[a] * dsy[b]
         t1 = 2.0 * (1.0 - xv / fi)
         t2 = 2.0 * xv / (fi * fi)
-        for p in range(4):
+        for p in range(n_par):
             jac[p] += t1 * jt[p]
-            for q in range(p, 4):
+            for q in range(p, n_par):
                 hess[p, q] += t2 * jt[p] * jt[q]
-    for p in range(4):
+    for p in range(n_par):
         for q in range(p):
             hess[p, q] = hess[q, p]
 
@@ -540,15 +591,22 @@ class FrameResult(NamedTuple):
     y: np.ndarray
     photons: np.ndarray
     bg: np.ndarray
+    #: PSF sigma in x and in y (camera pixels), fitted or fixed.
+    sx: np.ndarray
+    sy: np.ndarray
     significance: np.ndarray
     #: Poisson deviance of the fit over the emitter's region.
     error: np.ndarray
     iterations: np.ndarray
     #: Number of pixels in the region the deviance is summed over.
     n_pixels: np.ndarray
-    #: Cramer-Rao variances of photons, x, y and bg, see :func:`crlb`.
+    #: Number of fitted parameters per emitter.
+    n_parameters: int
+    #: Cramer-Rao variances of photons, x, y and bg, from the joint Fisher
+    #: matrix of the emitter and its neighbors.
     crlb: np.ndarray
-    #: Emitters within 4 PSF sigma, the emitter itself included.
+    #: Emitters in that matrix: the emitter itself and its neighbors
+    #: within 4 nominal PSF sigma, at most the 8 nearest.
     n_emitters: np.ndarray
 
 
@@ -576,6 +634,8 @@ def _compact(
     p_x,
     p_y,
     p_bg,
+    p_sx,
+    p_sy,
     p_xi,
     p_yi,
     p_status,
@@ -595,6 +655,8 @@ def _compact(
                 p_x[m] = p_x[i]
                 p_y[m] = p_y[i]
                 p_bg[m] = p_bg[i]
+                p_sx[m] = p_sx[i]
+                p_sy[m] = p_sy[i]
                 p_xi[m] = p_xi[i]
                 p_yi[m] = p_yi[i]
                 p_status[m] = p_status[i]
@@ -615,6 +677,8 @@ def _iterate(
     p_x,
     p_y,
     p_bg,
+    p_sx,
+    p_sy,
     p_xi,
     p_yi,
     p_status,
@@ -623,7 +687,9 @@ def _iterate(
     p_iter,
     p_added,
     p_psf,
-    sigma,
+    n_widths,
+    sigma_min,
+    sigma_max,
     roi,
     xoff,
     roi_dx,
@@ -637,18 +703,23 @@ def _iterate(
     tolerance,
     ex,
     dex,
+    dsx,
     ey,
     dey,
+    dsy,
     psf,
 ):
     """One Levenberg-Marquardt step of every running peak, the others held
     fixed, then recenter the regions (multi_fit.c: mFitIterateLM,
-    mFitRecenterPeaks)."""
+    mFitRecenterPeaks). ``n_widths`` sigmas per peak are fitted (0, 1 or
+    2, see ``PSF_MODELS``), clamped to ``[sigma_min, sigma_max]``
+    (dao_fit.c: daoCheck2D, daoCheck3D)."""
     height, width = x_data.shape
-    jac = np.empty(4)
-    hess = np.empty((4, 4))
-    w_jac = np.empty(4)
-    w_hess = np.empty((4, 4))
+    n_par = 4 + n_widths
+    jac = np.empty(n_par)
+    hess = np.empty((n_par, n_par))
+    w_jac = np.empty(n_par)
+    w_hess = np.empty((n_par, n_par))
     for i in range(n):
         if p_status[i] != _RUNNING:
             continue
@@ -663,8 +734,8 @@ def _iterate(
             bg_data,
             bg_counts,
         )
-        _profile(p_x[i], p_xi[i], roi, sigma, ex, dex)
-        _profile(p_y[i], p_yi[i], roi, sigma, ey, dey)
+        _profile(p_x[i], p_xi[i], roi, p_sx[i], ex, dex, dsx)
+        _profile(p_y[i], p_yi[i], roi, p_sy[i], ey, dey, dsy)
         _jacobian_hessian(
             p_n[i],
             p_xi[i],
@@ -673,8 +744,10 @@ def _iterate(
             roi_dy,
             ex,
             dex,
+            dsx,
             ey,
             dey,
+            dsy,
             x_data,
             f_data,
             bg_data,
@@ -704,6 +777,8 @@ def _iterate(
         w_x = p_x[i]
         w_y = p_y[i]
         w_bg = p_bg[i]
+        w_sx = p_sx[i]
+        w_sy = p_sy[i]
         w_xi = p_xi[i]
         w_yi = p_yi[i]
         error = start_error
@@ -714,12 +789,12 @@ def _iterate(
                 break
             iterations += 1
             status = _RUNNING
-            for p in range(4):
+            for p in range(n_par):
                 w_jac[p] = jac[p]
-                for q in range(4):
+                for q in range(n_par):
                     w_hess[p, q] = hess[p, q]
                 w_hess[p, p] *= 1.0 + lam
-            if not _solve_cholesky(w_hess, w_jac, 4):
+            if not _solve_cholesky(w_hess, w_jac, n_par):
                 status = _ERROR
                 lam *= _LAMBDA_UP
                 continue
@@ -727,6 +802,14 @@ def _iterate(
             w_x = p_x[i] - w_jac[1]
             w_y = p_y[i] - w_jac[2]
             w_bg = p_bg[i] - w_jac[3]
+            if n_widths == 1:
+                w_sx = p_sx[i] - w_jac[4]
+                # a range clamp rather than an error (daoCheck2D)
+                w_sx = min(max(w_sx, sigma_min), sigma_max)
+                w_sy = w_sx
+            elif n_widths == 2:
+                w_sx = min(max(p_sx[i] - w_jac[4], sigma_min), sigma_max)
+                w_sy = min(max(p_sy[i] - w_jac[5], sigma_min), sigma_max)
             w_xi = p_xi[i]
             w_yi = p_yi[i]
             # mFitUpdate: move the region with the peak
@@ -743,7 +826,7 @@ def _iterate(
                 or w_yi < 0
                 or w_yi >= height - roi
                 or w_n < 0.0
-                or not np.isfinite(w_x + w_y + w_n + w_bg)
+                or not np.isfinite(w_x + w_y + w_n + w_bg + w_sx + w_sy)
             ):
                 lam *= _LAMBDA_UP
                 status = _ERROR
@@ -753,13 +836,16 @@ def _iterate(
                 w_y,
                 w_xi,
                 w_yi,
-                sigma,
+                w_sx,
+                w_sy,
                 roi_dx,
                 roi_dy,
                 ex,
                 dex,
+                dsx,
                 ey,
                 dey,
+                dsy,
                 psf,
             )
             _add_peak(
@@ -844,6 +930,8 @@ def _iterate(
             p_x[i] = w_x
             p_y[i] = w_y
             p_bg[i] = w_bg
+            p_sx[i] = w_sx
+            p_sy[i] = w_sy
             p_xi[i] = w_xi
             p_yi[i] = w_yi
             p_error[i] = error
@@ -892,13 +980,16 @@ def _iterate(
                     p_y[i],
                     p_xi[i],
                     p_yi[i],
-                    sigma,
+                    p_sx[i],
+                    p_sy[i],
                     roi_dx,
                     roi_dy,
                     ex,
                     dex,
+                    dsx,
                     ey,
                     dey,
+                    dsy,
                     psf,
                 )
                 for j in range(len(roi_dx)):
@@ -967,6 +1058,8 @@ def _do_fit(
     p_x,
     p_y,
     p_bg,
+    p_sx,
+    p_sy,
     p_xi,
     p_yi,
     p_status,
@@ -975,7 +1068,9 @@ def _do_fit(
     p_iter,
     p_added,
     p_psf,
-    sigma,
+    n_widths,
+    sigma_min,
+    sigma_max,
     roi,
     xoff,
     roi_dx,
@@ -989,51 +1084,23 @@ def _do_fit(
     tolerance,
     ex,
     dex,
+    dsx,
     ey,
     dey,
+    dsy,
     psf,
 ):
     """Iterate until no peak is running (MultiFitter.doFit)."""
-    _iterate(
-        n,
-        p_n,
-        p_x,
-        p_y,
-        p_bg,
-        p_xi,
-        p_yi,
-        p_status,
-        p_lambda,
-        p_error,
-        p_iter,
-        p_added,
-        p_psf,
-        sigma,
-        roi,
-        xoff,
-        roi_dx,
-        roi_dy,
-        x_data,
-        variance,
-        use_var,
-        f_data,
-        bg_data,
-        bg_counts,
-        tolerance,
-        ex,
-        dex,
-        ey,
-        dey,
-        psf,
-    )
-    i = 0
-    while _n_running(n, p_status) > 0 and i < _MAX_FIT_ITERATIONS:
+    i = -1
+    while i < 0 or (_n_running(n, p_status) > 0 and i < _MAX_FIT_ITERATIONS):
         _iterate(
             n,
             p_n,
             p_x,
             p_y,
             p_bg,
+            p_sx,
+            p_sy,
             p_xi,
             p_yi,
             p_status,
@@ -1042,7 +1109,9 @@ def _do_fit(
             p_iter,
             p_added,
             p_psf,
-            sigma,
+            n_widths,
+            sigma_min,
+            sigma_max,
             roi,
             xoff,
             roi_dx,
@@ -1056,8 +1125,10 @@ def _do_fit(
             tolerance,
             ex,
             dex,
+            dsx,
             ey,
             dey,
+            dsy,
             psf,
         )
         i += 1
@@ -1188,9 +1259,11 @@ def _local_crlb(
     p_n,
     p_x,
     p_y,
+    p_sx,
+    p_sy,
     p_xi,
     p_yi,
-    sigma,
+    n_widths,
     roi,
     roi_dx,
     roi_dy,
@@ -1209,10 +1282,11 @@ def _local_crlb(
 ):
     """Cramer-Rao variances of ``[photons, x, y, bg]`` of peak ``i`` from
     the Fisher matrix of it and its nearest neighbors (at most
-    ``max_neighbors`` within ``neighbor_distance``) over their regions;
-    where that matrix is singular, Huang et al.'s correction of the x-x
-    and y-y terms of close emitters (Eq. 11). Returns the number of
-    emitters in the matrix."""
+    ``max_neighbors`` within ``neighbor_distance``) over their regions,
+    with ``n_widths`` fitted sigmas per peak among the parameters; where
+    that matrix is singular, Huang et al.'s correction of the x-x and y-y
+    terms of close emitters (Eq. 11). Returns the number of emitters in
+    the matrix."""
     candidates = np.empty(n, dtype=np.int64)
     m = _neighbors(
         p_x[i],
@@ -1241,31 +1315,35 @@ def _local_crlb(
     members = np.empty(n_local, dtype=np.int64)
     for k in range(n_local):
         members[k] = candidates[order[k]]
-    n_par = 4 * n_local
+    stride = 4 + n_widths
+    n_par = stride * n_local
     fisher = np.zeros((n_par, n_par))
     # the union of the regions: a pixel enters once
-    height, width = f_data.shape
     seen = np.zeros((roi * 3, roi * 3), dtype=np.bool_)
     ox = p_xi[i] - roi
     oy = p_yi[i] - roi
     ex = np.empty(roi)
     dex = np.empty(roi)
+    dsx = np.empty(roi)
     ey = np.empty(roi)
     dey = np.empty(roi)
+    dsy = np.empty(roi)
     grad = np.zeros(n_par)
-    profiles = np.empty((n_local, 4, roi))
+    profiles = np.empty((n_local, 6, roi))
     disc = np.zeros((roi, roi), dtype=np.bool_)
     for r in range(len(roi_dx)):
         disc[roi_dy[r], roi_dx[r]] = True
     for k in range(n_local):
         j = members[k]
-        _profile(p_x[j], p_xi[j], roi, sigma, ex, dex)
-        _profile(p_y[j], p_yi[j], roi, sigma, ey, dey)
+        _profile(p_x[j], p_xi[j], roi, p_sx[j], ex, dex, dsx)
+        _profile(p_y[j], p_yi[j], roi, p_sy[j], ey, dey, dsy)
         for c in range(roi):
             profiles[k, 0, c] = ex[c]
             profiles[k, 1, c] = dex[c]
             profiles[k, 2, c] = ey[c]
             profiles[k, 3, c] = dey[c]
+            profiles[k, 4, c] = dsx[c]
+            profiles[k, 5, c] = dsy[c]
     for k in range(n_local):
         j = members[k]
         for r in range(len(roi_dx)):
@@ -1296,10 +1374,18 @@ def _local_crlb(
                 dexv = profiles[kk, 1, a]
                 eyv = profiles[kk, 2, b]
                 deyv = profiles[kk, 3, b]
-                grad[4 * kk] = exv * eyv
-                grad[4 * kk + 1] = p_n[jj] * dexv * eyv
-                grad[4 * kk + 2] = p_n[jj] * exv * deyv
-                grad[4 * kk + 3] = 1.0 / count
+                base = stride * kk
+                grad[base] = exv * eyv
+                grad[base + 1] = p_n[jj] * dexv * eyv
+                grad[base + 2] = p_n[jj] * exv * deyv
+                grad[base + 3] = 1.0 / count
+                if n_widths == 1:
+                    grad[base + 4] = p_n[jj] * (
+                        profiles[kk, 4, a] * eyv + exv * profiles[kk, 5, b]
+                    )
+                elif n_widths == 2:
+                    grad[base + 4] = p_n[jj] * profiles[kk, 4, a] * eyv
+                    grad[base + 5] = p_n[jj] * exv * profiles[kk, 5, b]
             for p in range(n_par):
                 if grad[p] == 0.0:
                     continue
@@ -1326,16 +1412,16 @@ def _local_crlb(
         for a in range(n_local):
             for b in range(n_local):
                 if a != b:
-                    zeroed[4 * a + 1, 4 * b + 1] = 0.0
-                    zeroed[4 * a + 2, 4 * b + 2] = 0.0
+                    zeroed[stride * a + 1, stride * b + 1] = 0.0
+                    zeroed[stride * a + 2, stride * b + 2] = 0.0
         cov0 = np.linalg.pinv(zeroed)
         for a in range(n_local):
             for b in range(n_local):
                 if a == b:
                     continue
                 for axis in (1, 2):
-                    p = 4 * a + axis
-                    q = 4 * b + axis
+                    p = stride * a + axis
+                    q = stride * b + axis
                     s = math.sqrt(abs(cov0[p, p] * cov0[q, q]))
                     if axis == 1:
                         diff = p_x[members[a]] - p_x[members[b]]
@@ -1359,6 +1445,7 @@ def analyze_frame(
     seed_x,
     seed_y,
     sigma,
+    n_widths,
     threshold,
     n_cycles,
     peak_radius,
@@ -1386,7 +1473,11 @@ def analyze_frame(
         Integer pixel positions (padded frame) that start the first cycle
         instead of the peak finder; empty for none.
     sigma : float
-        PSF standard deviation in camera pixels, fixed.
+        Nominal PSF standard deviation in camera pixels: fixed, or the
+        start of a fitted one. The peaks are found and pruned with it.
+    n_widths : int
+        Sigmas fitted per emitter: 0 (fixed), 1 (the same in x and y) or 2
+        (one in x, one in y), see ``PSF_MODELS``.
     threshold : float
         Peak threshold and minimum significance, in units of the
         signal-to-noise ratio.
@@ -1404,9 +1495,11 @@ def analyze_frame(
         The emitters, in the coordinates of the padded frame.
     """
     height, width = frame.shape
-    roi = int(_ROI_SIZE_FACTOR * sigma)
+    roi = _roi_size_jit(sigma, n_widths)
     margin = int(roi / 2 + 2)
     xoff = 0.5 * roi - 1.0
+    sigma_min = _SIGMA_RANGE[0] * sigma
+    sigma_max = _SIGMA_RANGE[1] * sigma
     # disc of the region (multi_fit.c: mFitInitializeROIIndexing)
     roi_dx_list = []
     roi_dy_list = []
@@ -1455,6 +1548,8 @@ def analyze_frame(
     p_x = np.zeros(capacity)
     p_y = np.zeros(capacity)
     p_bg = np.zeros(capacity)
+    p_sx = np.zeros(capacity)
+    p_sy = np.zeros(capacity)
     p_xi = np.zeros(capacity, dtype=np.int64)
     p_yi = np.zeros(capacity, dtype=np.int64)
     p_status = np.zeros(capacity, dtype=np.int64)
@@ -1466,8 +1561,10 @@ def analyze_frame(
     n = 0
     ex = np.empty(roi)
     dex = np.empty(roi)
+    dsx = np.empty(roi)
     ey = np.empty(roi)
     dey = np.empty(roi)
+    dsy = np.empty(roi)
     psf = np.empty(n_roi)
     significance = np.zeros(capacity)
     max_new = height * width // 4 + 16
@@ -1532,6 +1629,8 @@ def analyze_frame(
             p_x = _grow(p_x, capacity)
             p_y = _grow(p_y, capacity)
             p_bg = _grow(p_bg, capacity)
+            p_sx = _grow(p_sx, capacity)
+            p_sy = _grow(p_sy, capacity)
             p_xi = _grow(p_xi, capacity)
             p_yi = _grow(p_yi, capacity)
             p_status = _grow(p_status, capacity)
@@ -1556,6 +1655,8 @@ def analyze_frame(
             p_added[i] = False
             p_n[i] = 1.0
             p_bg[i] = 1.0
+            p_sx[i] = sigma
+            p_sy[i] = sigma
             n += 1
             if (
                 p_xi[i] < 0
@@ -1571,12 +1672,15 @@ def analyze_frame(
                 p_xi[i],
                 p_yi[i],
                 sigma,
+                sigma,
                 roi_dx,
                 roi_dy,
                 ex,
                 dex,
+                dsx,
                 ey,
                 dey,
+                dsy,
                 psf,
             )
             bg_sum = 0.0
@@ -1637,6 +1741,8 @@ def analyze_frame(
             p_x,
             p_y,
             p_bg,
+            p_sx,
+            p_sy,
             p_xi,
             p_yi,
             p_status,
@@ -1645,7 +1751,9 @@ def analyze_frame(
             p_iter,
             p_added,
             p_psf,
-            sigma,
+            n_widths,
+            sigma_min,
+            sigma_max,
             roi,
             xoff,
             roi_dx,
@@ -1659,8 +1767,10 @@ def analyze_frame(
             _TOLERANCE,
             ex,
             dex,
+            dsx,
             ey,
             dey,
+            dsy,
             psf,
         )
         keep = p_status[:n] != _ERROR
@@ -1671,6 +1781,8 @@ def analyze_frame(
             p_x,
             p_y,
             p_bg,
+            p_sx,
+            p_sy,
             p_xi,
             p_yi,
             p_status,
@@ -1731,6 +1843,8 @@ def analyze_frame(
                 p_x,
                 p_y,
                 p_bg,
+                p_sx,
+                p_sy,
                 p_xi,
                 p_yi,
                 p_status,
@@ -1747,6 +1861,8 @@ def analyze_frame(
                 p_x,
                 p_y,
                 p_bg,
+                p_sx,
+                p_sy,
                 p_xi,
                 p_yi,
                 p_status,
@@ -1755,7 +1871,9 @@ def analyze_frame(
                 p_iter,
                 p_added,
                 p_psf,
-                sigma,
+                n_widths,
+                sigma_min,
+                sigma_max,
                 roi,
                 xoff,
                 roi_dx,
@@ -1769,8 +1887,10 @@ def analyze_frame(
                 _TOLERANCE,
                 ex,
                 dex,
+                dsx,
                 ey,
                 dey,
+                dsy,
                 psf,
             )
             keep = p_status[:n] != _ERROR
@@ -1781,6 +1901,8 @@ def analyze_frame(
                 p_x,
                 p_y,
                 p_bg,
+                p_sx,
+                p_sy,
                 p_xi,
                 p_yi,
                 p_status,
@@ -1818,6 +1940,8 @@ def analyze_frame(
         p_x,
         p_y,
         p_bg,
+        p_sx,
+        p_sy,
         p_xi,
         p_yi,
         p_status,
@@ -1867,9 +1991,11 @@ def analyze_frame(
                 p_n,
                 p_x,
                 p_y,
+                p_sx,
+                p_sy,
                 p_xi,
                 p_yi,
-                sigma,
+                n_widths,
                 roi,
                 roi_dx,
                 roi_dy,
@@ -1894,10 +2020,13 @@ def analyze_frame(
         p_y[:n].copy(),
         p_n[:n].copy(),
         p_bg[:n].copy(),
+        p_sx[:n].copy(),
+        p_sy[:n].copy(),
         significance[:n].copy(),
         p_error[:n].copy(),
         p_iter[:n].copy(),
         n_pixels,
+        4 + n_widths,
         crlb,
         n_emitters,
     )

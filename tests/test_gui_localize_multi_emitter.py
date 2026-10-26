@@ -86,6 +86,25 @@ def test_the_model_shows_only_what_it_uses(window):
     assert not dialog.identification_settings.isHidden()
 
 
+def test_the_psf_model_selects_the_fit_and_its_z(window):
+    dialog = window.parameters_dialog
+    _select(window)
+    assert dialog.psf_model_combo.currentText() == "Fixed sigma"
+    expected = {
+        "Fixed sigma": ("fixed", True),
+        "Fitted sigma": ("spherical", True),
+        # z is read from the sigmas in x and y
+        "Fitted sx and sy (astigmatic 3D)": ("elliptical", False),
+    }
+    for name, (model, z_hidden) in expected.items():
+        dialog.psf_model_combo.setCurrentText(name)
+        assert dialog.multi_emitter_parameters().psf_model == model
+        assert dialog.z_groupbox.isHidden() == z_hidden
+    # the other models keep the box
+    dialog.fit_model.setCurrentIndex(0)
+    assert not dialog.z_groupbox.isHidden()
+
+
 def test_the_dialog_leaves_no_gap(window):
     """The optimizer stack and the multichannel rows keep no space for
     the multi-emitter fit, and the dialog shrinks with its contents."""
@@ -192,6 +211,34 @@ def test_the_estimated_psf_sigma_is_shown_during_the_fit(loaded, monkeypatch):
         assert "Fitting frames" in message
 
 
+def test_the_elliptical_fit_gives_z(loaded, tmp_path, monkeypatch):
+    from tests.conftest import CALIB_3D
+
+    messages = _Messages(monkeypatch)
+    _select(loaded)
+    dialog = loaded.parameters_dialog
+    dialog.psf_model_combo.setCurrentText("Fitted sx and sy (astigmatic 3D)")
+    dialog.psf_sigma_estimate_checkbox.setChecked(False)
+    dialog.psf_sigma_spinbox.setValue(PIXELSIZE)
+    dialog.z_calibration = dict(CALIB_3D)
+    dialog.fit_z_checkbox.setEnabled(True)
+    dialog.fit_z_checkbox.setChecked(True)
+    dialog.magnification_factor.setValue(0.5)
+    loaded.localize()
+    _wait(loaded)
+    assert messages.shown == []
+    locs, info = io.load_locs(str(tmp_path / "Channel 0_locs.hdf5"))
+    assert {"z", "d_zcalib", "lpz"} <= set(locs.columns)
+    # the singles at least; a fitted sigma takes the pairs, 2.5 sigma
+    # apart, for single wide emitters
+    assert len(locs) >= 4 * FRAMES
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "elliptical"
+    z_entry = next(e for e in info if e.get("Step") == "Fit 3D")
+    # the magnification factor on the dialog
+    assert z_entry["Magnification factor"] == 0.5
+
+
 def test_identify_points_to_the_fit(loaded):
     _select(loaded)
     loaded.identify()
@@ -239,6 +286,7 @@ def test_two_channels_are_refused(window, tmp_path, monkeypatch):
 def test_the_settings_are_kept(qt_offscreen):
     first = gui_localize.Window()
     dialog = first.parameters_dialog
+    dialog.psf_model_combo.setCurrentText("Fitted sigma")
     dialog.snr_threshold_spinbox.setValue(7.5)
     dialog.psf_sigma_estimate_checkbox.setChecked(False)
     dialog.psf_sigma_spinbox.setValue(142.0)
@@ -249,6 +297,7 @@ def test_the_settings_are_kept(qt_offscreen):
     second = gui_localize.Window()
     try:
         dialog = second.parameters_dialog
+        assert dialog.multi_emitter_psf_model() == "spherical"
         assert dialog.snr_threshold_spinbox.value() == 7.5
         assert not dialog.psf_sigma_estimate_checkbox.isChecked()
         assert dialog.psf_sigma_spinbox.value() == 142.0

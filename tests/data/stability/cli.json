@@ -162,6 +162,7 @@
   "--multi-emitter",
   "--peak-radius",
   "--pixelsize",
+  "--psf-model",
   "--psf-sigma",
   "--qe",
   "--regions-separately",
