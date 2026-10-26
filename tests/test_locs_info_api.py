@@ -256,12 +256,6 @@ STEPS = [
         "Density",
     ),
     (
-        "remove_duplicates",
-        lambda locs, info: postprocess.remove_duplicates(locs, info),
-        None,
-        "Remove duplicates",
-    ),
-    (
         "remove_locs_in_picks",
         lambda locs, info: postprocess.remove_locs_in_picks(
             locs, info, **PICKS

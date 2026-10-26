@@ -220,7 +220,6 @@
   "pick_similar",
   "remove_locs_in_picks",
   "pick_properties",
-  "remove_duplicates",
   "link",
   "compute_dark_times",
   "dark_times",

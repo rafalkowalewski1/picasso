@@ -47,8 +47,6 @@ __all__ = [
     "pick_similar",
     "remove_locs_in_picks",
     "pick_properties",
-    # duplicates
-    "remove_duplicates",
     # binding events
     "link",
     "compute_dark_times",
@@ -3606,125 +3604,6 @@ def _dark_times(
                 if (dark[i] == -1) or (dark_ij < dark[i]):
                     dark[i] = dark_ij
     return dark
-
-
-def remove_duplicates(
-    locs: pd.DataFrame,
-    info: list[dict],
-    *,
-    distance: float | None = None,
-) -> tuple[pd.DataFrame, list[dict]]:
-    """Remove localizations that found an emitter another one already
-    found, e.g., because the fitting boxes of two spots overlapped.
-
-    Follows Huang et al. (2011): a localization is removed if another
-    localization of the same frame, with a smaller localization
-    uncertainty, lies closer to it than its own uncertainty
-    ``sqrt((lpx**2 + lpy**2) / 2)``.
-
-    Parameters
-    ----------
-    locs : pd.DataFrame
-        Localizations, with ``frame``, ``x``, ``y``, ``lpx`` and ``lpy``.
-    info : list of dicts
-        Localization metadata.
-    distance : float or None, optional
-        Lateral distance (nm) closer than which a localization is a
-        duplicate of a more precise one. None (the default) takes each
-        localization's own uncertainty, as Huang et al. (2011) do; a
-        fixed distance is not their rule.
-
-    Returns
-    -------
-    locs : pd.DataFrame
-        The localizations without the duplicates, in the original order.
-    info : list of dicts
-        Metadata of the remaining localizations: ``info`` with an entry
-        recording the removal appended, see ``lib.append_metadata``.
-
-    Raises
-    ------
-    ValueError
-        If ``distance`` is given and not a positive number.
-
-    Notes
-    -----
-    Every localization is judged against all others, also against those
-    that are removed themselves. Of two equally precise duplicates, the
-    first one is kept. The distance is measured in x and y only.
-
-    References
-    ----------
-    Huang, F., Schwartz, S. L., Byars, J. M. & Lidke, K. A. Simultaneous
-    multiple-emitter fitting for single molecule super-resolution
-    imaging. Biomed. Opt. Express 2, 1377-1393 (2011).
-    https://doi.org/10.1364/BOE.2.001377
-    """
-    if distance is not None and not (np.isfinite(distance) and distance > 0):
-        raise ValueError(
-            f"The duplicate distance must be a positive number, got "
-            f"{distance}."
-        )
-    duplicate = _duplicates(locs, distance)
-    if distance is None:
-        rule = {"Duplicate distance": "Localization precision"}
-    else:
-        rule = {"Duplicate distance (nm)": float(distance)}
-    entry = lib.step_info(
-        "Remove duplicates",
-        **rule,
-        **{"Removed duplicates": int(duplicate.sum())},
-    )
-    return locs[~duplicate], lib.append_metadata(info, entry)
-
-
-def _duplicates(locs: pd.DataFrame, distance: float | None) -> np.ndarray:
-    """Which localizations are duplicates in the sense of
-    :func:`remove_duplicates`, as a boolean array."""
-    n_locs = len(locs)
-    duplicate = np.zeros(n_locs, dtype=bool)
-    if n_locs < 2:
-        return duplicate
-    x = locs["x"].to_numpy(np.float64)
-    y = locs["y"].to_numpy(np.float64)
-    frame = locs["frame"].to_numpy(np.float64)
-    uncertainty = np.sqrt(
-        0.5
-        * (
-            locs["lpx"].to_numpy(np.float64) ** 2
-            + locs["lpy"].to_numpy(np.float64) ** 2
-        )
-    )
-    if distance is None:
-        radius = uncertainty
-    else:
-        radius = np.full(n_locs, float(distance))
-    if not np.any(radius > 0):
-        return duplicate
-    # The frame is a third coordinate, spaced further apart than any
-    # radius, so that only localizations of one frame are neighbors. Each
-    # localization is searched within its own radius, which keeps the
-    # search short when a few have a large one.
-    spacing = 2.0 * radius.max() + 1.0
-    tree = KDTree(np.column_stack([x, y, frame * spacing]))
-    neighbors = tree.query_ball_point(
-        np.column_stack([x, y, frame * spacing]),
-        r=radius,
-        return_sorted=False,
-    )
-    counts = np.fromiter((len(_) for _ in neighbors), dtype=np.int64)
-    if counts.sum() == n_locs:
-        return duplicate  # every localization found only itself
-    i = np.repeat(np.arange(n_locs), counts)
-    j = np.concatenate([np.asarray(_, dtype=np.int64) for _ in neighbors])
-    # j is more precise than i; equally precise ones by their order
-    better = (uncertainty[j] < uncertainty[i]) | (
-        (uncertainty[j] == uncertainty[i]) & (j < i)
-    )
-    # strictly closer than the radius
-    better &= np.hypot(x[j] - x[i], y[j] - y[i]) < radius[i]
-    duplicate[i[better]] = True
-    return duplicate
 
 
 def link(

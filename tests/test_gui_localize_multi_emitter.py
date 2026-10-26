@@ -13,14 +13,13 @@ for, as in ``test_gui_localize_dialogs``.
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 
-from picasso import _ground_truth as gt
 from picasso import io
 from picasso.gui import localize as gui_localize
 from tests.test_gui_localize_calibration import _load, _Messages
 from tests.test_gui_localize_dialogs import _memmap, _status, _wait
+from tests.test_multi_emitter import _emitters, _render
 
 PIXELSIZE = 130.0
 FRAMES = 12
@@ -36,25 +35,8 @@ def _movie() -> np.ndarray:
             rows.append((frame, x, y, 3000))
         for x, y in ((20, 24), (28, 24)):
             rows += [(frame, x - 1.25, y, 3000), (frame, x + 1.25, y, 3000)]
-    frame, x, y, photons = np.array(rows, dtype=float).T
-    emitters = pd.DataFrame(
-        {
-            "frame": frame.astype(np.uint32),
-            "x": x * PIXELSIZE,
-            "y": y * PIXELSIZE,
-            "photons": photons,
-        }
-    )
-    return gt.render_movie(
-        emitters,
-        n_frames=FRAMES,
-        width=SIZE,
-        height=SIZE,
-        pixelsize=PIXELSIZE,
-        sigma=PIXELSIZE,
-        background=20.0,
-        rng=np.random.default_rng(0),
-        baseline=100.0,
+    return _render(
+        _emitters(rows), FRAMES, size=SIZE, background=20.0, baseline=100.0
     )
 
 
