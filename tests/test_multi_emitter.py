@@ -375,6 +375,11 @@ def test_fitted_sigmas_recover_the_psf(model, sx, sy):
         assert locs[column].between(0.5 * SIGMA, 5 * SIGMA).all()
     if model == "spherical":
         np.testing.assert_array_equal(locs["sx"], locs["sy"])
+    # the Cramer-Rao bound of a fitted sigma is its spread
+    for column in ("sx", "sy"):
+        assert locs[f"{column}_unc"].median() == pytest.approx(
+            locs[column].std(), rel=0.2
+        )
     # a fixed sigma narrower than the PSF loses photons to the background
     fixed, _ = _fit(frames)
     assert fixed["photons"].median() < 0.95 * locs["photons"].median()
@@ -459,6 +464,8 @@ def test_columns_and_dtypes(singles, model):
         "lpy",
         "photons_unc",
         "bg_unc",
+        # the uncertainties of a fitted sigma
+        *([] if model == "fixed" else ["sx_unc", "sy_unc"]),
         "log_likelihood",
         "iterations",
         "reduced_chi_square",

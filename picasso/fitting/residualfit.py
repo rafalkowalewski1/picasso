@@ -602,8 +602,9 @@ class FrameResult(NamedTuple):
     n_pixels: np.ndarray
     #: Number of fitted parameters per emitter.
     n_parameters: int
-    #: Cramer-Rao variances of photons, x, y and bg, from the joint Fisher
-    #: matrix of the emitter and its neighbors.
+    #: Cramer-Rao variances of photons, x, y, bg, sx and sy, from the
+    #: joint Fisher matrix of the emitter and its neighbors; NaN for a
+    #: fixed sigma, the same in sx and sy for one fitted sigma.
     crlb: np.ndarray
     #: Emitters in that matrix: the emitter itself and its neighbors
     #: within 4 nominal PSF sigma, at most the 8 nearest.
@@ -1280,13 +1281,13 @@ def _local_crlb(
     max_neighbors,
     out_var,
 ):
-    """Cramer-Rao variances of ``[photons, x, y, bg]`` of peak ``i`` from
-    the Fisher matrix of it and its nearest neighbors (at most
-    ``max_neighbors`` within ``neighbor_distance``) over their regions,
-    with ``n_widths`` fitted sigmas per peak among the parameters; where
-    that matrix is singular, Huang et al.'s correction of the x-x and y-y
-    terms of close emitters (Eq. 11). Returns the number of emitters in
-    the matrix."""
+    """Cramer-Rao variances of ``[photons, x, y, bg, sx, sy]`` of peak
+    ``i`` (NaN for a sigma not fitted) from the Fisher matrix of it and
+    its nearest neighbors (at most ``max_neighbors`` within
+    ``neighbor_distance``) over their regions, with ``n_widths`` fitted
+    sigmas per peak among the parameters; where that matrix is singular,
+    Huang et al.'s correction of the x-x and y-y terms of close emitters
+    (Eq. 11). Returns the number of emitters in the matrix."""
     candidates = np.empty(n, dtype=np.int64)
     m = _neighbors(
         p_x[i],
@@ -1433,6 +1434,8 @@ def _local_crlb(
         cov = np.linalg.pinv(fisher)
     for p in range(4):
         out_var[p] = cov[p, p]
+    out_var[4] = cov[4, 4] if n_widths > 0 else np.nan
+    out_var[5] = cov[3 + n_widths, 3 + n_widths] if n_widths > 0 else np.nan
     return n_local
 
 
@@ -1976,14 +1979,14 @@ def analyze_frame(
             bg_data,
             bg_counts,
         )
-    crlb = np.full((n, 4), np.nan)
+    crlb = np.full((n, 6), np.nan)
     n_emitters = np.ones(n, dtype=np.int64)
     if n > 0:
         neighbor_distance = _NEIGHBOR_DISTANCE * sigma
         cells, counts, order, nx, ny, x0, y0 = _build_grid(
             p_x, p_y, n, neighbor_distance
         )
-        out_var = np.empty(4)
+        out_var = np.empty(6)
         for i in range(n):
             n_emitters[i] = _local_crlb(
                 i,
@@ -2012,7 +2015,7 @@ def analyze_frame(
                 _MAX_NEIGHBORS,
                 out_var,
             )
-            for p in range(4):
+            for p in range(6):
                 crlb[i, p] = out_var[p]
     n_pixels = np.full(n, n_roi, dtype=np.int64)
     return FrameResult(

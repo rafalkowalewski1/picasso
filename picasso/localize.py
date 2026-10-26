@@ -10140,6 +10140,15 @@ def _locs_from_multi_emitter_fits(
                 "lpy": np.sqrt(crlb[:, 2]),
                 "photons_unc": np.sqrt(crlb[:, 0]),
                 "bg_unc": np.sqrt(crlb[:, 3]),
+                # a fixed sigma has none
+                **(
+                    {
+                        "sx_unc": np.sqrt(crlb[:, 4]),
+                        "sy_unc": np.sqrt(crlb[:, 5]),
+                    }
+                    if psf_model != "fixed"
+                    else {}
+                ),
                 "log_likelihood": -0.5 * result.error,
                 "iterations": result.iterations.astype(np.int32),
                 # the deviance of the emitter's region over its degrees of
@@ -10302,8 +10311,8 @@ def localize_multi_emitter(
         One localization per emitter, with every length in nm: ``frame``,
         ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the PSF sigma in x
         and in y, fixed or fitted), ``bg``, the Cramer-Rao bounds ``lpx``,
-        ``lpy``,
-        ``photons_unc`` and ``bg_unc`` (see Notes), ``log_likelihood``,
+        ``lpy``, ``photons_unc`` and ``bg_unc``, and for a fitted sigma
+        ``sx_unc`` and ``sy_unc`` (see Notes), ``log_likelihood``,
         ``iterations`` and ``reduced_chi_square`` of the emitter's region,
         its ``significance`` and ``n_emitters``, the number of emitters
         the bounds were computed from: the emitter itself and its
@@ -10330,7 +10339,7 @@ def localize_multi_emitter(
     Notes
     -----
     The localization precision (``lpx``, ``lpy``, and likewise
-    ``photons_unc`` and ``bg_unc``) is the Cramer-Rao lower bound of the
+    ``photons_unc``, ``bg_unc``, ``sx_unc`` and ``sy_unc``) is the Cramer-Rao lower bound of the
     fitted model, which storm-analysis does not report. An emitter's
     bound comes from the Poisson Fisher information matrix of it and its
     nearest neighbors jointly (Huang et al., 2011), with photons, x, y,
