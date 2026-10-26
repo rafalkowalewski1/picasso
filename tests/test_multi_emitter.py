@@ -337,12 +337,35 @@ def test_metadata(singles):
     assert parameters == FIXED_SIGMA
 
 
-def test_estimates_the_psf_width(singles):
+def test_estimates_the_psf_sigma(singles):
     frames, truth = singles
-    locs, info = _fit(frames, parameters=localize.MultiEmitterParameters())
+    tracker = RecordingProgress()
+    reported = []
+
+    def report(sigma):
+        # the phases started so far tell when it came
+        reported.append((sigma, [p["label"] for p in tracker.phases]))
+
+    locs, info = _fit(
+        frames,
+        parameters=localize.MultiEmitterParameters(),
+        progress=tracker,
+        psf_sigma_callback=report,
+    )
     assert info[-1]["PSF Sigma Estimated"] is True
     assert info[-1]["PSF Sigma (nm)"] == pytest.approx(SIGMA, rel=0.03)
     assert len(locs) == len(truth)
+    # reported once, as soon as estimated, before the frames are fitted
+    assert reported == [
+        (info[-1]["PSF Sigma (nm)"], ["Estimating the PSF sigma"])
+    ]
+
+
+def test_reports_a_given_psf_sigma(singles):
+    frames, _ = singles
+    reported = []
+    _fit(frames, psf_sigma_callback=reported.append)
+    assert reported == [pytest.approx(SIGMA)]
 
 
 def test_too_few_emitters_to_estimate_the_width():

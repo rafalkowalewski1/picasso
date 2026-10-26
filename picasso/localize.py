@@ -10173,6 +10173,7 @@ def localize_multi_emitter(
     parallel: bool = True,
     progress: lib.Progress | Literal["console"] | None = None,
     abort_callback: Callable[[], bool] | None = None,
+    psf_sigma_callback: Callable[[float], None] | None = None,
 ) -> tuple[pd.DataFrame | None, list[dict]]:
     """Localize overlapping emitters: find and fit all emitters of a
     frame at once.
@@ -10241,6 +10242,12 @@ def localize_multi_emitter(
     abort_callback : callable or None, optional
         Polled throughout; returning True stops the fit and the function
         returns None for the localizations. Default is None.
+    psf_sigma_callback : callable or None, optional
+        Called with the PSF sigma (nm) the fit uses as soon as it is
+        known, i.e., once estimated, or right away when
+        ``parameters.psf_sigma`` is given, before the frames are fitted.
+        It is called on the thread that runs this function. Default is
+        None.
 
     Returns
     -------
@@ -10355,6 +10362,8 @@ def localize_multi_emitter(
             )
         else:
             sigma = parameters.psf_sigma / pixelsize
+        if sigma is not None and callable(psf_sigma_callback):
+            psf_sigma_callback(sigma * pixelsize)
         seeds = {}
         if sigma is not None and seed_identification is not None:
             identified = identify(

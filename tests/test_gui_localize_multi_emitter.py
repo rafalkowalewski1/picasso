@@ -85,7 +85,7 @@ def test_the_model_shows_only_what_it_uses(window):
     assert not dialog.identification_settings.isHidden()
 
 
-def test_the_psf_width_is_typed_in_only_when_not_estimated(window):
+def test_the_psf_sigma_is_typed_in_only_when_not_estimated(window):
     dialog = window.parameters_dialog
     assert dialog.psf_sigma_estimate_checkbox.isChecked()
     assert not dialog.psf_sigma_spinbox.isEnabled()
@@ -93,7 +93,7 @@ def test_the_psf_width_is_typed_in_only_when_not_estimated(window):
     dialog.psf_sigma_estimate_checkbox.setChecked(False)
     dialog.psf_sigma_spinbox.setValue(150.0)
     assert dialog.multi_emitter_parameters().psf_sigma == 150.0
-    # the preview uses the width shown, estimated or not
+    # the preview uses the sigma shown, estimated or not
     dialog.psf_sigma_estimate_checkbox.setChecked(True)
     assert dialog.multi_emitter_parameters(estimate=False).psf_sigma == 150.0
 
@@ -119,6 +119,35 @@ def test_localize_fits_without_identifying(loaded, tmp_path, monkeypatch):
         pytest.approx(entry["PSF Sigma (nm)"], abs=0.1)
     )
     assert loaded.identifications is None or not loaded.ready_for_fit
+
+
+def test_the_estimated_psf_sigma_is_shown_during_the_fit(loaded, monkeypatch):
+    _Messages(monkeypatch)
+    shown = []
+    _select(loaded)
+    dialog = loaded.parameters_dialog
+    dialog.psf_sigma_spinbox.setValue(200.0)
+    original = loaded.status_bar.showMessage
+
+    def show(message, *args):
+        # the spin box as it stands when each message is shown
+        shown.append((message, dialog.psf_sigma_spinbox.value()))
+        original(message, *args)
+
+    monkeypatch.setattr(loaded.status_bar, "showMessage", show)
+    loaded.localize()
+    _wait(loaded)
+    fitting = [
+        (message, value)
+        for message, value in shown
+        if message.startswith("Estimated PSF sigma: ")
+    ]
+    assert fitting
+    # the spin box is set as soon as the estimate is known
+    for message, value in fitting:
+        assert value != 200.0
+        assert message.startswith(f"Estimated PSF sigma: {value:.1f} nm.")
+        assert "Fitting frames" in message
 
 
 def test_identify_points_to_the_fit(loaded):

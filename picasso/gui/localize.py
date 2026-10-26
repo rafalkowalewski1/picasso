@@ -7095,6 +7095,9 @@ class Window(QtWidgets.QMainWindow):
         self._load_phase_busy = True
         # label of the running fit's current phase (see ``on_fit_phase``)
         self._fit_phase = ""
+        # the estimated PSF sigma of a running multi-emitter fit, shown
+        # before its progress (see ``on_multi_emitter_psf_sigma``)
+        self._fit_status_prefix = ""
         # Canceled loads, winding down on their own (see
         # ``_on_load_canceled``); kept referenced until their thread ends.
         self._detached_loads = []
@@ -12777,28 +12780,28 @@ class Window(QtWidgets.QMainWindow):
             self._extra_lateral_transforms(None),
         )
         self.fit_worker = worker
-        worker.finished.connect(self.on_multi_emitter_fit_finished)
+        self._fit_status_prefix = ""
+        worker.psfSigmaFound.connect(self.on_multi_emitter_psf_sigma)
+        worker.finished.connect(self.on_fit_finished)
         self._start_fit_worker(worker)
 
-    def on_multi_emitter_fit_finished(
-        self,
-        locs: pd.DataFrame,
-        info: list[dict],
-        elapsed_time: float,
-        fit_z: bool,
-        calibrate_z: bool,
-    ) -> None:
-        """Show the PSF sigma the fit used, which the preview then uses,
-        and finish as any fit."""
-        sigma = info[-1].get("PSF Sigma (nm)") if info else None
-        if sigma is None:
-            # lateral corrections append an entry of their own
-            sigma = lib.get_from_metadata(info, "PSF Sigma (nm)")
-        if sigma is not None:
-            self.parameters_dialog.psf_sigma_spinbox.blockSignals(True)
-            self.parameters_dialog.psf_sigma_spinbox.setValue(sigma)
-            self.parameters_dialog.psf_sigma_spinbox.blockSignals(False)
-        self.on_fit_finished(locs, info, elapsed_time, fit_z, calibrate_z)
+    def on_multi_emitter_psf_sigma(self, sigma: float) -> None:
+        """Show the PSF sigma the multi-emitter fit uses as soon as it is
+        known: in the Parameters dialog, whose preview then uses it, and,
+        if it was estimated, in the status bar while the frames are
+        fitted.
+
+        Parameters
+        ----------
+        sigma : float
+            The PSF sigma (nm).
+        """
+        dialog = self.parameters_dialog
+        dialog.psf_sigma_spinbox.blockSignals(True)
+        dialog.psf_sigma_spinbox.setValue(sigma)
+        dialog.psf_sigma_spinbox.blockSignals(False)
+        if dialog.psf_sigma_estimate_checkbox.isChecked():
+            self._fit_status_prefix = f"Estimated PSF sigma: {sigma:.1f} nm. "
 
     def _single_channel_fit_worker(
         self,
@@ -13981,6 +13984,8 @@ class Window(QtWidgets.QMainWindow):
             message = f"Multichannel {model} fit - {message}"
         if total > 0:
             message += f" {curr:,} / {total:,}"
+        if isinstance(self._active_worker, MultiEmitterFitWorker):
+            message = self._fit_status_prefix + message
         self.status_bar.showMessage(message + " ...")
 
     def on_fit_finished(
@@ -14786,6 +14791,8 @@ class MultiEmitterFitWorker(QtCore.QThread):
 
     phaseStarted = QtCore.pyqtSignal(str, int)
     progressMade = QtCore.pyqtSignal(int, int)
+    # the PSF sigma (nm) the fit uses, once estimated or given
+    psfSigmaFound = QtCore.pyqtSignal(float)
     # localizations, their metadata, elapsed time, and that neither a z fit
     # nor a z calibration follows
     finished = QtCore.pyqtSignal(pd.DataFrame, object, float, bool, bool)
@@ -14831,6 +14838,7 @@ class MultiEmitterFitWorker(QtCore.QThread):
                     on_phase=self.phaseStarted.emit,
                 ),
                 abort_callback=self.isInterruptionRequested,
+                psf_sigma_callback=self.psfSigmaFound.emit,
             )
         except Exception as e:
             # letting it escape run() kills the thread without a word
