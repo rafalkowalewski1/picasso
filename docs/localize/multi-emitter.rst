@@ -57,9 +57,9 @@ Output
 One localization per emitter, with the columns of an MLE fit (see :ref:`files-localization-hdf5`) and two more:
 
 - ``significance``: the signal of the emitter over the square root of the background it sits on, both weighted by the PSF.
-- ``n_emitters``: the number of emitters within 4 PSF σ, the emitter itself included; 1 for an isolated emitter. To keep the isolated ones only, filter by ``n_emitters == 1``.
+- ``n_emitters``: the number of emitters within 4 PSF σ, the emitter itself included, counting at most its 8 nearest neighbors (so at most 9); 1 for an isolated emitter. These are the emitters its precision is computed from (see below). To keep the isolated ones only, filter by ``n_emitters == 1``.
 
-``sx`` and ``sy`` hold the fixed PSF σ. The localization precisions ``lpx`` and ``lpy`` and ``photons_unc`` and ``bg_unc`` are the Cramer-Rao bounds from the Fisher matrix of the emitter and its neighbors within 4 PSF σ, so they grow where emitters overlap. Where that matrix is singular, the correction of `Huang et al., Biomed. Opt. Express, 2011 <https://doi.org/10.1364/BOE.2.001377>`_ (Eq. 11) is applied. ``log_likelihood`` and ``reduced_chi_square`` describe the fit of the region around the emitter, its neighbors included. The settings, and the PSF σ that was used, are recorded in the ``Fit multi-emitter`` entry of the metadata.
+``sx`` and ``sy`` hold the fixed PSF σ. The localization precisions ``lpx`` and ``lpy`` and ``photons_unc`` and ``bg_unc`` are Cramer-Rao bounds, as in `Huang et al., Biomed. Opt. Express, 2011 <https://doi.org/10.1364/BOE.2.001377>`_: each comes from the joint Fisher matrix of the emitter and its neighbors within 4 PSF σ (at most the 8 nearest), so the bounds grow where emitters overlap. Where that matrix is singular, Huang et al.'s approximation (their Eq. 11) is used instead. ``log_likelihood`` and ``reduced_chi_square`` describe the fit of the region around the emitter, its neighbors included. The settings, and the PSF σ that was used, are recorded in the ``Fit multi-emitter`` entry of the metadata.
 
 .. _localize-multi-emitter-cli:
 

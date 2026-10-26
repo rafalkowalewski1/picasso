@@ -10213,10 +10213,14 @@ def localize_multi_emitter(
     frame_bounds : tuple or list of tuples, optional
         Frames to fit, as in :func:`identify`. Default is None (all).
     seed_identification : IdentificationParameters or None, optional
-        If given, the spots this identification finds (see
-        :func:`identify`) start the fit of each frame instead of the
-        peak finder's first cycle; later cycles find the remaining peaks
-        as usual. This is not part of 3D-DAOSTORM. Default is None.
+        Picasso's identification (net gradient or wavelet, see
+        :func:`identify`) to start each frame from. If given, the movie
+        is identified first, and in each frame the identified spots, at
+        their pixel centers, replace the peaks that the first cycle of the
+        peak finder would find; later cycles find the emitters they miss
+        as usual. This reuses identification settings already tuned for
+        a movie. It is not part of 3D-DAOSTORM and the GUI does not offer
+        it. Default is None, i.e., the peak finder alone.
     camera_calibration : dict or None, optional
         Per-pixel sCMOS camera calibration, as in :func:`fit`: its maps
         replace the scalar "Baseline" (and "Sensitivity"), and the
@@ -10255,12 +10259,12 @@ def localize_multi_emitter(
         One localization per emitter, with every length in nm: ``frame``,
         ``x``, ``y``, ``photons``, ``sx`` and ``sy`` (the fixed PSF
         sigma), ``bg``, the Cramer-Rao bounds ``lpx``, ``lpy``,
-        ``photons_unc`` and ``bg_unc`` (from the Fisher matrix of the
-        emitter and its neighbors), ``log_likelihood``, ``iterations`` and
-        ``reduced_chi_square`` of the emitter's region, its
-        ``significance`` and ``n_emitters``, the number of emitters
-        within 4 PSF sigma, the emitter itself included (1 for an
-        isolated one). None if aborted.
+        ``photons_unc`` and ``bg_unc`` (see Notes), ``log_likelihood``,
+        ``iterations`` and ``reduced_chi_square`` of the emitter's region,
+        its ``significance`` and ``n_emitters``, the number of emitters
+        the bounds were computed from: the emitter itself and its
+        neighbors within 4 PSF sigma, at most the 8 nearest (1 for an
+        isolated emitter, at most 9). None if aborted.
     info : list of dicts
         Metadata of the localizations: ``info`` with an entry recording
         the fit and ``camera_info`` appended (see ``lib.append_metadata``),
@@ -10275,11 +10279,31 @@ def localize_multi_emitter(
         If ``parameters`` or ``seed_identification`` is of the wrong
         type.
 
+    Notes
+    -----
+    The localization precision (``lpx``, ``lpy``, and likewise
+    ``photons_unc`` and ``bg_unc``) is the Cramer-Rao lower bound of the
+    fitted model, which storm-analysis does not report. An emitter's
+    bound comes from the Poisson Fisher information matrix of it and its
+    nearest neighbors jointly (Huang et al., 2011), with photons, x, y
+    and background of each as parameters, over the union of their fit
+    regions and evaluated at the fitted values. Inverting the joint
+    matrix makes a close neighbor raise the bound, as the overlap costs
+    precision. Where the matrix is singular, the approximation of
+    Huang et al.'s Eq. 11 is used instead. An sCMOS calibration's
+    readout variance is added to the expected counts; with an EM gain
+    above 1, the variances are doubled (excess noise factor 2).
+
     References
     ----------
     Babcock, H., Sigal, Y. M. & Zhuang, X. A high-density 3D localization
     algorithm for stochastic optical reconstruction microscopy. Opt.
     Nanoscopy 1, 6 (2012). https://doi.org/10.1186/2192-2853-1-6
+
+    Huang, F., Schwartz, S. L., Byars, J. M. & Lidke, K. A. Simultaneous
+    multiple-emitter fitting for single molecule super-resolution
+    imaging. Biomed. Opt. Express 2, 1377-1393 (2011).
+    https://doi.org/10.1364/BOE.2.001377
 
     Examples
     --------

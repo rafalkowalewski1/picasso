@@ -1209,9 +1209,10 @@ def _local_crlb(
 ):
     """Cramer-Rao variances of ``[photons, x, y, bg]`` of peak ``i`` from
     the Fisher matrix of it and its nearest neighbors (at most
-    ``max_neighbors`` within ``neighbor_distance``) over their regions,
-    with Huang et al.'s correction of the x-x and y-y terms of close
-    emitters (Eq. 11). Returns the number of emitters in the matrix."""
+    ``max_neighbors`` within ``neighbor_distance``) over their regions;
+    where that matrix is singular, Huang et al.'s correction of the x-x
+    and y-y terms of close emitters (Eq. 11). Returns the number of
+    emitters in the matrix."""
     candidates = np.empty(n, dtype=np.int64)
     m = _neighbors(
         p_x[i],
