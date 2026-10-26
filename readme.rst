@@ -146,6 +146,9 @@ Many of the functionalities provided by Picasso were published independently, pl
    * - Theoretical axial localization precision (``lpz``, Gaussian)
      - Kowalewski et al., Nat. Commun., 2026
      - `10.1038/s41467-026-70198-5 <https://doi.org/10.1038/s41467-026-70198-5>`__
+   * - Theoretical lateral localization precision of overlapping emitters (``lpx`` / ``lpy``, multi-emitter fitting)
+     - Huang et al., Biomed. Opt. Express, 2011
+     - `10.1364/BOE.2.001377 <https://doi.org/10.1364/BOE.2.001377>`__
    * - Quad-tree adaptive histogram rendering
      - Baddeley et al., Microsc. Microanal., 2010
      - `10.1017/S143192760999122X <https://doi.org/10.1017/S143192760999122X>`__

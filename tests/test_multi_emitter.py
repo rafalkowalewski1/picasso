@@ -123,7 +123,13 @@ def test_reproduces_storm_analysis():
             "y": reference["y"] * PIXELSIZE,
         }
     )
-    locs, _ = _fit(frames)
+    # storm-analysis ran at its threshold of 6
+    locs, _ = _fit(
+        frames,
+        parameters=localize.MultiEmitterParameters(
+            psf_sigma=SIGMA, snr_threshold=6.0
+        ),
+    )
     assert len(locs) == len(reference)
     matches = gt.match(locs, reference, tolerance=10.0)
     assert len(matches.loc_index) == len(reference)
@@ -395,8 +401,9 @@ def test_rejects_other_settings(singles):
 
 class TestMultiEmitterParameters:
     def test_defaults_are_3d_daostorm(self):
+        # except the threshold, 6 in storm-analysis
         parameters = localize.MultiEmitterParameters()
-        assert parameters.snr_threshold == 6.0
+        assert parameters.snr_threshold == 15.0
         assert parameters.psf_sigma is None
         assert parameters.max_cycles == 20
         assert parameters.peak_radius == 5.0

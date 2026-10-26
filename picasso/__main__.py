@@ -5343,10 +5343,10 @@ def _build_parser() -> (
     multi_emitter.add_argument(
         "--snr-threshold",
         type=float,
-        default=6.0,
+        default=15.0,
         help=(
             "peak threshold, in units of the signal-to-noise ratio, and the"
-            " minimum significance of an emitter (default 6)"
+            " minimum significance of an emitter (default 15)"
         ),
     )
     multi_emitter.add_argument(

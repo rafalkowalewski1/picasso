@@ -103,8 +103,8 @@ __all__ = [
 ]
 
 #: Default peak threshold, in units of the signal-to-noise ratio, and the
-#: minimum significance a peak keeps ("6 sigma").
-THRESHOLD = 6.0
+#: minimum significance a peak keeps. storm-analysis uses 6.
+THRESHOLD = 15.0
 #: Default number of find-fit-subtract cycles per frame.
 N_CYCLES = 20
 #: Default radius (camera pixels) within which a peak must be the maximum.

@@ -4684,7 +4684,8 @@ class ParametersDialog(lib.Dialog):
         self.psf_sigma_spinbox = QtWidgets.QDoubleSpinBox()
         self.psf_sigma_spinbox.setRange(10.0, 2000.0)
         self.psf_sigma_spinbox.setDecimals(1)
-        self.psf_sigma_spinbox.setValue(130.0)
+        # 0.9 camera pixels of 130 nm
+        self.psf_sigma_spinbox.setValue(117.0)
         self.psf_sigma_spinbox.setToolTip(sigma_tip)
         self.psf_sigma_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed

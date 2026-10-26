@@ -9635,7 +9635,7 @@ def _process_fitting_futures(
 _PSF_SIGMA_SAMPLE_FRAMES = 200
 #: Provisional PSF sigma (camera pixels) the emitters for the estimate are
 #: first found with.
-_PSF_SIGMA_START = 1.0
+_PSF_SIGMA_START = 0.9
 #: Fewest isolated, well fitted emitters the estimate needs.
 _PSF_SIGMA_MIN_SPOTS = 10
 #: p-value of the chi-square test an emitter must pass to count as well
@@ -9649,18 +9649,18 @@ class MultiEmitterParameters:
     :func:`localize_multi_emitter`.
 
     The defaults are those of 3D-DAOSTORM (Babcock et al., 2012) in its
-    reference implementation, storm-analysis. All arguments are
-    keyword-only.
+    reference implementation, storm-analysis, except ``snr_threshold``.
+    All arguments are keyword-only.
 
     Parameters
     ----------
     snr_threshold : float, optional
         Peaks are found where the residual of the fit, smoothed with the
         PSF, exceeds this many times its expected noise, and an emitter
-        is kept only if its significance exceeds it too. Default is 6
-        ("6 sigma"). The noise is that of photon counting; on EMCCD
-        camera it is larger by the excess noise factor, so the same
-        threshold lets more noise through.
+        is kept only if its significance exceeds it too. Default is 15.
+        storm-analysis uses 6. The noise is that of photon
+        counting; on EMCCD camera it is larger by the excess noise factor,
+        so the same threshold lets more noise through.
     psf_sigma : float or None, optional
         Standard deviation of the PSF in nm, fixed in the fit. None (the
         default) estimates it from the movie, as the median sigma of

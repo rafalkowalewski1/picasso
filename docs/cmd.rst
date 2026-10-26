@@ -202,7 +202,7 @@ combined with it. See :ref:`localize-multi-emitter`.
 
 ``--snr-threshold``
    The peak threshold and the minimum significance of an emitter, in units of
-   the signal-to-noise ratio (default 6).
+   the signal-to-noise ratio (default 15).
 ``--psf-sigma``
    The PSF σ (standard deviation) in nm, fixed in the fit. Estimated from
    the movie by default.

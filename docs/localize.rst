@@ -186,7 +186,7 @@ Topics
 
       Building and checking a spline PSF calibration, fitting with it, and multichannel (e.g. biplane) spline fitting.
 
-   .. grid-item-card:: :octicon:`people;1.5em;sd-mr-1` Overlapping emitters
+   .. grid-item-card:: :octicon:`copy;1.5em;sd-mr-1` Overlapping emitters
       :link: localize/multi-emitter
       :link-type: doc
 
