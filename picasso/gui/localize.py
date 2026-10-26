@@ -5188,7 +5188,13 @@ class ParametersDialog(lib.Dialog):
     def on_fit_model_changed(self) -> None:
         """Repopulate the optimizer combobox for the selected model and
         show/hide the optimizer controls. Models without an optimizer
-        (e.g. averaging) hide the optimizer row and its parameters."""
+        (e.g. averaging) hide the optimizer row and its parameters. The
+        dialog grows or shrinks with the settings shown."""
+        lib.resize_with_contents(self, self.scroll_area, self._show_fit_model)
+
+    def _show_fit_model(self) -> None:
+        """Show the optimizers and settings of the selected fit model,
+        see ``on_fit_model_changed``."""
         model = self.fit_model.currentText()
         if FIT_MODELS[model].get("multi_emitter") and not getattr(
             ParametersDialog, "_multi_emitter_compiling", False
@@ -5202,12 +5208,10 @@ class ParametersDialog(lib.Dialog):
         if optimizers is None:
             self.optimizer_label.hide()
             self.fit_optimizer.hide()
-            self.fit_stack.hide()
             self._apply_convergence_defaults()
         else:
             self.optimizer_label.show()
             self.fit_optimizer.show()
-            self.fit_stack.show()
             self.fit_optimizer.blockSignals(True)
             self.fit_optimizer.clear()
             self.fit_optimizer.addItems(list(optimizers.keys()))
@@ -5239,6 +5243,19 @@ class ParametersDialog(lib.Dialog):
         if self.identification_settings is not None:
             # it finds the spots itself
             self.identification_settings.setVisible(not multi_emitter)
+        # The multichannel rows keep their space while hidden (see
+        # _retain_size_when_hidden), but the multi-emitter fit takes one
+        # channel, so it does not reserve it.
+        for widget in (
+            getattr(self, "identify_mode_label", None),
+            getattr(self, "identify_mode_combo", None),
+            getattr(self, "fit_mode_label", None),
+            getattr(self, "fit_mode_combo", None),
+        ):
+            if widget is not None:
+                policy = widget.sizePolicy()
+                policy.setRetainSizeWhenHidden(not multi_emitter)
+                widget.setSizePolicy(policy)
 
     def is_multi_emitter(self) -> bool:
         """Whether the selected fit model is the multi-emitter fit."""
@@ -5289,7 +5306,11 @@ class ParametersDialog(lib.Dialog):
         code = self.current_fit_code()
         if not code:
             return
-        self.fit_stack.setCurrentIndex(1 if code in _CONVERGENCE_CODES else 0)
+        iterates = code in _CONVERGENCE_CODES
+        self.fit_stack.setCurrentIndex(1 if iterates else 0)
+        # the stack is as tall as its tallest page: hidden, the empty page
+        # leaves no gap
+        self.fit_stack.setVisible(iterates)
         if code == self._last_fit_code:
             return
         self._last_fit_code = code
@@ -13984,7 +14005,7 @@ class Window(QtWidgets.QMainWindow):
             message = f"Multichannel {model} fit - {message}"
         if total > 0:
             message += f" {curr:,} / {total:,}"
-        if isinstance(self._active_worker, MultiEmitterFitWorker):
+        if isinstance(worker, MultiEmitterFitWorker):
             message = self._fit_status_prefix + message
         self.status_bar.showMessage(message + " ...")
 

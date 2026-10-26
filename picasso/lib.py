@@ -163,6 +163,7 @@ _QT_NAMES = (
     "CollapsibleGroupBox",
     "remember_expanded_sections",
     "resize_with_sections",
+    "resize_with_contents",
     "ScrollableGroupBox",
     "LogDoubleSpinBox",
     "WrappingLabel",

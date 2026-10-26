@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from PyQt6 import QtCore, QtWidgets
 
 from picasso import io
 from picasso.gui import localize as gui_localize
@@ -83,6 +84,47 @@ def test_the_model_shows_only_what_it_uses(window):
     dialog.fit_model.setCurrentIndex(0)
     assert dialog.multi_emitter_groupbox.isHidden()
     assert not dialog.identification_settings.isHidden()
+
+
+def test_the_dialog_leaves_no_gap(window):
+    """The optimizer stack and the multichannel rows keep no space for
+    the multi-emitter fit, and the dialog shrinks with its contents."""
+    app = QtWidgets.QApplication.instance()
+
+    def settle():
+        for _ in range(5):
+            app.processEvents()
+            QtCore.QThread.msleep(10)
+
+    dialog = window.parameters_dialog
+    dialog.fit_model.setCurrentIndex(0)
+    dialog.show()
+    settle()
+    contents = dialog.scroll_area.widget()
+    gaussian = contents.sizeHint().height()
+    dialog.resize(dialog.width(), 2000)
+    settle()
+    height = dialog.height()
+    _select(window)
+    settle()
+    multi_emitter = contents.sizeHint().height()
+    assert dialog.fit_stack.isHidden()
+    for widget in (dialog.fit_mode_combo, dialog.identify_mode_combo):
+        assert not widget.sizePolicy().retainSizeWhenHidden()
+    # the identification settings, the convergence settings and the
+    # reserved rows go; the overlapping-emitter settings come
+    removed = (
+        dialog.identification_settings.sizeHint().height()
+        + dialog.fit_stack.sizeHint().height()
+        - dialog.multi_emitter_groupbox.sizeHint().height()
+    )
+    assert gaussian - multi_emitter > removed
+    assert dialog.height() == height - (gaussian - multi_emitter)
+    dialog.fit_model.setCurrentIndex(0)
+    settle()
+    assert contents.sizeHint().height() == gaussian
+    assert not dialog.fit_stack.isHidden()
+    assert dialog.fit_mode_combo.sizePolicy().retainSizeWhenHidden()
 
 
 def test_the_psf_sigma_is_typed_in_only_when_not_estimated(window):
