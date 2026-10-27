@@ -411,6 +411,40 @@ def test_uncertainties_match_the_scatter(singles, model):
     assert locs["reduced_chi_square"].median() == pytest.approx(1.0, abs=0.1)
 
 
+def _symmetric(eigenvalues, seed=0):
+    """A symmetric matrix with these eigenvalues."""
+    n = len(eigenvalues)
+    q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))
+    a = (q * eigenvalues) @ q.T
+    return (a + a.T) / 2
+
+
+@pytest.mark.parametrize(
+    "a",
+    [
+        # by Cholesky
+        _symmetric(np.logspace(-2, 4, 54)),
+        # by Jacobi: indefinite, as Huang's correction can make it
+        _symmetric(np.r_[-np.logspace(-1, 1, 5), np.logspace(-2, 3, 15)]),
+        # by Jacobi: a parameter without information is dropped
+        np.pad(_symmetric(np.logspace(-2, 2, 10)), (0, 2)),
+        np.zeros((5, 5)),
+    ],
+    ids=["positive definite", "indefinite", "singular", "zero"],
+)
+def test_pinv_symmetric(a):
+    """The bounds' pseudo-inverse, which leaves out LAPACK (its OpenBLAS
+    can crash when the threads of a frame pool call it at once), is
+    numpy's."""
+    expected = np.linalg.pinv(a)
+    np.testing.assert_allclose(
+        residualfit._pinv_symmetric(a),
+        expected,
+        rtol=0,
+        atol=1e-10 * max(np.abs(expected).max(), 1.0),
+    )
+
+
 # ----------------------------------------------------------------------
 # PSF models
 # ----------------------------------------------------------------------

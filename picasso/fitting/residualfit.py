@@ -193,6 +193,14 @@ _SIGMA_RANGE = (0.5, 5.0)
 _NEIGHBOR_DISTANCE = 4.0
 # Most neighbors (nearest first) in an emitter's joint Fisher matrix.
 _MAX_NEIGHBORS = 8
+# Pseudo-inverse of that matrix: eigenvalues at or below this times the
+# largest are dropped (numpy.linalg.pinv's default), and the Jacobi
+# rotations stop after this many sweeps, or once the squared off-diagonal
+# norm is at most this times the squared Frobenius norm (as
+# precision._sym_pinv_device).
+_PINV_RCOND = 1.0e-15
+_JACOBI_SWEEPS = 30
+_JACOBI_TOL = 1.0e-30
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 _INV_SQRT2PI = 1.0 / math.sqrt(2.0 * math.pi)
@@ -874,6 +882,117 @@ def _solve_cholesky(a, b, n):
         if not np.isfinite(b[i]):
             return False
     return True
+
+
+# fastmath given: otherwise it would take that of the function that
+# compiles it first, numba keeping one build per signature
+@numba.njit(nogil=True, cache=True, fastmath=False)
+def _pinv_symmetric(a):
+    """Pseudo-inverse of the symmetric ``a``, as ``numpy.linalg.pinv``
+    gives it, without LAPACK: called by the threads of a frame pool at
+    once, OpenBLAS (built for fewer threads) can crash. A positive
+    definite ``a`` whose condition number is below ``1 / _PINV_RCOND``,
+    which ``tr(a) tr(a^-1)`` bounds, so that pinv drops nothing, is
+    inverted by Cholesky (LAPACK dpotri); any other is diagonalized by
+    cyclic Jacobi rotations, dropping the eigenvalues at or below
+    ``_PINV_RCOND`` times the largest in magnitude. NaN where the
+    rotations do not converge."""
+    n = a.shape[0]
+    low = a.copy()
+    definite = True
+    for j in range(n):
+        s = low[j, j]
+        for k in range(j):
+            s -= low[j, k] * low[j, k]
+        if not s > 0.0:
+            definite = False
+            break
+        low[j, j] = math.sqrt(s)
+        for i in range(j + 1, n):
+            s = low[i, j]
+            for k in range(j):
+                s -= low[i, k] * low[j, k]
+            low[i, j] = s / low[j, j]
+    if definite:
+        # L^-1, lower triangular, then a^-1 = L^-T L^-1
+        inv_low = np.zeros((n, n))
+        for c in range(n):
+            for i in range(c, n):
+                s = 1.0 if i == c else 0.0
+                for k in range(c, i):
+                    s -= low[i, k] * inv_low[k, c]
+                inv_low[i, c] = s / low[i, i]
+        out = np.empty((n, n))
+        trace = 0.0
+        trace_inv = 0.0
+        for p in range(n):
+            for q in range(p, n):
+                s = 0.0
+                for k in range(q, n):
+                    s += inv_low[k, p] * inv_low[k, q]
+                out[p, q] = s
+                out[q, p] = s
+            trace += a[p, p]
+            trace_inv += out[p, p]
+        if trace * trace_inv < 1.0 / _PINV_RCOND:
+            return out
+    d = a.copy()
+    v = np.eye(n)
+    converged = False
+    for _ in range(_JACOBI_SWEEPS):
+        off = 0.0
+        fro = 0.0
+        for p in range(n):
+            fro += d[p, p] * d[p, p]
+            for q in range(p + 1, n):
+                off += d[p, q] * d[p, q]
+        fro += 2.0 * off
+        if off <= _JACOBI_TOL * fro:
+            converged = True
+            break
+        for p in range(n - 1):
+            for q in range(p + 1, n):
+                dpq = d[p, q]
+                if dpq == 0.0:
+                    continue
+                # the smaller root of t^2 + 2 theta t - 1 = 0: a rotation
+                # by less than 45 degrees
+                theta = (d[q, q] - d[p, p]) / (2.0 * dpq)
+                sign = 1.0 if theta >= 0.0 else -1.0
+                t = sign / (abs(theta) + math.sqrt(theta * theta + 1.0))
+                c = 1.0 / math.sqrt(t * t + 1.0)
+                s = t * c
+                for k in range(n):
+                    dkp = d[k, p]
+                    dkq = d[k, q]
+                    d[k, p] = c * dkp - s * dkq
+                    d[k, q] = s * dkp + c * dkq
+                for k in range(n):
+                    dpk = d[p, k]
+                    dqk = d[q, k]
+                    d[p, k] = c * dpk - s * dqk
+                    d[q, k] = s * dpk + c * dqk
+                for k in range(n):
+                    vkp = v[k, p]
+                    vkq = v[k, q]
+                    v[k, p] = c * vkp - s * vkq
+                    v[k, q] = s * vkp + c * vkq
+    out = np.full((n, n), np.nan)
+    if not converged:
+        return out
+    biggest = 0.0
+    for k in range(n):
+        biggest = max(biggest, abs(d[k, k]))
+    cutoff = _PINV_RCOND * biggest
+    for p in range(n):
+        for q in range(p, n):
+            s = 0.0
+            for k in range(n):
+                if abs(d[k, k]) > cutoff:
+                    s += v[p, k] * v[q, k] / d[k, k]
+            out[p, q] = s
+            out[q, p] = s
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -1840,7 +1959,7 @@ def _local_crlb(
     for p in range(n_par):
         for q in range(p):
             fisher[p, q] = fisher[q, p]
-    cov = np.linalg.pinv(fisher)
+    cov = _pinv_symmetric(fisher)
     regular = True
     for p in range(4):
         if not (np.isfinite(cov[p, p]) and cov[p, p] > 0.0):
@@ -1859,7 +1978,7 @@ def _local_crlb(
                 if a != b:
                     zeroed[stride * a + 1, stride * b + 1] = 0.0
                     zeroed[stride * a + 2, stride * b + 2] = 0.0
-        cov0 = np.linalg.pinv(zeroed)
+        cov0 = _pinv_symmetric(zeroed)
         for a in range(n_local):
             for b in range(n_local):
                 if a == b:
@@ -1875,7 +1994,7 @@ def _local_crlb(
                     if s > 0.0:
                         big_a = diff * diff / s
                         fisher[p, q] *= big_a / (big_a + 1.0)
-        cov = np.linalg.pinv(fisher)
+        cov = _pinv_symmetric(fisher)
     for p in range(4):
         out_var[p] = cov[p, p]
     out_var[4] = cov[4, 4] if n_widths > 0 else np.nan
