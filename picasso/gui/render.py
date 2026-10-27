@@ -5672,8 +5672,8 @@ class InfoDialog(lib.Dialog):
         Shows median localization precision (nm) of the channel chosen
         in self.fit_precision_channel.
     fit_precision_channel : QComboBox
-        Chooses the channel for self.fit_precision; hidden with a
-        single channel.
+        Chooses the channel for self.fit_precision and self.nena_label;
+        hidden with a single channel.
     frc_plot_window : FRCPlotWindow(QDialog)
         Window displaying the FRC curve.
     frc_result : dict
@@ -5684,7 +5684,8 @@ class InfoDialog(lib.Dialog):
     locs_label : QLabel
         Shows the number of locs in the current FOV.
     lp : float
-        NeNA localization precision (nm). None, if not calculated yet.
+        NeNA localization precision (nm) of the channel chosen in
+        self.fit_precision_channel. None, if not calculated yet.
     max_dark_time : QSpinBox
         Contains the maximum gap between localizations (frames) to be
         considered as belonging to the same group of linked locs.
@@ -5692,6 +5693,11 @@ class InfoDialog(lib.Dialog):
         Contains all the info about the fit precision.
     nena_button : QPushButton
         Calculates nearest neighbor based analysis fit precision.
+    nena_label : QLabel
+        Shows self.lp.
+    nena_result : dict
+        Summary of the NeNA calculation of the channel chosen in
+        self.fit_precision_channel. Empty, if not calculated yet.
     n_localization_mean : QLabel
         Shows the mean number of locs in all picks.
     n_localization_std : QLabel
@@ -5846,7 +5852,8 @@ class InfoDialog(lib.Dialog):
         med_lp_label = QtWidgets.QLabel("Median localization precision:")
         med_lp_label.setToolTip(
             "Median localization precision (mean of the medians of lpx\n"
-            "and lpy) of the channel selected below."
+            "and lpy) of the channel selected below. NeNA precision is\n"
+            "shown for the same channel."
         )
         self.precision_grid.addWidget(med_lp_label, 0, 0)
         self.fit_precision = QtWidgets.QLabel("-")
@@ -5854,7 +5861,8 @@ class InfoDialog(lib.Dialog):
         # the channel selector is shown only with several channels
         self.fit_precision_channel = QtWidgets.QComboBox()
         self.fit_precision_channel.setToolTip(
-            "Channel whose median localization precision is shown."
+            "Channel whose median localization and NeNA precisions are"
+            " shown."
         )
         self.fit_precision_channel.currentIndexChanged.connect(
             self.update_fit_precision
@@ -5862,6 +5870,8 @@ class InfoDialog(lib.Dialog):
         self.fit_precision_channel.setVisible(False)
         self.precision_grid.addWidget(self.fit_precision_channel, 1, 0, 1, 2)
         self._fit_precision_cache = {}
+        # NeNA (result, precision) per channel, keyed like the cache above
+        self._nena_cache = {}
         nena_label = QtWidgets.QLabel("NeNA precision:")
         nena_label.setToolTip(
             "Experimental estimate of the average localization precision.\n"
@@ -6145,23 +6155,25 @@ class InfoDialog(lib.Dialog):
         lib.adjust_widget_size(self, hint)
 
     def calculate_frc_resolution(self) -> None:
-        """Calculate FRC resolution in a given channel."""
+        """Calculate FRC resolution in a given channel. NeNA, which sets
+        the bin size, is reused if known (see ``known_nena``)."""
         channel = self.window.view.get_channel("Calculate FRC resolution")
         if channel is not None:
             locs = self.window.view.locs[channel]
             info = self.window.view.infos[channel]
+            lp = self.known_nena(channel)
 
             # make sure the viewport is not too large
-            median_lp = self.window.view.median_lp
-            max_size = 10_000 * (median_lp / 2)
+            bin_size = (lp or self.window.view.median_lp) / 2
+            max_size = 10_000 * bin_size
             height, width = render.viewport_size(self.window.view.viewport)
             if height > max_size and width > max_size:
                 text = (
                     "The current FOV is large and will likely lead to a long "
                     "computation time and high memory usage (current FOV "
                     "leads to an image of size "
-                    f"{int(width/(median_lp/2)):,} x "
-                    f"{int(height/(median_lp/2)):,} pixels).\n\n"
+                    f"{int(width/bin_size):,} x "
+                    f"{int(height/bin_size):,} pixels).\n\n"
                     "Please consider reducing the FOV size before"
                     " calculating the FRC resolution.\n\nDo you want to "
                     "proceed?"
@@ -6191,9 +6203,12 @@ class InfoDialog(lib.Dialog):
             else:
                 path = None
 
+            if lp is None:
+                nena_result, lp = postprocess.nena(locs, info)
+                self._record_nena(locs, info, nena_result, lp)
             # calculate frc
             self.frc_result = postprocess.frc(
-                locs, info, viewport=self.window.view.viewport
+                locs, info, viewport=self.window.view.viewport, lp=lp
             )
             if path:  # save images
                 base, ext = os.path.splitext(path)
@@ -6238,6 +6253,7 @@ class InfoDialog(lib.Dialog):
             self.frc_rois_window = None
         roi_size = 1000 * self.frc_roi_size.value()
         min_locs = self.frc_min_locs.value()
+        lp = self.known_nena(channel)
 
         def compute(progress: lib.TaskProgress) -> dict:
             return postprocess.frc_rois(
@@ -6247,8 +6263,14 @@ class InfoDialog(lib.Dialog):
                 n_rois=n_rois,
                 roi_size=roi_size,
                 min_locs=min_locs,
+                lp=lp,
                 progress=progress,
             )
+
+        def apply(result: dict) -> None:
+            if lp is None:  # calculated now; no curve to plot from it
+                self._record_nena(locs, info, {}, result["lp"])
+            self._show_frc_rois_result(locs, info, viewport, n_rois, result)
 
         def failed(error: Exception) -> None:
             if isinstance(error, (ValueError, RuntimeError)):
@@ -6260,9 +6282,7 @@ class InfoDialog(lib.Dialog):
             compute,
             "Calculating FRC in ROIs",
             self,
-            lambda result: self._show_frc_rois_result(
-                locs, info, viewport, n_rois, result
-            ),
+            apply,
             on_failed=failed,
         )
 
@@ -6307,10 +6327,13 @@ class InfoDialog(lib.Dialog):
 
     def update_fit_precision(self) -> None:
         """Sync the channel selector with the loaded channels and show
-        the median localization precision of the selected channel.
+        the median localization and NeNA precisions of the selected
+        channel.
 
         Medians are cached per localizations object, so redraws do not
-        recompute them.
+        recompute them. NeNA is shown if it was calculated for the
+        current localizations of the channel, or if it is the last step
+        in their metadata.
         """
         view = self.window.view
         checks = self.window.dataset_dialog.checks
@@ -6336,6 +6359,7 @@ class InfoDialog(lib.Dialog):
         channel = combo.currentIndex()
         if channel < 0 or channel >= len(view.locs):
             self.fit_precision.setText("-")
+            self._show_nena({}, None)
             return
         locs = view.locs[channel]
         key = (id(locs), len(locs))
@@ -6344,6 +6368,13 @@ class InfoDialog(lib.Dialog):
         self._fit_precision_cache = {
             k: v for k, v in self._fit_precision_cache.items() if k in alive
         }
+        self._nena_cache = {
+            k: v for k, v in self._nena_cache.items() if k in alive
+        }
+        self._show_nena(
+            self._nena_cache.get(key, ({}, None))[0],
+            self.known_nena(channel),
+        )
         if key not in self._fit_precision_cache:
             if len(locs) and {"lpx", "lpy"} <= set(locs.columns):
                 lp = np.mean([np.median(locs["lpx"]), np.median(locs["lpy"])])
@@ -6356,10 +6387,78 @@ class InfoDialog(lib.Dialog):
         else:
             self.fit_precision.setText("-")
 
+    def _show_nena(self, nena_result: dict, lp: float | None) -> None:
+        """Set the NeNA result and precision (nm) of the selected
+        channel and display the latter."""
+        self.nena_result = nena_result
+        self.lp = lp
+        self.nena_label.setText("-" if lp is None else f"{lp:.3} nm")
+
+    def known_nena(self, channel: int) -> float | None:
+        """NeNA precision (nm) of a channel if it is known for its
+        current localizations: calculated in this dialog, or the last
+        step in their metadata.
+
+        Parameters
+        ----------
+        channel : int
+            Index of the channel.
+
+        Returns
+        -------
+        lp : float or None
+            NeNA precision (nm), None if not known.
+        """
+        locs = self.window.view.locs[channel]
+        cached = self._nena_cache.get((id(locs), len(locs)))
+        if cached is not None:
+            return cached[1]
+        info = self.window.view.infos[channel]
+        if info and "NeNA (nm)" in info[-1]:
+            return float(info[-1]["NeNA (nm)"])
+        return None
+
+    def _record_nena(
+        self,
+        locs: pd.DataFrame,
+        info: list[dict],
+        nena_result: dict,
+        lp: float,
+    ) -> None:
+        """Keep a calculated NeNA for later use, save it to metadata and
+        show it if its channel is selected.
+
+        Parameters
+        ----------
+        locs : pd.DataFrame
+            Localizations NeNA was calculated for.
+        info : list of dicts
+            Their metadata, changed in place.
+        nena_result : dict
+            Summary of the NeNA calculation, empty if not available.
+        lp : float
+            NeNA precision (nm).
+        """
+        self._nena_cache[(id(locs), len(locs))] = (nena_result, lp)
+        if not any(locs_ is locs for locs_ in self.window.view.locs):
+            return  # replaced meanwhile: the metadata is of new locs
+        # a repeated calculation with no other step in between replaces
+        # the previous entry
+        nena_info = {
+            **lib.step_info("Render : NeNA"),
+            "NeNA (nm)": float(lp),
+        }
+        if info and "NeNA (nm)" in info[-1]:
+            info[-1] = nena_info
+        else:
+            info.append(nena_info)
+        self.update_fit_precision()
+
     def calculate_nena_lp(
         self, on_done: Callable[[], None] | None = None
     ) -> None:
-        """Calculate NeNA precision in a given channel.
+        """Calculate NeNA precision in a given channel, which is then
+        also selected in self.fit_precision_channel.
 
         Parameters
         ----------
@@ -6377,19 +6476,12 @@ class InfoDialog(lib.Dialog):
             return postprocess.nena(locs, info, progress=progress)
 
         def apply(result: tuple) -> None:
-            self.nena_result, self.lp = result  # nm
-            self.nena_label.setText(f"{self.lp:.3} nm")
-
-            # save NeNA to metadata; a repeated calculation with no other
-            # step in between replaces the previous entry
-            nena_info = {
-                **lib.step_info("Render : NeNA"),
-                "NeNA (nm)": float(self.lp),
-            }
-            if info and "NeNA (nm)" in info[-1]:
-                info[-1] = nena_info
-            else:
-                info.append(nena_info)
+            # show the precisions of the channel calculated, wherever
+            # it is now
+            for index, locs_ in enumerate(self.window.view.locs):
+                if locs_ is locs:
+                    self.fit_precision_channel.setCurrentIndex(index)
+            self._record_nena(locs, info, *result)  # nm
             if on_done is not None:
                 on_done()
 
@@ -6427,6 +6519,8 @@ class InfoDialog(lib.Dialog):
 
     def _show_nena_window(self) -> None:
         """Plot the NeNA result in a new window."""
+        if not self.nena_result:  # another channel selected meanwhile
+            return
         # keep a reference to the window to prevent garbage collection
         self.nena_window = NenaPlotWindow(self)
         self.nena_window.plot(self.nena_result)

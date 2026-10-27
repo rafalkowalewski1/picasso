@@ -1457,3 +1457,221 @@ def test_a_failed_drift_correction_does_not_stop_localize(
     assert (tmp_path / "a_locs.hdf5").exists()
     assert (tmp_path / "b_locs.hdf5").exists()
     assert capsys.readouterr().out.count("Drift correction failed") == 2
+
+
+def _copy_testdata(tmp_path) -> str:
+    """The bundled test movie copied into ``tmp_path``."""
+    import shutil
+
+    data = os.path.join(os.path.dirname(__file__), "data")
+    for ext in (".raw", ".yaml"):
+        shutil.copy(
+            os.path.join(data, "testdata" + ext), tmp_path / ("movie" + ext)
+        )
+    return str(tmp_path / "movie.raw")
+
+
+def test_localize_multi_emitter(tmp_path, monkeypatch):
+    movie = _copy_testdata(tmp_path)
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-sigma",
+        131,
+        "--snr-threshold",
+        8,
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    locs, info = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert len(locs)
+    assert {"significance", "n_emitters"} <= set(locs.columns)
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Sigma (nm)"] == pytest.approx(131.0)
+    assert entry["SNR Threshold"] == 8.0
+    assert entry["Pixelsize"] == 160
+
+
+def test_localize_3d_takes_the_magnification_factor(tmp_path, monkeypatch):
+    """--magnification-factor overrides the calibration's own (0.79): z
+    scales with it, and the metadata records it."""
+    from tests.conftest import CALIB_3D
+
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "3d_calib.yaml")
+    io.save_calibration(calibration, dict(CALIB_3D))
+    z = {}
+    for factor in (0.79, 0.5):
+        _picasso(
+            monkeypatch,
+            "localize",
+            movie,
+            "-a",
+            "lq-3d",
+            "-zc",
+            calibration,
+            "-mf",
+            factor,
+            "-px",
+            160,
+            "-d",
+            0,
+            "--suffix",
+            f"_{factor}",
+        )
+        locs, info = io.load_locs(_out(movie, f"_{factor}_locs.hdf5"))
+        entry = next(e for e in info if e.get("Step") == "Fit 3D")
+        assert entry["Magnification factor"] == factor
+        z[factor] = locs["z"].to_numpy()
+    np.testing.assert_allclose(z[0.5], z[0.79] * 0.5 / 0.79, rtol=1e-5)
+
+
+def test_localize_multi_emitter_elliptical_gives_z(tmp_path, monkeypatch):
+    from tests.conftest import CALIB_3D
+
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "3d_calib.yaml")
+    io.save_calibration(calibration, dict(CALIB_3D))
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-model",
+        "elliptical",
+        "--psf-sigma",
+        131,
+        "-zc",
+        calibration,
+        "-mf",
+        0.6,
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    locs, info = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert len(locs)
+    assert {"z", "lpz"} <= set(locs.columns)
+    # a sigma in x and one in y per emitter
+    assert (locs["sx"] != locs["sy"]).any()
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "elliptical"
+    z_entry = next(e for e in info if e.get("Step") == "Fit 3D")
+    assert z_entry["Magnification factor"] == 0.6
+    assert z_entry["Z Calibration Path"] == calibration
+
+
+@pytest.mark.parametrize("gpu", [False, True])
+def test_localize_multi_emitter_fits_z_on_the_gpu(tmp_path, monkeypatch, gpu):
+    """--fit-z-gpu moves the z fit of --psf-model elliptical to the GPU."""
+    from picasso import zfit
+    from tests.conftest import CALIB_3D
+
+    devices = []
+    fit_z = zfit.zfit
+
+    def zfit_on(*args, gpu=False, **kwargs):
+        devices.append(gpu)
+        # serially on the CPU, which stands in for the GPU
+        return fit_z(*args, **(kwargs | {"parallel": False}))
+
+    monkeypatch.setattr(zfit, "CUDA_AVAILABLE", True)
+    monkeypatch.setattr(zfit, "zfit", zfit_on)
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "3d_calib.yaml")
+    io.save_calibration(calibration, dict(CALIB_3D))
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-model",
+        "elliptical",
+        "--psf-sigma",
+        131,
+        "-zc",
+        calibration,
+        "-mf",
+        0.6,
+        *(["--fit-z-gpu"] if gpu else []),
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    assert devices == [gpu]
+    locs, _ = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert "z" in locs.columns
+
+
+def test_localize_multi_emitter_spline_gives_z(tmp_path, monkeypatch):
+    from tests.test_multi_emitter import _spline_calibration
+
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "spline_calib.hdf5")
+    io.save_spline_calibration(calibration, _spline_calibration("spline-3d"))
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-model",
+        "spline",
+        "-sc",
+        calibration,
+        "--peak-search-z",
+        -200,
+        0,
+        200,
+        "--fit-region-size",
+        9,
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    locs, info = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert len(locs)
+    assert {"z", "lpz"} <= set(locs.columns)
+    assert "sx" not in locs.columns
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    assert entry["PSF Model"] == "spline"
+    assert entry["Peak Search z (nm)"] == [-200.0, 0.0, 200.0]
+    assert entry["Fit Region Size"] == 9
+    assert entry["Spline calibration path"] == calibration
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["-a", "lq"],
+        # z needs the sigmas in x and y of --psf-model elliptical
+        ["-zc", "calibration.yaml"],
+        ["--psf-model", "spherical", "-zc", "calibration.yaml"],
+        # a spline calibration is the PSF of --psf-model spline only
+        ["-sc", "spline.hdf5"],
+        ["--psf-model", "spline"],
+        ["--psf-model", "spline", "-sc", "a.hdf5", "-sc", "b.hdf5"],
+        ["--psf-model", "spline", "-sc", "spline.hdf5", "-zc", "c.yaml"],
+        # the fit region of a Gaussian follows its sigma
+        ["--fit-region-size", 11],
+        ["--regions-separately", "-r", 0, 0, 16, 32, "-r", 16, 0, 32, 32],
+    ],
+)
+def test_localize_multi_emitter_refuses(tmp_path, monkeypatch, options):
+    movie = _copy_testdata(tmp_path)
+    with pytest.raises(SystemExit, match="multi-emitter"):
+        _picasso(
+            monkeypatch,
+            "localize",
+            movie,
+            "--multi-emitter",
+            *options,
+            "-px",
+            160,
+        )

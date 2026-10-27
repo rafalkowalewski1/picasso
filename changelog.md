@@ -1,6 +1,6 @@
 # Changelog
 
-Last change: 25-OCT-2026 CEST
+Last change: 26-OCT-2026 CEST
 
 ## 1.0.0
 
@@ -98,6 +98,7 @@ Last change: 25-OCT-2026 CEST
 - Fixed: *Export ROI for Imaris* showed pixels brighter than the contrast maximum as dark, and failed, after deleting an existing file, with all channels hidden or with channels with and without z.
 
 ### Localize
+- **Multi-emitter fitting:** the new fit model *Overlapping emitters (3D-DAOSTORM)* localizes emitters closer than about 2 PSF σ in the same frame separately. The 3D-DAOSTORM analysis of Babcock et al. (*Optical Nanoscopy* 2012), ported from storm-analysis. See the [documentation](https://picassosr.readthedocs.io/en/latest/localize/multi-emitter.html).
 - New spot identification method: B-spline wavelet segmentation (Izeddin et al., *Opt. Express* 2012), see the [documentation](https://picassosr.readthedocs.io/en/latest/localize/identification.html#localize-wavelet).
 - New column `reduced_chi_square` for MLE and least-squares fits: the goodness of fit normalized for the box size and the photon counts, about 1 for a good fit (`picasso.localize.reduced_chi_square`).
 - The quantum efficiency is no longer shown in the Parameters dialog. A `Quantum Efficiency` entry in the camera config, `--qe` in `picasso localize` and a `Qe` key in `camera_info` are still accepted and ignored. `camera_parameters` of the movie classes in `picasso.io` no longer returns `qe`. The `Emission Wavelength` dropdown now lists the wavelengths of `Channel Device` > `Emission Wavelengths` and of the wavelength-keyed calibrations in the config (it appeared only when the config had a `Quantum Efficiency` mapping before, so wavelength-keyed calibrations were not selected with the template config).
@@ -185,6 +186,7 @@ The [migration guide](https://picassosr.readthedocs.io/en/latest/migration.html)
 - Fixed in Picasso Server: the watcher localized no movie (each failed with an error in its log); it also localized movies again that had localization files, localized the same movie at every check when the folder was entered as a relative path, and stopped when Localize exited on a movie. The *Watcher* page failed with 3D in more than one parameter group and when the logfile of a listed watcher was missing.
 - Picasso Server's watcher takes the camera pixel size from the movie's metadata, else the camera config, as `picasso localize`, unless one is entered; it used 130 nm for every movie.
 - Picasso: Simulate has a new cleaner layout.
+- Simulate saves the emitters it simulated next to each movie (`<movie>_ground_truth.hdf5`): a localization file with the true position and photons of every emitter in every frame, which opens in Render next to the localizations fitted to the movie (`picasso.simulate.ground_truth_locs`).
 - Fixed: Simulate simulated a different photon rate than it showed. Until the power density or the photon detection rate was changed, a new window simulated 5,300 photons per frame (an outdated default) while showing 22,750, and photon rates above 1,000 photons per ms were capped. **Simulations with the default settings are therefore about 4x brighter than before**; set the `Photon detection rate` to ~300 for the previous brightness.
 - Fixed: Simulate's `File > Load settings from previous simulation...` failed with an error, leaving the settings half loaded, when the selected .yaml file was not written by Simulate. Such files are now reported and change nothing.
 - Fixed: Simulate's `File > Import handles...` crashed for .yaml files (the structure landed in the corner of the field of view, outside the frame) and ignored their z coordinates.

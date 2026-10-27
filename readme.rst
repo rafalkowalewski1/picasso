@@ -128,6 +128,9 @@ Many of the functionalities provided by Picasso were published independently, pl
    * - B-spline wavelet spot identification
      - Izeddin et al., Opt. Express, 2012
      - `10.1364/OE.20.002081 <https://doi.org/10.1364/OE.20.002081>`__
+   * - Multi-emitter fitting (3D-DAOSTORM). A port of storm-analysis, see the `storm-analysis license <https://github.com/jungmannlab/picasso/blob/master/LICENSES/storm-analysis-LICENSE.txt>`__; its spline PSF is implemented from the paper
+     - Babcock et al., Opt. Nanoscopy, 2012; Babcock & Zhuang, Sci. Rep., 2017
+     - `10.1186/2192-2853-1-6 <https://doi.org/10.1186/2192-2853-1-6>`__, `10.1038/s41598-017-00622-w <https://doi.org/10.1038/s41598-017-00622-w>`__
    * - sCMOS pixel-dependent noise modeling
      - Huang et al., Nat. Methods, 2013
      - `10.1038/nmeth.2488 <https://doi.org/10.1038/nmeth.2488>`__
@@ -143,6 +146,9 @@ Many of the functionalities provided by Picasso were published independently, pl
    * - Theoretical axial localization precision (``lpz``, Gaussian)
      - Kowalewski et al., Nat. Commun., 2026
      - `10.1038/s41467-026-70198-5 <https://doi.org/10.1038/s41467-026-70198-5>`__
+   * - Theoretical lateral localization precision of overlapping emitters (``lpx`` / ``lpy``, multi-emitter fitting)
+     - Huang et al., Biomed. Opt. Express, 2011
+     - `10.1364/BOE.2.001377 <https://doi.org/10.1364/BOE.2.001377>`__
    * - Quad-tree adaptive histogram rendering
      - Baddeley et al., Microsc. Microanal., 2010
      - `10.1017/S143192760999122X <https://doi.org/10.1017/S143192760999122X>`__

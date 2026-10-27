@@ -612,6 +612,58 @@ def test_frc_plot_without_a_calculation(window2, answers):
     assert getattr(window2.info_dialog, "frc_window", None) is None
 
 
+def test_frc_records_nena(window, answers, monkeypatch):
+    """FRC calculates NeNA once; it is then shown and reused."""
+    answers.record_messages()
+    info_dialog = window.info_dialog
+    calls = []
+    nena = gui_render.postprocess.nena
+    monkeypatch.setattr(
+        gui_render.postprocess,
+        "nena",
+        lambda *a, **k: calls.append(1) or nena(*a, **k),
+    )
+    info_dialog.calculate_frc_resolution()
+    assert len(calls) == 1
+    assert "NeNA (nm)" in window.view.infos[0][-1]
+    assert info_dialog.nena_label.text().endswith("nm")
+    info_dialog.calculate_frc_resolution()
+    assert len(calls) == 1
+
+
+def test_frc_uses_nena_from_metadata(window, answers, monkeypatch):
+    answers.record_messages()
+    window.view.infos[0].append({"Step": "Render : NeNA", "NeNA (nm)": 8.0})
+    lps = []
+    frc = gui_render.postprocess.frc
+    monkeypatch.setattr(
+        gui_render.postprocess,
+        "frc",
+        lambda *a, **k: lps.append(k["lp"]) or frc(*a, **k),
+    )
+    window.info_dialog.calculate_frc_resolution()
+    assert lps == [8.0]
+
+
+def test_frc_rois_reuse_nena(window, answers, qt_offscreen, monkeypatch):
+    answers.record_messages()
+    info_dialog = window.info_dialog
+    info_dialog.frc_min_locs.setValue(100)
+    window.view.infos[0].append({"Step": "Render : NeNA", "NeNA (nm)": 8.0})
+    lps = []
+    frc_rois = gui_render.postprocess.frc_rois
+    monkeypatch.setattr(
+        gui_render.postprocess,
+        "frc_rois",
+        lambda *a, **k: lps.append(k["lp"]) or frc_rois(*a, **k),
+    )
+    info_dialog.calculate_frc_rois()
+    _wait_for_tasks(qt_offscreen)
+    assert lps == [8.0]
+    if info_dialog.frc_rois_window is not None:
+        info_dialog.frc_rois_window.close()
+
+
 @pytest.fixture
 def frc_rois(window, answers, qt_offscreen):
     """The review window of FRC in 4 ROIs of 2 um."""

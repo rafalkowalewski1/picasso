@@ -2174,6 +2174,24 @@ def _localize_process_file(
     z_params, lateral_transforms = _localize_legacy_calibrations(
         args, z_params, lateral_transforms, cam_info["Pixelsize"]
     )
+    if args.multi_emitter:
+        return [
+            _localize_multi_emitter(
+                movie,
+                info,
+                path,
+                args,
+                box,
+                min_net_gradient,
+                roi,
+                frame_bounds,
+                cam_info,
+                camera_calibration,
+                z_params,
+                lateral_transforms,
+                spline_calibration,
+            )
+        ]
     if region_fit is not None:
         return _localize_regions(
             movie,
@@ -2220,6 +2238,98 @@ def _localize_process_file(
         spline_calibration,
     )
     return [saved]
+
+
+def _multi_emitter_parameters_from_args(args: argparse.Namespace):
+    """The ``localize.MultiEmitterParameters`` given on the command
+    line."""
+    from .localize import MultiEmitterParameters
+
+    return MultiEmitterParameters(
+        psf_model=args.psf_model,
+        snr_threshold=args.snr_threshold,
+        psf_sigma=args.psf_sigma,
+        max_cycles=args.max_cycles,
+        peak_radius=args.peak_radius,
+        background_sigma=args.background_sigma,
+        peak_search_z=tuple(args.peak_search_z),
+        fit_region_size=args.fit_region_size,
+    )
+
+
+def _localize_multi_emitter(
+    movie,
+    info: list[dict],
+    path: str,
+    args: argparse.Namespace,
+    box: int,
+    min_net_gradient: float | list[float],
+    roi,
+    frame_bounds,
+    camera_info: dict,
+    camera_calibration: dict | None,
+    z_params,
+    lateral_transforms: list | None,
+    spline_calibration: dict | None,
+) -> str:
+    """Fit one movie with the multi-emitter fitting (``--multi-emitter``),
+    then save it and undrift it as any other fit. With ``z_params`` (an
+    elliptical fit, see ``_check_multi_emitter_args``), z is read from the
+    fitted sigmas, and the z fit applies the lateral corrections. With
+    ``spline_calibration`` (``--psf-model spline``), it is the PSF, and
+    its own lateral corrections are not applied again.
+
+    Returns
+    -------
+    out_path : str
+        Path of the localization file written.
+    """
+    from .localize import localize_multi_emitter
+
+    seed_identification = None
+    if args.seed_identification:
+        seed_identification = _identification_parameters_from_args(
+            args, box, min_net_gradient
+        )
+    calibration_3d = None
+    if z_params is not None:
+        zpath, magnification_factor, z_calibration = z_params
+        calibration_3d = dict(z_calibration)
+        calibration_3d["Magnification factor"] = magnification_factor
+    locs, info = localize_multi_emitter(
+        movie,
+        info,
+        camera_info=camera_info,
+        parameters=_multi_emitter_parameters_from_args(args),
+        roi=roi,
+        frame_bounds=frame_bounds,
+        seed_identification=seed_identification,
+        camera_calibration=camera_calibration,
+        calibration_3d=calibration_3d,
+        spline_calibration=spline_calibration,
+        lateral_transforms=lateral_transforms if calibration_3d else None,
+        parallel=True,
+        fit_z_gpu=args.fit_z_gpu,
+        progress="console",
+    )
+    entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")
+    if spline_calibration is None:
+        print(
+            f"PSF sigma: {entry['PSF Sigma (nm)']:.1f} nm"
+            + (" (estimated)" if entry["PSF Sigma Estimated"] else "")
+            + ("" if args.psf_model == "fixed" else ", the start of the fit")
+        )
+    if calibration_3d is not None:
+        info[-1]["Z Calibration Path"] = zpath
+        _print_lateral_report(
+            info[-1].get("Lateral corrections applied"),
+            info[-1].get("Lateral corrections skipped"),
+        )
+        # applied by the z fit
+        lateral_transforms = None
+    return _localize_finish(
+        locs, info, path, args, None, lateral_transforms, spline_calibration
+    )
 
 
 def _localize_region_fit(
@@ -2437,7 +2547,6 @@ def _localize_finish(
         from . import zfit
 
         zpath, magnification_factor, z_calibration = z_params
-        z_calibration["Magnification Factor"] = magnification_factor
         print("------------------------------------------")
         print("Fitting 3D...")
         method = "gausslq" if "mle" not in method_name else "gaussmle"
@@ -2455,6 +2564,8 @@ def _localize_finish(
                 locs=locs,
                 info=info,
                 calibration=z_calibration,
+                # --magnification-factor, over the calibration's own
+                magnification_factor=magnification_factor,
                 fitting_method=method,
                 filter=0,
                 lateral_transforms=lateral_transforms,
@@ -2526,6 +2637,46 @@ def _localize_finish(
     return out_path
 
 
+def _check_multi_emitter_args(args: argparse.Namespace) -> None:
+    """Refuse the options the multi-emitter fitting cannot honor: it fits
+    by maximum likelihood, on the CPU, one region of one channel at a
+    time, takes a spline calibration only as the PSF of --psf-model
+    spline, and gives z otherwise only with sigmas in x and y."""
+    fit_methods = args.fit_method or ["mle"]
+    if fit_methods != ["mle"]:
+        raise SystemExit(
+            "--multi-emitter fits by maximum likelihood; leave out "
+            "--fit-method."
+        )
+    n_splines = len(args.spline_calibration or [])
+    if args.psf_model == "spline" and n_splines != 1:
+        raise SystemExit(
+            "--multi-emitter --psf-model spline needs one "
+            "--spline-calibration, the PSF it fits."
+        )
+    if args.psf_model != "spline" and n_splines:
+        raise SystemExit(
+            "--multi-emitter fits a Gaussian unless --psf-model spline; "
+            "add it, or leave out --spline-calibration."
+        )
+    if args.psf_model != "spline" and args.fit_region_size is not None:
+        raise SystemExit(
+            "--multi-emitter takes the fit region of a Gaussian from its "
+            "sigma; leave out --fit-region-size, or add --psf-model spline."
+        )
+    if args.zc and args.psf_model != "elliptical":
+        raise SystemExit(
+            "--multi-emitter reads z from the sigmas in x and y it fits "
+            "with --psf-model elliptical; add it, or leave out "
+            "--z-calibration."
+        )
+    if args.regions_separately:
+        raise SystemExit(
+            "--multi-emitter cannot fit regions separately yet; leave out "
+            "--regions-separately."
+        )
+
+
 def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
     """Localize molecules in microscopy images.
 
@@ -2568,6 +2719,10 @@ def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
     # regions are fitted separately, where they are one per region; the
     # first one stands for the run as a whole (the GPU check, the 3D and
     # spline branches below).
+    if getattr(args, "multi_emitter", False):
+        _check_multi_emitter_args(args)
+    else:
+        args.multi_emitter = False
     fit_methods = args.fit_method or ["mle"]
     args.fit_method = fit_methods[0]
     gradients = args.gradient or [5000]
@@ -2649,7 +2804,9 @@ def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
     max_iterations = args.max_iterations
 
     z_params = None
-    if "-3d" in args.fit_method:
+    # the multi-emitter fit reads z from the sigmas of --psf-model
+    # elliptical (see _check_multi_emitter_args)
+    if "-3d" in args.fit_method or (args.multi_emitter and args.zc):
         z_params = _localize_load_3d_calibration(args)
         if args.fit_z_gpu:
             from . import zfit
@@ -2665,7 +2822,9 @@ def _localize(args: argparse.Namespace) -> list[str]:  # noqa: C901
                 args.fit_z_gpu = False
 
     spline_calibrations = []
-    if any(method.startswith("spline") for method in fit_methods):
+    if any(method.startswith("spline") for method in fit_methods) or (
+        args.multi_emitter and args.psf_model == "spline"
+    ):
         from .io import load_spline_calibration
 
         if not spline_paths:
@@ -5220,6 +5379,109 @@ def _build_parser() -> (
         "--database",
         action="store_true",
         help="add the run to the local database",
+    )
+    multi_emitter = localize_parser.add_argument_group(
+        "multi-emitter fitting",
+        "fit all emitters of a frame at once, so that emitters closer than"
+        " about 2 PSF sigma are localized separately (3D-DAOSTORM,"
+        " Babcock et al., Optical Nanoscopy 2012). The peaks are found in"
+        " the residual of the fit, so the identification options are not"
+        " used, except with --seed-identification",
+    )
+    multi_emitter.add_argument(
+        "-me",
+        "--multi-emitter",
+        action="store_true",
+        help="fit overlapping emitters instead of one emitter per box",
+    )
+    multi_emitter.add_argument(
+        "--psf-model",
+        choices=["fixed", "spherical", "elliptical", "spline"],
+        default="fixed",
+        help=(
+            "the PSF of each emitter: a Gaussian whose sigma is fixed, the"
+            " same for all (default), spherical, one fitted sigma per"
+            " emitter, or elliptical, a fitted sigma in x and one in y per"
+            " emitter, whose z --z-calibration then gives (storm-analysis"
+            " models 2dfixed, 2d and 3d); or spline, the PSF of the"
+            " --spline-calibration, which gives z directly for a 3D one"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--snr-threshold",
+        type=float,
+        default=15.0,
+        help=(
+            "peak threshold, in units of the signal-to-noise ratio, and the"
+            " minimum significance of an emitter (default 15)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--psf-sigma",
+        type=float,
+        default=None,
+        help=(
+            "standard deviation of the PSF in nm: fixed in the fit, or the"
+            " start of a fitted one. Default: estimated from the movie"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--max-cycles",
+        type=int,
+        default=20,
+        help=(
+            "most cycles of finding, fitting and subtracting per frame"
+            " (default 20)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--peak-radius",
+        type=float,
+        default=5.0,
+        help=(
+            "radius (camera pixels) within which a new peak must be the"
+            " maximum of the residual (default 5)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--background-sigma",
+        type=float,
+        default=8.0,
+        help=(
+            "sigma (camera pixels) of the Gaussian low pass that estimates"
+            " the background (default 8)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--peak-search-z",
+        type=float,
+        nargs="+",
+        default=[0.0],
+        help=(
+            "z (nm) at which --psf-model spline with a 3D calibration"
+            " filters the residual to find peaks; a new emitter starts at"
+            " the z where it is brightest (default 0)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--fit-region-size",
+        type=int,
+        default=None,
+        help=(
+            "side length (camera pixels) of the disc each emitter is fitted"
+            " in with --psf-model spline, cropped from the calibration: at"
+            " most its box less 2. Default: from the calibration's PSF"
+            " sigma, 8 sigma (12 for a 3D calibration)"
+        ),
+    )
+    multi_emitter.add_argument(
+        "--seed-identification",
+        action="store_true",
+        help=(
+            "start the fit of each frame from the spots the identification"
+            " options find (--gradient, --box-side-length, the wavelet and"
+            " filter options), instead of the peak finder's first cycle"
+        ),
     )
 
     # camera-calibrate: per-pixel sCMOS offset, variance and gain maps
