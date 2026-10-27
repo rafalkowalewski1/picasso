@@ -172,6 +172,33 @@ def test_nena_button(window, qt_offscreen):
     assert info_dialog.nena_label.text().endswith("nm")
 
 
+def test_nena_follows_precision_channel(
+    window, qt_offscreen, tmp_path, monkeypatch
+):
+    """NeNA is shown for the channel selected for the median precision,
+    and calculating it selects the chosen channel there."""
+    info_dialog = window.info_dialog
+    path = str(tmp_path / "locs2.hdf5")
+    window.view.add(path, _locs(seed=1), _info(), render_=False)
+    info_dialog.update_fit_precision()
+    combo = info_dialog.fit_precision_channel
+    assert combo.count() == 2
+    combo.setCurrentIndex(0)
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog, "getItem", lambda *a, **k: (path, True)
+    )
+    info_dialog.calculate_nena_lp()
+    assert combo.currentIndex() == 1
+    _wait_for_tasks(qt_offscreen)
+    assert info_dialog.nena_label.text().endswith("nm")
+    assert info_dialog.nena_result
+    combo.setCurrentIndex(0)
+    assert info_dialog.nena_label.text() == "-"
+    assert info_dialog.lp is None
+    combo.setCurrentIndex(1)
+    assert info_dialog.nena_label.text().endswith("nm")
+
+
 def test_rcc_applies_drift(window, qt_offscreen, monkeypatch):
     monkeypatch.setattr(
         QtWidgets.QInputDialog, "getInt", lambda *a, **k: (500, True)
