@@ -2833,14 +2833,15 @@ def frc_rois(
     roi_size: float = 5000.0,
     min_locs: int = 1000,
     random_seed: int = 42,
+    lp: float | None = None,
     progress: lib.Progress | Literal["console"] | None = None,
 ) -> dict:
     """Calculate the FRC resolution in several random ROIs.
 
     Places up to ``n_rois`` non-overlapping square ROIs in ``viewport``
     (see ``lib.select_frc_rois``) and runs ``frc`` in each of them. The
-    image bin size is set by the NeNA of all ``locs``, computed once,
-    so that the ROIs are comparable. The spread of the resolutions
+    image bin size is set by the NeNA of all ``locs``, computed once
+    (unless given as ``lp``), so that the ROIs are comparable. The spread of the resolutions
     across ROIs estimates the uncertainty of the FRC resolution.
 
     Parameters
@@ -2861,12 +2862,16 @@ def frc_rois(
     random_seed : int, optional
         Random seed for the ROI placement and the splitting into
         halves. Default is 42.
+    lp : float or None, optional
+        Localization precision (nm) that sets the bin size of the
+        rendered images (``lp / 2``), e.g. a NeNA calculated before. If
+        None (default), NeNA of ``locs`` is calculated.
     progress : lib.Progress, "console" or None, optional
         Progress tracker, see ``picasso.lib.Progress``: e.g. a
         ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
         or None for no reporting. Reports "Calculating NeNA" over the
-        localizations, then "Calculating FRC" over the ROIs. Default is
-        None.
+        localizations (unless ``lp`` is given), then "Calculating FRC"
+        over the ROIs. Default is None.
 
     Returns
     -------
@@ -2875,7 +2880,7 @@ def frc_rois(
         "n_locs" (localizations per ROI), "frc_results" (list of
         ``frc`` results, one per ROI), "resolutions" (in nm, NaN where
         the FRC curve does not cross the 1/7 threshold) and "lp" (NeNA
-        in nm).
+        in nm, or ``lp`` if given).
     """
     rois = lib.select_frc_rois(
         locs,
@@ -2887,9 +2892,12 @@ def frc_rois(
         random_seed=random_seed,
     )
     with lib.tracked_progress(
-        progress, "Calculating NeNA", unit="loc"
+        progress,
+        "Calculating NeNA" if lp is None else "Calculating FRC",
+        unit="loc",
     ) as progress:
-        lp = nena(locs, info, progress=progress)[1]
+        if lp is None:
+            lp = nena(locs, info, progress=progress)[1]
         x = locs["x"].to_numpy()
         y = locs["y"].to_numpy()
         n_locs = []

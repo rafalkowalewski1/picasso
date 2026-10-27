@@ -1251,6 +1251,25 @@ class TestFrcRois:
         assert tracker.phases[1].maximum == n
         pd.testing.assert_frame_equal(locs, ref)
 
+    def test_given_lp_skips_nena(self, locs, info, monkeypatch):
+        def no_nena(*args, **kwargs):
+            raise AssertionError("NeNA calculated")
+
+        monkeypatch.setattr(postprocess, "nena", no_nena)
+        tracker = RecordingProgress()
+        result = postprocess.frc_rois(
+            locs,
+            info,
+            viewport=((10 * PX, 10 * PX), (20 * PX, 20 * PX)),
+            n_rois=4,
+            roi_size=260,
+            min_locs=20,
+            lp=12.0,
+            progress=tracker,
+        )
+        assert result["lp"] == 12.0
+        assert_phases(tracker, ["Calculating FRC"])
+
 
 class TestPairCorrelation:
     def test_shape(self, locs, info):

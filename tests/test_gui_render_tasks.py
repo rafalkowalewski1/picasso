@@ -188,8 +188,8 @@ def test_nena_follows_precision_channel(
         QtWidgets.QInputDialog, "getItem", lambda *a, **k: (path, True)
     )
     info_dialog.calculate_nena_lp()
-    assert combo.currentIndex() == 1
     _wait_for_tasks(qt_offscreen)
+    assert combo.currentIndex() == 1
     assert info_dialog.nena_label.text().endswith("nm")
     assert info_dialog.nena_result
     combo.setCurrentIndex(0)
