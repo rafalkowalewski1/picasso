@@ -2568,8 +2568,9 @@ def identify(
         :class:`SummedChannelsMovie`) is filtered and searched in that
         rectangle only, and the ROIs are clipped to it.
     info : list of dicts or None, optional
-        Metadata of the movie, e.g., from ``io.load_movie``. Default is
-        None, i.e., none.
+        Metadata of the movie, e.g., from ``io.load_movie``. Default is None,
+        i.e., no earlier metadata, so the returned metadata holds only the
+        entry of this step.
     parameters : IdentificationParameters
         The identification method with its threshold(s), the box size and
         the filters applied before identifying. The filters apply to the
@@ -2917,8 +2918,9 @@ def identify_multichannel_sum(
         One movie per channel, reference first (or at ``reference``). For
         split-FOV data pass the single movie repeated once per region.
     info : list of dicts or None, optional
-        Metadata of the reference channel's movie. Default is None, i.e.,
-        none.
+        Metadata of the reference channel's movie. Default is None, i.e., no
+        earlier metadata, so the returned metadata holds only the entry of this
+        step.
     transforms : list of lib.FloatArray2D
         One ``(2, 3)`` reference->channel affine per channel; see
         :class:`SummedChannelsMovie`.
@@ -4015,8 +4017,9 @@ def fit(
     movie : LoadedMovie
         The input movie, as loaded by ``picasso.io.load_movie``.
     info : list of dicts or None, optional
-        Metadata of the identifications (see :func:`identify`) or of the
-        movie. Default is None, i.e., none.
+        Metadata of the identifications (see :func:`identify`) or of the movie.
+        Default is None, i.e., no earlier metadata, so the returned metadata
+        holds only the entry of this step.
     camera_info : dict
         A dictionary containing camera information: "Baseline",
         "Sensitivity", "Gain" and "Pixelsize".
@@ -5604,7 +5607,8 @@ def fit_gauss_multichannel(
         order must match the registration's channels.
     info : list of dicts or None, optional
         Metadata of the reference channel's identifications (see
-        :func:`identify`) or movie. Default is None, i.e., none.
+        :func:`identify`) or movie. Default is None, i.e., no earlier metadata,
+        so the returned metadata holds only the entry of this step.
     camera_infos : list of dict
         One camera-info dict per channel.
     identifications : pd.DataFrame
@@ -5798,7 +5802,8 @@ def fit_gauss_split_fov(
         The single loaded movie.
     info : list of dicts or None, optional
         Metadata of the reference channel's identifications (see
-        :func:`identify`) or movie. Default is None, i.e., none.
+        :func:`identify`) or movie. Default is None, i.e., no earlier metadata,
+        so the returned metadata holds only the entry of this step.
     camera_info : dict
         Camera info of ``movie``.
     identifications : pd.DataFrame
@@ -7975,7 +7980,8 @@ def fit_spline_multichannel(
         order must match the calibration's channels.
     info : list of dicts or None, optional
         Metadata of the reference channel's identifications (see
-        :func:`identify`) or movie. Default is None, i.e., none.
+        :func:`identify`) or movie. Default is None, i.e., no earlier metadata,
+        so the returned metadata holds only the entry of this step.
     camera_infos : list of dict
         One camera-info dict per channel.
     identifications : pd.DataFrame
@@ -8233,7 +8239,8 @@ def fit_spline_multichannel_ratiometric(
         in :func:`fit_spline_multichannel`.
     info : list of dicts or None, optional
         Metadata of the reference channel's identifications (see
-        :func:`identify`) or movie. Default is None, i.e., none.
+        :func:`identify`) or movie. Default is None, i.e., no earlier metadata,
+        so the returned metadata holds only the entry of this step.
     camera_infos : list of dict
         One camera-info dict per channel.
     identifications : pd.DataFrame
@@ -8915,7 +8922,8 @@ def fit_spline_split_fov(
         The single loaded movie.
     info : list of dicts or None, optional
         Metadata of the reference channel's identifications (see
-        :func:`identify`) or movie. Default is None, i.e., none.
+        :func:`identify`) or movie. Default is None, i.e., no earlier metadata,
+        so the returned metadata holds only the entry of this step.
     camera_info : dict
         Camera info of ``movie``.
     identifications : pd.DataFrame
@@ -9331,8 +9339,9 @@ def fit_independent(
     movies : list
         One movie per channel, as loaded by ``picasso.io.load_movie``.
     infos : list or None, optional
-        Metadata of each channel's identifications (see :func:`identify`)
-        or movie, or None. Default is None, i.e., none.
+        Metadata of each channel's identifications (see :func:`identify`) or
+        movie, or None. Default is None, i.e., no earlier metadata, so each
+        channel's returned metadata holds only the entry of the fit.
     camera_infos : list of dict or dict
         One camera-info dict per channel, or a single one shared by all.
     identifications : list of pd.DataFrame
@@ -10450,7 +10459,8 @@ def localize_multi_emitter(
     movie : LoadedMovie
         The input movie, as loaded by ``picasso.io.load_movie``.
     info : list of dicts or None, optional
-        Metadata of the movie. Default is None, i.e., none.
+        Metadata of the movie. Default is None, i.e., no earlier metadata, so
+        the returned metadata holds only the entry of this step.
     camera_info : dict
         Camera information: "Baseline", "Sensitivity", "Gain" and
         "Pixelsize".
