@@ -30,7 +30,7 @@ Consider the limits:
 - **Emitters out of focus.** With a fixed σ, a spot wider than the PSF is fitted as several narrow emitters. On the SMLM Challenge's 1.5 µm thick sample, emitters more than 200 nm out of focus got about one false neighbor each. A fitted σ does not split them, but it finds fewer emitters (see :ref:`localize-multi-emitter-models`). For 3D data, use the ``Fitted sx and sy`` model or a 3D spline calibration.
 - **Bright emitters and non-Gaussian PSFs.** The rings of a real PSF around a very bright emitter can be found as faint emitters next to it. Raise the ``SNR threshold``, or filter by ``significance`` afterwards (see :ref:`filter-expression`).
 - **Structured background.** Out-of-focus fluorescence that changes from frame to frame is found as dim emitters wherever the background filter does not follow it. Tune the threshold with the preview, or filter by ``significance`` afterwards.
-- It runs on the CPU, frame by frame on several threads, and fits one channel at a time (no multichannel or split-FOV fitting yet).
+- It runs on the CPU, frame by frame on several threads, and fits one channel at a time (no multichannel or split-FOV fitting yet). Only the z fit of an astigmatic calibration runs on a CUDA GPU: in Picasso: Localize whenever one is available, on the command line with ``--fit-z-gpu``.
 
 .. _localize-multi-emitter-models:
 
@@ -77,7 +77,7 @@ A fitted σ starts at the ``PSF sigma`` and stays within 0.5 to 5 times it, and 
 In Picasso: Localize
 --------------------
 
-In the ``Parameters`` dialog, under ``Fit Settings``, select the model ``Overlapping emitters``. The optimizer is MLE; the identification settings (box, method, filters) disappear, since the fit finds the spots itself, while the ROIs and the frame range still apply. Its settings are under ``Overlapping emitters``:
+In the ``Parameters`` dialog, under ``Fit Settings``, select the model ``Overlapping emitters (3D-DAOSTORM)``. The optimizer is MLE; the identification settings (box, method, filters) disappear, since the fit finds the spots itself, while the ROIs and the frame range still apply. Its settings are under ``Overlapping emitters``:
 
 - ``PSF model`` (default ``Fixed sigma``): the PSF of each emitter, see :ref:`localize-multi-emitter-models`. With ``Fitted sx and sy``, the ``3D via Astigmatism`` section appears, to get z as for the single-emitter fits (see :ref:`localize-3d-calibration`). With ``Experimental PSF (cubic spline)``, the ``Experimental PSF (spline)`` section appears instead, to load the calibration (see :ref:`localize-spline-fitting`), and the ``PSF sigma`` gives way to the ``Fit region`` (``Auto`` by default) and, for a 3D calibration, the ``Peak search z (nm)``: the z of the filter planes, separated by commas.
 - ``SNR threshold`` (default 15): the peak threshold and the minimum significance of an emitter. storm-analysis uses 6, which on real data also finds dim spots on out-of-focus background; on dense frames with a flat background, lower values (down to 6) find more emitters.

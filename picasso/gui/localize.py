@@ -326,7 +326,7 @@ GAUSS_LINK_PHOTONS_TIP = (
 
 # The fit model that fits overlapping emitters, frame by frame; it finds
 # the spots itself, so it needs no identification.
-MULTI_EMITTER_MODEL = "Overlapping emitters"
+MULTI_EMITTER_MODEL = "Overlapping emitters (3D-DAOSTORM)"
 # its code in ``FIT_MODELS``
 MULTI_EMITTER_CODE = "multi-emitter"
 # its PSF models (``localize.MultiEmitterParameters.psf_model``), by the
@@ -394,7 +394,7 @@ MODEL_TOOLTIP = (
     "Useful for tilted/anisotropic PSFs.\n\n"
     "2D spherical Gaussian:\n"
     "Gaussian with one common width for x and y.\n\n"
-    "Overlapping emitters:\n"
+    "Overlapping emitters (3D-DAOSTORM):\n"
     "Fits all emitters of a frame at once, so that emitters closer than\n"
     "about 2 PSF sigma are localized separately. Finds the spots itself\n"
     "(no identification), with a Gaussian PSF whose sigma is fixed for\n"
@@ -4709,6 +4709,8 @@ class ParametersDialog(lib.Dialog):
         self.snr_threshold_spinbox.setDecimals(1)
         self.snr_threshold_spinbox.setSingleStep(0.5)
         self.snr_threshold_spinbox.setValue(residualfit.THRESHOLD)
+        # the preview fits once the value is typed, not per keystroke
+        self.snr_threshold_spinbox.setKeyboardTracking(False)
         self.snr_threshold_spinbox.setToolTip(snr_tip)
         self.snr_threshold_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
@@ -4731,6 +4733,7 @@ class ParametersDialog(lib.Dialog):
         self.psf_sigma_spinbox.setDecimals(1)
         # 0.9 camera pixels of 130 nm
         self.psf_sigma_spinbox.setValue(117.0)
+        self.psf_sigma_spinbox.setKeyboardTracking(False)
         self.psf_sigma_spinbox.setToolTip(sigma_tip)
         self.psf_sigma_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
@@ -4753,6 +4756,10 @@ class ParametersDialog(lib.Dialog):
         self.max_cycles_spinbox.setRange(1, 1000)
         self.max_cycles_spinbox.setValue(residualfit.N_CYCLES)
         self.max_cycles_spinbox.setToolTip(cycles_tip)
+        self.max_cycles_spinbox.setKeyboardTracking(False)
+        self.max_cycles_spinbox.valueChanged.connect(
+            self.on_multi_emitter_changed
+        )
         me_grid.addWidget(self.max_cycles_spinbox, 3, 1)
         radius_label = QtWidgets.QLabel("Peak search radius:")
         radius_tip = (
@@ -4765,6 +4772,7 @@ class ParametersDialog(lib.Dialog):
         self.peak_radius_spinbox.setRange(1.0, 50.0)
         self.peak_radius_spinbox.setDecimals(1)
         self.peak_radius_spinbox.setValue(residualfit.PEAK_RADIUS)
+        self.peak_radius_spinbox.setKeyboardTracking(False)
         self.peak_radius_spinbox.setToolTip(radius_tip)
         self.peak_radius_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
@@ -4781,6 +4789,7 @@ class ParametersDialog(lib.Dialog):
         self.background_sigma_spinbox.setRange(1.0, 100.0)
         self.background_sigma_spinbox.setDecimals(1)
         self.background_sigma_spinbox.setValue(residualfit.BACKGROUND_SIGMA)
+        self.background_sigma_spinbox.setKeyboardTracking(False)
         self.background_sigma_spinbox.setToolTip(background_tip)
         self.background_sigma_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
@@ -4824,6 +4833,7 @@ class ParametersDialog(lib.Dialog):
         self.fit_region_spinbox.setSuffix(" px")
         self.fit_region_spinbox.setSpecialValueText("Auto")
         self.fit_region_spinbox.setValue(2)
+        self.fit_region_spinbox.setKeyboardTracking(False)
         self.fit_region_spinbox.setToolTip(fit_region_tip)
         self.fit_region_spinbox.valueChanged.connect(
             self.on_multi_emitter_changed
@@ -5277,8 +5287,13 @@ class ParametersDialog(lib.Dialog):
         """Repopulate the optimizer combobox for the selected model and
         show/hide the optimizer controls. Models without an optimizer
         (e.g. averaging) hide the optimizer row and its parameters. The
-        dialog grows or shrinks with the settings shown."""
+        dialog grows or shrinks with the settings shown. The frame is
+        redrawn, since the multi-emitter fit shows neither the
+        identifications nor, with its preview, the localizations."""
         lib.resize_with_contents(self, self.scroll_area, self._show_fit_model)
+        # this dialog is created before the window's movie attribute
+        if getattr(self.window, "movie", None) is not None:
+            self.window.draw_frame()
 
     def _show_fit_model(self) -> None:
         """Show the optimizers and settings of the selected fit model,
@@ -5351,6 +5366,10 @@ class ParametersDialog(lib.Dialog):
             self.channel_registration_groupbox.setVisible(needs_registration)
         if self.multi_emitter_groupbox is not None:
             self.multi_emitter_groupbox.setVisible(multi_emitter)
+        if getattr(self, "gpu_checkbox", None) is not None:
+            # the multi-emitter fit runs on the CPU, its z fit on a GPU
+            # whenever there is one (see MultiEmitterFitWorker)
+            self.gpu_checkbox.setVisible(CUDA_AVAILABLE and not multi_emitter)
         if self.identification_settings is not None:
             # it finds the spots itself
             self.identification_settings.setVisible(not multi_emitter)
@@ -10184,7 +10203,11 @@ class Window(QtWidgets.QMainWindow):
         instead."""
         if self.draw_affine_pairing():
             return
-        if self.ready_for_fit:
+        if self.parameters_dialog.is_multi_emitter():
+            # it finds the spots itself, so identifications are not shown
+            if self.parameters_dialog.preview_checkbox.isChecked():
+                self.draw_multi_emitter_preview()
+        elif self.ready_for_fit:
             box = (self.last_identification_info or {}).get(
                 "Box Size", self.parameters["Box Size"]
             )
@@ -10197,11 +10220,6 @@ class Window(QtWidgets.QMainWindow):
                 self.draw_identifications(
                     identifications_frame, box, QtGui.QColor("yellow")
                 )
-        elif (
-            self.parameters_dialog.preview_checkbox.isChecked()
-            and self.parameters_dialog.is_multi_emitter()
-        ):
-            self.draw_multi_emitter_preview()
         elif self.parameters_dialog.preview_checkbox.isChecked():
             # scrubbing into a new temporal window costs one median
             # (~0.1 s at 512x512, more for larger frames), and the
@@ -10265,6 +10283,13 @@ class Window(QtWidgets.QMainWindow):
             )
             self._draw_frame_spots()
             locs_frame = self._current_frame_locs()
+            dialog = self.parameters_dialog
+            if (
+                dialog.is_multi_emitter()
+                and dialog.preview_checkbox.isChecked()
+            ):
+                # the preview shows its own fit only
+                locs_frame = None
             if locs_frame is not None:
                 # the coordinates are in nm, the scene is the camera image
                 pixelsize = self.parameters_dialog.pixelsize.value()
@@ -15072,6 +15097,9 @@ class MultiEmitterFitWorker(QtCore.QThread):
                 spline_calibration=self.spline_calibration,
                 lateral_transforms=self.lateral_transforms or None,
                 parallel=True,
+                # the emitters are fitted on the CPU, their z on a GPU
+                # if there is one
+                fit_z_gpu=self.calibration_3d is not None and CUDA_AVAILABLE,
                 progress=_SignalProgress(
                     on_value=self.progressMade.emit,
                     on_phase=self.phaseStarted.emit,

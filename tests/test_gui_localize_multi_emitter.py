@@ -1,4 +1,4 @@
-"""Picasso: Localize with the "Overlapping emitters" model,
+"""Picasso: Localize with the "Overlapping emitters (3D-DAOSTORM)" model,
 which runs ``localize.localize_multi_emitter``: the settings it shows and
 hides, the fit it runs without an identification, the live preview and
 the settings it keeps.
@@ -84,6 +84,31 @@ def test_the_model_shows_only_what_it_uses(window):
     dialog.fit_model.setCurrentIndex(0)
     assert dialog.multi_emitter_groupbox.isHidden()
     assert not dialog.identification_settings.isHidden()
+
+
+def test_use_gpu_is_hidden(window, monkeypatch):
+    """The multi-emitter fit runs on the CPU only."""
+    monkeypatch.setattr(gui_localize, "CUDA_AVAILABLE", True)
+    dialog = window.parameters_dialog
+    dialog.fit_model.setCurrentIndex(0)
+    _select(window)
+    assert dialog.gpu_checkbox.isHidden()
+    dialog.fit_model.setCurrentIndex(0)
+    assert not dialog.gpu_checkbox.isHidden()
+
+
+def test_the_preview_waits_for_the_typed_value(window):
+    """Typing 10 does not fit the preview with 1 first."""
+    dialog = window.parameters_dialog
+    for spinbox in (
+        dialog.snr_threshold_spinbox,
+        dialog.psf_sigma_spinbox,
+        dialog.peak_radius_spinbox,
+        dialog.background_sigma_spinbox,
+        dialog.fit_region_spinbox,
+        dialog.max_cycles_spinbox,
+    ):
+        assert not spinbox.keyboardTracking()
 
 
 def test_the_psf_model_selects_the_fit_and_its_z(window):
@@ -348,6 +373,61 @@ def test_the_preview_fits_the_current_frame(loaded):
     )
     assert overlapping == 4
     assert _status(loaded) == "Preview: 8 emitters in this frame."
+
+
+def _markers(window) -> list:
+    return [
+        item
+        for item in window.scene.items()
+        if isinstance(item, gui_localize.FitMarker)
+    ]
+
+
+def test_the_preview_shows_only_its_own_fit(loaded):
+    """Identified with another model, the identifications stay in memory
+    but give way to the multi-emitter preview, and come back with the
+    other model."""
+    dialog = loaded.parameters_dialog
+    loaded.identify()
+    _wait(loaded)
+    assert loaded.ready_for_fit
+    n_boxes = len(loaded.scene.items())
+    dialog.psf_sigma_spinbox.setValue(PIXELSIZE)
+    dialog.preview_checkbox.setChecked(True)
+    _select(loaded)
+    assert loaded.ready_for_fit
+    assert len(_markers(loaded)) == 8
+    # no identification boxes beside the preview's markers
+    assert not [
+        item
+        for item in loaded.scene.items()
+        if isinstance(item, QtWidgets.QGraphicsRectItem)
+        and item.parentItem() is None
+        and item.rect().width() < SIZE
+    ]
+    dialog.fit_model.setCurrentIndex(0)
+    assert loaded.ready_for_fit
+    assert not _markers(loaded)
+    assert len(loaded.scene.items()) == n_boxes
+
+
+def test_the_preview_hides_the_localizations(loaded, monkeypatch):
+    """A fit's localizations show, except under the preview."""
+    _Messages(monkeypatch)
+    _select(loaded)
+    dialog = loaded.parameters_dialog
+    dialog.snr_threshold_spinbox.setValue(8.0)
+    loaded.localize()
+    _wait(loaded)
+    assert loaded.locs is not None
+    assert len(_markers(loaded)) == 8
+    dialog.preview_checkbox.setChecked(True)
+    assert loaded.locs is not None
+    # the preview's 8, not 8 more on top of the localizations
+    assert len(_markers(loaded)) == 8
+    assert _status(loaded).startswith("Preview:")
+    dialog.preview_checkbox.setChecked(False)
+    assert len(_markers(loaded)) == 8
 
 
 def test_two_channels_are_refused(window, tmp_path, monkeypatch):

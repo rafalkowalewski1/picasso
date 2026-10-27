@@ -25,7 +25,7 @@ The following PSF models are implemented:
 - **Spherical (isotropic) Gaussian.** Fits a single shared width, so ``sx`` and ``sy`` are always equal. The ``ellipticity`` column is not saved for this model. Supports multichannel fitting as well, see :ref:`localize-multichannel-gaussian`.
 - **Rotated elliptical Gaussian.** Same as *Elliptical Gaussian*, however, an in-plane rotation angle is also fitted and saved in the ``angle`` column, in degrees.
 - **Experimental PSF (cubic spline).** Fits an experimentally measured PSF; a 3D calibration recovers ``z`` directly; see :doc:`localize/spline`. Supports multichannel fitting as well, see :ref:`localize-multichannel-spline`.
-- **Overlapping emitters.** Fits all emitters of a frame at once, so that emitters closer than about 2 PSF σ are localized separately, with a Gaussian PSF whose σ is fixed for the movie or fitted per emitter, in x and y for astigmatic 3D, or with an experimental PSF from a spline calibration. It finds the spots itself, without the identification step; see :doc:`localize/multi-emitter`.
+- **Overlapping emitters (3D-DAOSTORM).** Fits all emitters of a frame at once, so that emitters closer than about 2 PSF σ are localized separately, with a Gaussian PSF whose σ is fixed for the movie or fitted per emitter, in x and y for astigmatic 3D, or with an experimental PSF from a spline calibration. It finds the spots itself, without the identification step; see :doc:`localize/multi-emitter`.
 
 In addition, ``Average of ROI`` is available as a non-fitting option that simply sums the intensity of each spot.
 
