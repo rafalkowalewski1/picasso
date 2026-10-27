@@ -604,7 +604,9 @@ def _build_grid(x, y, n, cell):
     return cells, counts, order, nx, ny, x0, y0
 
 
-@numba.njit(nogil=True, cache=True)
+# fastmath given, as _prune's, not that of _local_crlb (see
+# _pinv_symmetric)
+@numba.njit(nogil=True, cache=True, fastmath=False)
 def _neighbors(qx, qy, radius, x, y, counts, order, nx, ny, x0, y0, cell, out):
     """Indices of the points within ``radius`` (<= ``cell``) of
     ``(qx, qy)``, the query point included; returns their number."""
@@ -851,7 +853,8 @@ def _jacobian_hessian(
             hess[p, q] = hess[q, p]
 
 
-@numba.njit(nogil=True, cache=True)
+# fastmath given, as that of its caller _iterate (see _pinv_symmetric)
+@numba.njit(nogil=True, cache=True, fastmath=_FASTMATH)
 def _solve_cholesky(a, b, n):
     """Solve ``a x = b`` for symmetric positive definite ``a`` in place
     (the solution is left in ``b``); False if ``a`` is not positive
@@ -884,8 +887,9 @@ def _solve_cholesky(a, b, n):
     return True
 
 
-# fastmath given: otherwise it would take that of the function that
-# compiles it first, numba keeping one build per signature
+# fastmath given: otherwise numba builds a function with that of the
+# function that compiles it first (none for a direct call) and keeps that
+# one build per signature, so its rounding would depend on what ran first
 @numba.njit(nogil=True, cache=True, fastmath=False)
 def _pinv_symmetric(a):
     """Pseudo-inverse of the symmetric ``a``, as ``numpy.linalg.pinv``
