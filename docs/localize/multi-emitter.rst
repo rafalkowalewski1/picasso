@@ -113,7 +113,7 @@ Command line
    picasso localize movie.tif --multi-emitter -px 130 -bl 100 -s 0.5 --psf-model elliptical -zc 3d_calib.yaml -mf 0.79
    picasso localize movie.tif --multi-emitter -px 130 -bl 100 -s 0.5 --psf-model spline -sc spline_calib.hdf5 --fit-region-size 11
 
-Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``spline``; with ``elliptical``, ``--z-calibration`` gives z; ``spline`` takes one ``--spline-calibration``), ``--peak-search-z`` (nm, for a 3D spline; 0), ``--fit-region-size`` (camera pixels, for the spline; from the calibration), ``--snr-threshold`` (15), ``--psf-sigma`` (nm; estimated by default), ``--max-cycles`` (20), ``--peak-radius`` (5), ``--background-sigma`` (8) and ``--seed-identification``, which starts each frame from the spots the identification options find instead of the first cycle's peaks. See :ref:`cmd-localize`.
+Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``spline``; with ``elliptical``, ``--z-calibration`` gives z, fitted on a CUDA GPU with ``--fit-z-gpu``; ``spline`` takes one ``--spline-calibration``), ``--peak-search-z`` (nm, for a 3D spline; 0), ``--fit-region-size`` (camera pixels, for the spline; from the calibration), ``--snr-threshold`` (15), ``--psf-sigma`` (nm; estimated by default), ``--max-cycles`` (20), ``--peak-radius`` (5), ``--background-sigma`` (8) and ``--seed-identification``, which starts each frame from the spots the identification options find instead of the first cycle's peaks. See :ref:`cmd-localize`.
 
 .. dropdown:: Python
    :icon: code
@@ -144,7 +144,7 @@ Further options: ``--psf-model`` (``fixed``, ``spherical``, ``elliptical`` or ``
       print(info[-1]["PSF Sigma (nm)"])
 
    Astigmatic 3D: a σ in x and one in y per emitter, and z from a 3D
-   calibration, or its path:
+   calibration, or its path (``fit_z_gpu=True`` fits z on a CUDA GPU):
 
    .. code-block:: python
 

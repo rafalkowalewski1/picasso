@@ -2309,6 +2309,7 @@ def _localize_multi_emitter(
         spline_calibration=spline_calibration,
         lateral_transforms=lateral_transforms if calibration_3d else None,
         parallel=True,
+        fit_z_gpu=args.fit_z_gpu,
         progress="console",
     )
     entry = next(e for e in info if e.get("Step") == "Fit multi-emitter")

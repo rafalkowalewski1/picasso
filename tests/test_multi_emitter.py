@@ -23,7 +23,7 @@ import pytest
 from scipy.optimize import linear_sum_assignment
 from scipy.special import erf
 
-from picasso import localize, spline
+from picasso import localize, spline, zfit
 from picasso.fitting import residualfit, splinefit
 
 from tests._progress_tracking import RecordingProgress, assert_phases_complete
@@ -452,11 +452,10 @@ def test_fitted_sigmas_recover_the_psf(model, sx, sy):
     assert fixed["photons"].median() < 0.95 * locs["photons"].median()
 
 
-def test_elliptical_fit_gives_z():
+@pytest.fixture(scope="module")
+def astigmatic():
     """Astigmatic emitters at three z, rendered with the widths of the
-    shared test calibration: z is recovered from the fitted sigmas, which
-    the z fit is given as the widths of the sampled Gaussian the
-    calibration records."""
+    shared test calibration over 20 frames, and their ground truth."""
     from tests.conftest import CALIB_3D
 
     emitters = _grid(20, spacing=1500.0, photons=5000.0, seed=1)
@@ -468,7 +467,15 @@ def test_elliptical_fit_gives_z():
         sy=np.sqrt(np.polyval(CALIB_3D["Y Coefficients"], z) ** 2 - blur),
         z=z * CALIB_3D["Magnification factor"],
     )
-    frames = _render(emitters, 20, seed=2)
+    return _render(emitters, 20, seed=2), emitters
+
+
+def test_elliptical_fit_gives_z(astigmatic):
+    """z is recovered from the fitted sigmas, which the z fit is given as
+    the widths of the sampled Gaussian the calibration records."""
+    from tests.conftest import CALIB_3D
+
+    frames, emitters = astigmatic
     tracker = RecordingProgress()
     locs, info = _fit(
         frames,
@@ -501,6 +508,44 @@ def test_z_needs_the_elliptical_model(singles, model):
     frames, _ = singles
     with pytest.raises(ValueError, match="elliptical"):
         _fit(frames, parameters=_model(model), calibration_3d=CALIB_3D)
+
+
+@pytest.mark.skipif(
+    not zfit.CUDA_AVAILABLE, reason="requires a CUDA-capable GPU"
+)
+def test_z_fit_on_the_gpu_matches_the_cpu(astigmatic):
+    from tests.conftest import CALIB_3D
+
+    frames, _ = astigmatic
+    z = {}
+    for gpu in (False, True):
+        locs, _ = _fit(
+            frames,
+            parameters=_model("elliptical"),
+            calibration_3d=dict(CALIB_3D),
+            fit_z_gpu=gpu,
+        )
+        z[gpu] = locs[["z", "d_zcalib", "lpz"]].to_numpy()
+    np.testing.assert_allclose(z[True], z[False], atol=1e-3)
+
+
+def test_z_fit_on_the_gpu_needs_cuda(singles, monkeypatch):
+    """Refused before the frames are fitted, not after."""
+    from tests.conftest import CALIB_3D
+
+    def fit_frames(*args):
+        pytest.fail("the frames were fitted first")
+
+    monkeypatch.setattr(zfit, "CUDA_AVAILABLE", False)
+    monkeypatch.setattr(localize, "_fit_frames_multi_emitter", fit_frames)
+    frames, _ = singles
+    with pytest.raises(RuntimeError, match="CUDA"):
+        _fit(
+            frames,
+            parameters=_model("elliptical"),
+            calibration_3d=dict(CALIB_3D),
+            fit_z_gpu=True,
+        )
 
 
 def test_no_emitters():

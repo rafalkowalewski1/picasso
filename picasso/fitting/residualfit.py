@@ -1681,6 +1681,7 @@ def _local_crlb(
     neighbor_distance,
     max_neighbors,
     out_var,
+    candidates,
 ):
     """Cramer-Rao variances of ``[photons, x, y, bg, sx, sy, z]`` of peak
     ``i`` (NaN for a sigma or z not fitted) from the Fisher matrix of it
@@ -1689,8 +1690,8 @@ def _local_crlb(
     sigmas, or with a ``spline`` PSF ``n_z`` fitted z, per peak among the
     parameters; where that matrix is singular, Huang et al.'s correction
     of the x-x and y-y terms of close emitters (Eq. 11). Returns the
-    number of emitters in the matrix."""
-    candidates = np.empty(n, dtype=np.int64)
+    number of emitters in the matrix. ``candidates`` is scratch of at
+    least ``n`` entries."""
     m = _neighbors(
         p_x[i],
         p_y[i],
@@ -2536,6 +2537,10 @@ def analyze_frame(
             p_x, p_y, n, neighbor_distance
         )
         out_var = np.empty(7)
+        # Once per frame, not once per emitter: above 16 KB (2048 peaks),
+        # Windows serializes the allocation across threads, which made
+        # the bounds of a dense frame several times slower on 48 threads.
+        candidates = np.empty(n, dtype=np.int64)
         for i in range(n):
             n_emitters[i] = _local_crlb(
                 i,
@@ -2567,6 +2572,7 @@ def analyze_frame(
                 neighbor_distance,
                 _MAX_NEIGHBORS,
                 out_var,
+                candidates,
             )
             for p in range(7):
                 crlb[i, p] = out_var[p]

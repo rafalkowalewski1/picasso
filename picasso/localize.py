@@ -10420,6 +10420,7 @@ def localize_multi_emitter(
     spline_calibration: dict | str | None = None,
     lateral_transforms: dict | list | str | None = None,
     parallel: bool = True,
+    fit_z_gpu: bool = False,
     progress: lib.Progress | Literal["console"] | None = None,
     abort_callback: Callable[[], bool] | None = None,
     psf_sigma_callback: Callable[[float], None] | None = None,
@@ -10500,6 +10501,10 @@ def localize_multi_emitter(
     parallel : bool, optional
         If True, the frames are fitted on a pool of threads; if False, in
         the calling thread. Default is True.
+    fit_z_gpu : bool, optional
+        If True, the z fit of ``calibration_3d`` runs on a CUDA-capable
+        GPU (see ``picasso.zfit.zfit``); the frames are fitted on the CPU
+        either way. Ignored without ``calibration_3d``. Default is False.
     progress : lib.Progress, "console" or None, optional
         Progress tracker, see ``picasso.lib.Progress``: e.g. a
         ``lib.ProgressDialog``, "console" for a tqdm bar in the console,
@@ -10552,6 +10557,10 @@ def localize_multi_emitter(
         another model, not a single-channel calibration or with a box
         below 5 pixels, or ``parameters.peak_search_z`` lies outside its z
         range.
+    RuntimeError
+        If ``fit_z_gpu`` is True with ``calibration_3d`` but no
+        CUDA-capable GPU is available; raised before the frames are
+        fitted.
     TypeError
         If ``parameters`` or ``seed_identification`` is of the wrong
         type.
@@ -10643,6 +10652,7 @@ def localize_multi_emitter(
         )
     assert isinstance(camera_info, dict), "camera_info must be a dict"
     assert isinstance(parallel, bool), "parallel must be a boolean"
+    assert isinstance(fit_z_gpu, bool), "fit_z_gpu must be a boolean"
     pixelsize = camera_info.get("Pixelsize")
     if not _is_positive_number(pixelsize):
         raise ValueError(
@@ -10669,6 +10679,12 @@ def localize_multi_emitter(
                 "calibration_3d needs psf_model='elliptical': z is read from "
                 "the sigmas in x and y each emitter is fitted with, got "
                 f"psf_model={parameters.psf_model!r}."
+            )
+        # before the frames are fitted, not after
+        if fit_z_gpu and not zfit.CUDA_AVAILABLE:
+            raise RuntimeError(
+                "GPU z fitting requested (fit_z_gpu) but no CUDA-capable "
+                "GPU is available."
             )
         if isinstance(calibration_3d, str):
             calibration_3d = io.load_calibration(
@@ -10833,6 +10849,7 @@ def localize_multi_emitter(
             calibration_3d,
             lateral_transforms,
             parallel,
+            fit_z_gpu,
             progress,
             abort_callback,
         )
@@ -10844,6 +10861,7 @@ def _fit_z_multi_emitter(
     calibration: dict,
     lateral_transforms: dict | list | str | None,
     parallel: bool,
+    gpu: bool,
     progress: lib.Progress,
     abort_callback: Callable[[], bool] | None,
 ) -> tuple[pd.DataFrame | None, list[dict]]:
@@ -10876,6 +10894,7 @@ def _fit_z_multi_emitter(
         filter=0,
         lateral_transforms=lateral_transforms,
         parallel=parallel,
+        gpu=gpu,
         progress=progress,
         abort_callback=abort_callback,
     )

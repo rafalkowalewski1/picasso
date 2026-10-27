@@ -1566,6 +1566,49 @@ def test_localize_multi_emitter_elliptical_gives_z(tmp_path, monkeypatch):
     assert z_entry["Z Calibration Path"] == calibration
 
 
+@pytest.mark.parametrize("gpu", [False, True])
+def test_localize_multi_emitter_fits_z_on_the_gpu(tmp_path, monkeypatch, gpu):
+    """--fit-z-gpu moves the z fit of --psf-model elliptical to the GPU."""
+    from picasso import zfit
+    from tests.conftest import CALIB_3D
+
+    devices = []
+    fit_z = zfit.zfit
+
+    def zfit_on(*args, gpu=False, **kwargs):
+        devices.append(gpu)
+        # serially on the CPU, which stands in for the GPU
+        return fit_z(*args, **(kwargs | {"parallel": False}))
+
+    monkeypatch.setattr(zfit, "CUDA_AVAILABLE", True)
+    monkeypatch.setattr(zfit, "zfit", zfit_on)
+    movie = _copy_testdata(tmp_path)
+    calibration = str(tmp_path / "3d_calib.yaml")
+    io.save_calibration(calibration, dict(CALIB_3D))
+    _picasso(
+        monkeypatch,
+        "localize",
+        movie,
+        "--multi-emitter",
+        "--psf-model",
+        "elliptical",
+        "--psf-sigma",
+        131,
+        "-zc",
+        calibration,
+        "-mf",
+        0.6,
+        *(["--fit-z-gpu"] if gpu else []),
+        "-px",
+        160,
+        "-d",
+        0,
+    )
+    assert devices == [gpu]
+    locs, _ = io.load_locs(_out(movie, "_locs.hdf5"))
+    assert "z" in locs.columns
+
+
 def test_localize_multi_emitter_spline_gives_z(tmp_path, monkeypatch):
     from tests.test_multi_emitter import _spline_calibration
 
