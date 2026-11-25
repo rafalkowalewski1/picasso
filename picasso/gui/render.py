@@ -4345,10 +4345,15 @@ class LinkDialog(lib.Dialog):
         considered as belonging to the same group of linked locs.
     """
 
+    SELECT_CENTRAL_DOCS_URL = docs_url(
+        "render/menu-postprocess.html#render-select-central-frames"
+    )
+
     def __init__(
         self,
         window: QtWidgets.QMainWindow,
         max_dark_time: int = 3,
+        help_url: str | None = None,
     ) -> None:
         super().__init__(window)
         self.window = window
@@ -4378,6 +4383,8 @@ class LinkDialog(lib.Dialog):
         vbox.addLayout(grid)
         hbox = QtWidgets.QHBoxLayout()
         vbox.addLayout(hbox)
+        if help_url is not None:
+            hbox.addWidget(lib.HelpButton(help_url))
         # OK and Cancel buttons
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -4385,7 +4392,7 @@ class LinkDialog(lib.Dialog):
             QtCore.Qt.Orientation.Horizontal,
             self,
         )
-        vbox.addWidget(self.buttons)
+        hbox.addWidget(self.buttons)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
 
@@ -4393,11 +4400,14 @@ class LinkDialog(lib.Dialog):
     def getParams(
         parent: QtWidgets.QMainWindow | None = None,
         max_dark_time: int = 3,
+        help_url: str | None = None,
     ) -> tuple[dict, bool]:
         """Create the dialog and return the requested values for
         linking. ``max_dark_time`` sets the value suggested in the
-        dialog."""
-        dialog = LinkDialog(parent, max_dark_time=max_dark_time)
+        dialog; ``help_url`` adds a help button opening that page."""
+        dialog = LinkDialog(
+            parent, max_dark_time=max_dark_time, help_url=help_url
+        )
         result = dialog.exec()
         return (
             dialog.max_distance.value(),
@@ -14458,7 +14468,9 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             return
         # by default, do not allow transient dark frames, so that only
         # localizations in strictly consecutive frames form an event
-        r_max, max_dark, ok = LinkDialog.getParams(max_dark_time=0)  # nm
+        r_max, max_dark, ok = LinkDialog.getParams(  # nm
+            max_dark_time=0, help_url=LinkDialog.SELECT_CENTRAL_DOCS_URL
+        )
         if not ok:
             return
         locs, info = self.locs[channel], self.infos[channel]
