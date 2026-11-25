@@ -60,6 +60,38 @@ ZOOM = 9 / 7
 # suffix of the color bar saved next to an image exported while
 # rendering by property
 COLORBAR_SUFFIX = "_colorbar"
+#: Tooltip of the single-channel colormap in Display settings
+COLORMAP_TOOLTIP = "Colormap used for rendering single-channel data."
+#: Why the single-channel colormap does not apply, by the way the
+#: loaded localizations are rendered
+COLORMAP_UNUSED = {
+    "multichannel": (
+        "Several channels are loaded; each is rendered with its own\n"
+        "color, set in the Files dialog (Ctrl+F)."
+    ),
+    "group": "The groups of the loaded channel are colored automatically.",
+    "property": (
+        "Rendering by property uses the property colormap\n"
+        "(Render properties) instead."
+    ),
+}
+
+
+def set_colormap_unused(
+    label: QtWidgets.QLabel,
+    combo: QtWidgets.QComboBox,
+    reason: str | None,
+) -> None:
+    """Gray out the single-channel colormap of a Display settings
+    dialog (its ``label`` and ``combo``) while the rendering ignores
+    it, with ``reason`` (see ``COLORMAP_UNUSED``) as the tooltip.
+    Enable it again if ``reason`` is None."""
+    tooltip = COLORMAP_TOOLTIP
+    if reason is not None:
+        tooltip += "\n\nNot used: " + reason
+    for widget in (label, combo):
+        widget.setEnabled(reason is None)
+        widget.setToolTip(tooltip)
 
 
 class DisplaySettingsRotationDialog(lib.Dialog):
@@ -198,13 +230,13 @@ class DisplaySettingsRotationDialog(lib.Dialog):
             ),
         )
         contrast_grid.addWidget(self.contrast_slider, 2, 0, 1, 2)
-        c_label = QtWidgets.QLabel("Colormap:")
-        c_label.setToolTip("Colormap used to render localizations.")
-        contrast_grid.addWidget(c_label, 3, 0)
+        self.colormap_label = QtWidgets.QLabel("Colormap:")
+        contrast_grid.addWidget(self.colormap_label, 3, 0)
         self.colormap = QtWidgets.QComboBox()
         self.colormap.addItems(plt.colormaps())
         contrast_grid.addWidget(self.colormap, 3, 1)
         self.colormap.currentIndexChanged.connect(self.render_scene)
+        set_colormap_unused(self.colormap_label, self.colormap, None)
 
         # blur
         blur_groupbox = lib.CollapsibleGroupBox("Render method")
@@ -3262,6 +3294,16 @@ class ViewRotation(QtWidgets.QLabel, idle.SpillableChannels):
         ):
             locs = locs[0]
             infos = infos[0]
+        if self.x_render_state:
+            reason = COLORMAP_UNUSED["property"]
+        elif len(self.locs) > 1:
+            reason = COLORMAP_UNUSED["multichannel"]
+        elif "group" in self.locs[0].columns:
+            reason = COLORMAP_UNUSED["group"]
+        else:
+            reason = None
+        dialog = self.window.display_settings_dlg
+        set_colormap_unused(dialog.colormap_label, dialog.colormap, reason)
         return locs, infos
 
 

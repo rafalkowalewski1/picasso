@@ -79,7 +79,12 @@ from .convert_units import ConvertUnitsDialog
 from .grid_settings import GridGroupBox
 from .scalebar_settings import ScaleBarGroupBox
 from .overlay_style import OverlayStyleWidget
-from .rotation import RotationWindow, source_key
+from .rotation import (
+    COLORMAP_UNUSED,
+    RotationWindow,
+    set_colormap_unused,
+    source_key,
+)
 from .app import run_gui
 from . import theme
 from . import shortcuts, toolbars
@@ -11263,14 +11268,14 @@ class DisplaySettingsDialog(lib.Dialog):
             ),
         )
         contrast_grid.addWidget(self.contrast_slider, 2, 0, 1, 2)
-        c_label = QtWidgets.QLabel("Colormap:")
-        c_label.setToolTip("Colormap used for rendering single-channel data.")
-        contrast_grid.addWidget(c_label, 3, 0)
+        self.colormap_label = QtWidgets.QLabel("Colormap:")
+        contrast_grid.addWidget(self.colormap_label, 3, 0)
         self.colormap = QtWidgets.QComboBox()
         self.colormap.addItems(plt.colormaps())
         self.colormap.addItem("Custom")
         contrast_grid.addWidget(self.colormap, 3, 1)
         self.colormap.currentIndexChanged.connect(self.on_cmap_changed)
+        set_colormap_unused(self.colormap_label, self.colormap, None)
 
         # Blur
         blur_groupbox = lib.CollapsibleGroupBox("Render method")
@@ -20033,6 +20038,15 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
             return "group"
         return "colormap"
 
+    def _colormap_unused_reason(self) -> str | None:
+        """Why the Display settings colormap does not apply to the
+        loaded channels (see ``set_colormap_unused``), None if it
+        does or nothing is loaded."""
+        mode = self._single_channel_mode()
+        if mode is None and len(self.locs) > 1:
+            return COLORMAP_UNUSED["multichannel"]
+        return COLORMAP_UNUSED.get(mode)
+
     def _prepare_locs_for_rendering(
         self,
         viewport: (
@@ -20070,6 +20084,12 @@ class View(QtWidgets.QLabel, idle.SpillableChannels):
         locs, infos = self._filter_checked_channels(locs, infos)
         self.window.dataset_dialog.set_single_channel_mode(
             self._single_channel_mode()
+        )
+        dialog = self.window.display_settings_dlg
+        set_colormap_unused(
+            dialog.colormap_label,
+            dialog.colormap,
+            self._colormap_unused_reason(),
         )
         return locs, infos
 

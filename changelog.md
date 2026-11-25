@@ -86,6 +86,7 @@ Picasso 1.0 is the largest update since Picasso was first published. The highlig
 - Basic single-particle tracking (SPT), following Martens, et al., *Front. Bioinform.* 2021: nearest-neighbor tracking of localizations (`Postprocess > Single-particle tracking`), tracks drawn as lines (`Display settings > Tracks`) and diffusion analysis by the mean squared displacement and the jump distances, with a summary of every track. See the [documentation](https://picassosr.readthedocs.io/en/latest/render/tracking.html). *Note: this is an experimental feature, feedback is welcome*.
 - Clear measurements added (similar to Clear picks)
 - Files dialogs widgets are grayed out if they do not apply at the given moment.
+- The colormap widget is grayed out when it does not apply: with several channels, a channel with groups or rendering by property.
 - Faster G5M.
 - Files dialog is now shown as a table with indices for easier navigation. Channels can be reordered and the default ordering of colors can be adjusted. `Load colors` works with any number of channels.
 - `View > Color vision preview` shows the main and 3D windows as people with deuteranopia, protanopia or tritanopia see them; saved and exported images keep their colors. The simulation is also available in Python as `render.simulate_color_vision`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render/menu-view.html#render-color-vision-preview).
