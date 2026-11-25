@@ -89,6 +89,7 @@ Picasso 1.0 is the largest update since Picasso was first published. The highlig
 - The colormap widget is grayed out when it does not apply: with several channels, a channel with groups or rendering by property.
 - Faster G5M.
 - Files dialog is now shown as a table with indices for easier navigation. Channels can be reordered and the default ordering of colors can be adjusted. `Load colors` works with any number of channels.
+- Long file names in the Files dialog are shortened in the middle to fit (the full name shows in the tooltip), so they no longer widen the dialog, and the dialog can be made narrower.
 - `View > Color vision preview` shows the main and 3D windows as people with deuteranopia, protanopia or tritanopia see them; saved and exported images keep their colors. The simulation is also available in Python as `render.simulate_color_vision`. See the [documentation](https://picassosr.readthedocs.io/en/latest/render/menu-view.html#render-color-vision-preview).
 - `Select picks (XYZ scatter)` and `(XYZ scatter, 4 panels)` color z with the perceptually uniform, colorblind-friendly *plasma* colormap instead of *jet*.
 - `Colorblind-safe colors` checkbox in the Files dialog colors the channels magenta, green, cyan, blue, and so on, which people with red-green color blindness can tell apart. See the [documentation](https://picassosr.readthedocs.io/en/latest/render/menu-view.html#render-default-colors).

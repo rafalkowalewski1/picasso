@@ -2331,6 +2331,92 @@ class TailElidedComboBox(QtWidgets.QComboBox):
         super().showPopup()
 
 
+class ElidedCheckBox(QtWidgets.QCheckBox):
+    """Check box whose label is elided in the middle when the box is
+    narrower than its text, so that long file names do not widen their
+    window. ``text`` still returns the full label.
+
+    While the label is elided, the tooltip starts with the full label.
+
+    Parameters
+    ----------
+    text : str
+        Label of the check box.
+    parent : QWidget, optional
+        Parent widget.
+    """
+
+    # the box can shrink to this many average characters in a layout
+    MIN_CHARS = 10
+
+    def __init__(
+        self, text: str = "", parent: QtWidgets.QWidget | None = None
+    ) -> None:
+        super().__init__(text, parent)
+        # a check box does not shrink below its text by default
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            self.sizePolicy().verticalPolicy(),
+        )
+
+    def _style_option(self) -> QtWidgets.QStyleOptionButton:
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        return option
+
+    def _text_width(self) -> int:
+        """Width available for the label."""
+        option = self._style_option()
+        option.rect = self.rect()
+        rect = self.style().subElementRect(
+            QtWidgets.QStyle.SubElement.SE_CheckBoxContents, option, self
+        )
+        return rect.width()
+
+    def displayed_text(self) -> str:
+        """Label as painted: the full text, or its start and end around
+        an ellipsis if it does not fit."""
+        return self.fontMetrics().elidedText(
+            self.text(),
+            QtCore.Qt.TextElideMode.ElideMiddle,
+            self._text_width(),
+        )
+
+    def is_elided(self) -> bool:
+        """Whether the label is shown shortened."""
+        return self.displayed_text() != self.text()
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        """A layout may shrink the box to ``MIN_CHARS`` characters."""
+        hint = self.sizeHint()
+        metrics = self.fontMetrics()
+        excess = metrics.horizontalAdvance(self.text()) - (
+            self.MIN_CHARS * metrics.averageCharWidth()
+        )
+        if excess > 0:
+            hint.setWidth(hint.width() - excess)
+        return hint
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        """Paint the box with the (possibly elided) label."""
+        painter = QtWidgets.QStylePainter(self)
+        option = self._style_option()
+        option.text = self.displayed_text()
+        painter.drawControl(
+            QtWidgets.QStyle.ControlElement.CE_CheckBox, option
+        )
+
+    def event(self, event: QtCore.QEvent) -> bool:
+        """Show the full label in the tooltip while it is elided."""
+        if event.type() == QtCore.QEvent.Type.ToolTip and self.is_elided():
+            tooltip = self.text()
+            if self.toolTip():
+                tooltip += "\n\n" + self.toolTip()
+            QtWidgets.QToolTip.showText(event.globalPos(), tooltip, self)
+            return True
+        return super().event(event)
+
+
 class PathItemDialog(Dialog):
     """Input dialog choosing one of several items, typically file paths,
     in a ``TailElidedComboBox``. See ``get_path_item``."""

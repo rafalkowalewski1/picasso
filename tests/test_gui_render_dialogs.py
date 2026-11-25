@@ -31,6 +31,7 @@ import numpy as np
 import pytest
 from PyQt6 import QtWidgets
 
+from picasso import lib_qt
 from picasso.gui import render as gui_render
 from tests.test_gui_render_analysis import (
     APPLY_TO_ALL,
@@ -2037,6 +2038,32 @@ def test_channel_title_of_a_short_path_is_reset(
     dataset.change_title(name)
     dataset.change_title(name)
     assert dataset.checks[1].text() == "short.hdf5"
+    window.close()
+
+
+def test_long_file_name_does_not_widen_the_files_dialog(
+    qt_offscreen, tmp_path
+):
+    """The file names are elided, so a long one barely widens the
+    channel table, and the table shrinks again once it is closed."""
+    from tests.test_gui_render_tasks import _info, _locs
+
+    window = _window(tmp_path)
+    dataset = window.dataset_dialog
+    one_channel = dataset.table.minimumWidth()
+    long_name = "a_very_long_experiment_name_" * 6 + "R2.hdf5"
+    window.view.add(long_name, _locs(), _info(), render_=False)
+    check = dataset.checks[1]
+    assert isinstance(check, lib_qt.ElidedCheckBox)
+    assert check.text().startswith("a_very_long")  # titles stay whole
+    name_width = check.fontMetrics().horizontalAdvance(check.text())
+    assert dataset.table.minimumWidth() < one_channel + name_width / 4
+    dataset.show()
+    QtWidgets.QApplication.processEvents()
+    assert check.is_elided()
+    assert check.displayed_text().endswith("R2")
+    dataset.close_file(dataset.closebuttons[1].objectName(), True)
+    assert dataset.table.minimumWidth() == one_channel
     window.close()
 
 

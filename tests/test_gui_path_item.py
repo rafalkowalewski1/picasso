@@ -1,5 +1,6 @@
 """Test ``lib_qt.TailElidedComboBox`` and ``lib_qt.get_path_item``, the
-input dialog that shows only the end of long file paths.
+input dialog that shows only the end of long file paths, and
+``lib_qt.ElidedCheckBox``, which elides long names in the middle.
 
 :author: Rafal Kowalewski, 2026
 :copyright: Copyright (c) 2026 Jungmann Lab, MPI of Biochemistry
@@ -106,3 +107,29 @@ def test_get_path_item(qt_offscreen, monkeypatch, accept):
     assert len(shown) == 1
     assert ok is accept
     assert item == (LONG_PATH if accept else "")
+
+
+def test_check_box_elides_long_names_in_the_middle(qt_offscreen):
+    box = lib_qt.ElidedCheckBox("start_" + "x" * 200 + "_end")
+    box.setToolTip("Click to show.")
+    box.resize(box.minimumSizeHint())
+    shown = box.displayed_text()
+    assert box.is_elided()
+    assert shown.startswith("start") and shown.endswith("_end")
+    assert "\u2026" in shown
+    assert box.text() == "start_" + "x" * 200 + "_end"
+    assert box.minimumSizeHint().width() < box.sizeHint().width()
+    policy = box.sizePolicy().horizontalPolicy()
+    assert policy == QtWidgets.QSizePolicy.Policy.Preferred
+    box.grab()  # paints the elided label
+    box.resize(box.sizeHint())
+    assert not box.is_elided()
+    box.deleteLater()
+
+
+def test_check_box_with_a_short_name_is_not_shrunk(qt_offscreen):
+    box = lib_qt.ElidedCheckBox("short")
+    assert box.minimumSizeHint() == box.sizeHint()
+    box.resize(box.sizeHint())
+    assert box.displayed_text() == "short"
+    box.deleteLater()

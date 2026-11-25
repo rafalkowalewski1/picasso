@@ -150,6 +150,7 @@ DATASET_COLUMNS = [
     ),
     ("", "Close each dataset."),
 ]
+DATASET_COLUMN_FILE = 0
 DATASET_COLUMN_CONTRAST = 4
 # width (pixels) of the per-channel gradient preview in the Files dialog
 CHANNEL_PREVIEW_WIDTH = 48
@@ -1414,8 +1415,10 @@ class DatasetDialog(lib.Dialog):
         header.setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
+        # the file names take the spare width and are elided (see
+        # lib_qt.ElidedCheckBox) when the dialog is narrower than them
         header.setSectionResizeMode(
-            DATASET_COLUMN_CONTRAST, QtWidgets.QHeaderView.ResizeMode.Stretch
+            DATASET_COLUMN_FILE, QtWidgets.QHeaderView.ResizeMode.Stretch
         )
         header.setDefaultAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft
@@ -1543,7 +1546,7 @@ class DatasetDialog(lib.Dialog):
             path, ext = os.path.splitext(path)
 
         # Create 3 buttons for checking, naming and closing the channel
-        c = QtWidgets.QCheckBox(path)
+        c = lib_qt.ElidedCheckBox(path)
         c.setToolTip(
             "Left click to tick/untick to show/hide the dataset\n"
             "(only works if multiple datasets are loaded).\n"
@@ -1917,22 +1920,32 @@ class DatasetDialog(lib.Dialog):
             widget.setEnabled(manual)
 
     def _fit_scroll_width(self) -> None:
-        """Ensure the dialog is wide enough that the channel table fits
-        horizontally without a scrollbar. Only ever grows the minimum
-        width; never shrinks the dialog."""
+        """Set the minimum width of the channel table so that it fits
+        horizontally without a scrollbar, with the file names shrunk to
+        their minimum (they are elided, see ``lib_qt.ElidedCheckBox``).
+        Long file names therefore do not widen the dialog, and closing
+        or renaming a channel lets it shrink again."""
         table = self.table
         header = table.horizontalHeader()
         needed = table.verticalHeader().sizeHint().width()
         for column in range(table.columnCount()):
-            needed += max(
-                table.sizeHintForColumn(column),
-                header.sectionSizeHint(column),
-            )
+            if column == DATASET_COLUMN_FILE:
+                content = max(
+                    (
+                        table.cellWidget(row, column).minimumSizeHint().width()
+                        for row in range(table.rowCount())
+                        if table.cellWidget(row, column) is not None
+                    ),
+                    default=0,
+                )
+            else:
+                content = table.sizeHintForColumn(column)
+            needed += max(content, header.sectionSizeHint(column))
         needed += 2 * table.frameWidth()
         needed += table.style().pixelMetric(
             QtWidgets.QStyle.PixelMetric.PM_ScrollBarExtent
         )
-        table.setMinimumWidth(max(table.minimumWidth(), needed))
+        table.setMinimumWidth(needed)
 
     def update_colors(self) -> None:
         """Change colors in self.colordisp_all and updates the scene in
@@ -1985,6 +1998,7 @@ class DatasetDialog(lib.Dialog):
         del self.contrast_widgets[i]
         del self.closebuttons[i]
         del self._channel_luts[i]
+        self._fit_scroll_width()
 
     def _update_after_channel_deleted(self, i: int) -> None:
         """Update the state that depends on the remaining channels
