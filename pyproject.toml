@@ -86,6 +86,7 @@ server = [
 dev = [
     "build",
     "pre-commit",
+    "pytest",
     "ruff",
     "twine",
 ]
