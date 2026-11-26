@@ -27,6 +27,25 @@ Picasso creates the folder the first time it looks for sounds. The location
 is the same for every installation type (one-click installer, PyPI or a
 cloned repository) and is kept when Picasso is uninstalled or updated.
 
+.. _play-a-minigame:
+
+Play a minigame
+---------------
+Picasso can offer a short game while a long task runs, e.g., fitting in
+Localize or clustering in Render. It is off by default: to switch it on, set
+``Offer during long tasks`` to ``True`` in the ``Minigame`` section of the
+:ref:`user settings <user-settings-file>` (``File > Picasso settings``); it
+applies from the next task on.
+
+The progress display then offers *Play a minigame*: a button in the progress
+dialog and, in Localize, in the status bar next to the progress bar. It opens
+Serpentine: steer a line with :kbd:`W`, :kbd:`A`, :kbd:`S` and :kbd:`D` to
+the dots; each dot makes it longer and faster, and the game ends when it runs
+into a wall or into itself. :kbd:`Space` starts a game and pauses it, as does
+switching to another window. The progress of the task and its Cancel button
+move above the game, and the game stays open when the task is done, until you
+close it.
+
 .. _appearance:
 
 Appearance
@@ -237,6 +256,23 @@ Top level
    * - ``filename``
      - ``None`` (no sound)
      - The sound file (from ``~/.picasso/notification_sounds``) played on long-running jobs, e.g., in Localize, Render, SPINNA, Average and Simulate. See :ref:`sound-notifications` above.
+
+``Minigame``
+^^^^^^^^^^^^
+
+.. list-table::
+   :widths: 22 10 68
+   :header-rows: 1
+
+   * - Key
+     - Default
+     - Description
+   * - ``Offer during long tasks``
+     - ``False``
+     - Whether long tasks offer the minigame (*Play a minigame*). See :ref:`play-a-minigame`.
+   * - ``Best score``
+     - *(unset)*
+     - The best score of the minigame so far.
 
 ``Appearance``
 ^^^^^^^^^^^^^^

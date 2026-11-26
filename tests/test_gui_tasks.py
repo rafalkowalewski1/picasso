@@ -270,3 +270,165 @@ def test_progress_dialog_stays_up_between_phases(qt_offscreen, parent):
     assert dialog.isVisible()
     dialog.close()
     assert not dialog.isVisible()
+
+
+# ---------------------------------------------------------------------------
+# Play a minigame (picasso.gui.minigame)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def game_offered():
+    """The user switched the minigame on (it is off by default)."""
+    from picasso.gui import minigame
+
+    minigame._save_setting(minigame.OFFER_KEY, True)
+
+
+def _blocked_task(parent, release, steps=None, **kwargs):
+    """A task that reports progress until ``release`` is set."""
+
+    def fn(progress):
+        lib.start_phase(progress, "Crunching", 1000)
+        i = 0
+        while not release.is_set():
+            i = min(i + 1, 999)
+            progress.set_value(i)
+            if steps is not None:
+                steps.append(i)
+            time.sleep(0.002)
+        return "done"
+
+    return lib.run_task(fn, "Working", parent, maximum=1000, **kwargs)
+
+
+def test_play_button_sits_left_of_cancel(qt_offscreen, parent, game_offered):
+    release = threading.Event()
+    task = _blocked_task(parent, release)
+    dialog = task.dialog
+    dialog.show()
+    qt_offscreen.processEvents()
+    play, cancel = dialog._play_button, dialog._cancel_button
+    assert play.text() == "Play a minigame"
+    assert play.isVisible() and cancel.isVisible()
+    assert play.geometry().right() < cancel.geometry().left()
+    assert (
+        abs(play.geometry().center().y() - cancel.geometry().center().y()) <= 1
+    )
+    release.set()
+    _wait_until(qt_offscreen, lambda: not task.is_running())
+
+
+def test_play_hands_the_task_to_the_game(qt_offscreen, parent, game_offered):
+    """Play replaces the progress dialog by the game, which shows the
+    progress, takes input while the task runs, cancels it, and stays
+    open, no longer modal, once the task ended."""
+    from picasso.gui import minigame
+
+    release = threading.Event()
+    calls = []
+    task = _blocked_task(
+        parent, release, on_canceled=lambda: calls.append("canceled")
+    )
+    task.dialog.show()
+    _wait_until(qt_offscreen, lambda: task.dialog.value() > 0)
+    task.dialog.play_requested.emit()  # as Play was clicked
+    window = minigame.game_window()
+    assert window is not None and window.isVisible()
+    assert not task.dialog.isVisible()
+    assert window.windowModality() == QtCore.Qt.WindowModality.ApplicationModal
+    link = task.game_link
+    assert window.link is link
+    _wait_until(qt_offscreen, lambda: link.value > 10)
+    assert link.label == "Crunching" and link.maximum == 1000
+    assert window.strip.bar.value() > 0
+    # input reaches the game while the task blocks the other windows
+    _click(window.strip.cancel_button)
+    assert task.progress.canceled
+    release.set()
+    _wait_until(qt_offscreen, lambda: not task.is_running())
+    assert calls == ["canceled"]
+    assert link.outcome == "canceled"
+    assert window.isVisible()
+    assert window.windowModality() == QtCore.Qt.WindowModality.NonModal
+    assert window.strip.label.text() == "Canceled: Working"
+    window.close()
+
+
+def test_a_finished_task_leaves_the_game_open(
+    qt_offscreen, parent, game_offered
+):
+    from picasso.gui import minigame
+
+    release = threading.Event()
+    results = []
+    task = _blocked_task(parent, release, on_finished=results.append)
+    task.play()
+    window = minigame.game_window()
+    window.go_on()
+    release.set()
+    _wait_until(qt_offscreen, lambda: not task.is_running())
+    assert results == ["done"]
+    assert window.isVisible()
+    assert window.strip.label.text() == "Done: Working"
+    assert window.game.state == "playing"
+    assert not lib_qt.gui_busy()
+    window.close()
+
+
+def test_closing_the_game_brings_the_dialog_back(
+    qt_offscreen, parent, game_offered
+):
+    from picasso.gui import minigame
+
+    release = threading.Event()
+    task = _blocked_task(parent, release)
+    task.dialog.show()
+    task.play()
+    assert not task.dialog.isVisible()
+    minigame.game_window().close()
+    assert task.dialog.isVisible()
+    assert task.is_running()  # the task goes on
+    # and the dialog offers to play again
+    assert task.dialog._play_button.text() == "Play a minigame"
+    task.play()
+    assert minigame.game_window().link is task.game_link
+    release.set()
+    _wait_until(qt_offscreen, lambda: not task.is_running())
+    assert task.outcome == "finished"
+    minigame.game_window().close()
+
+
+def test_canceling_in_the_dialog_hides_play(
+    qt_offscreen, parent, game_offered
+):
+    release = threading.Event()
+    task = _blocked_task(parent, release)
+    task.dialog.show()
+    task.dialog.canceled.emit()
+    assert task.dialog._play_button.isHidden()
+    assert not task.dialog._cancel_button.isEnabled()
+    release.set()
+    _wait_until(qt_offscreen, lambda: not task.is_running())
+
+
+def test_format_time_remaining():
+    """Extrapolated from the rate so far (truncated to whole seconds);
+    more than 10 hours show as 10."""
+    assert lib_qt.format_time_remaining(11.0, 1, 3) == "00m:21s"
+    assert lib_qt.format_time_remaining(3601.0, 1, 3) == "02h:00m:01s"
+    assert lib_qt.format_time_remaining(3600.0, 1, 100) == "10h:59m:59s"
+
+
+def test_no_play_button_unless_the_game_is_switched_on(qt_offscreen, parent):
+    """The minigame is off by default."""
+    release = threading.Event()
+    task = _blocked_task(parent, release)
+    task.dialog.show()
+    qt_offscreen.processEvents()
+    assert task.dialog._play_button is None
+    assert task.dialog._cancel_button.isVisible()
+    task.dialog.canceled.emit()  # cancel works without the button
+    release.set()
+    _wait_until(qt_offscreen, lambda: not task.is_running())
+    assert task.outcome == "canceled"

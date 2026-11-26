@@ -611,6 +611,34 @@ class MetadataDialog(Dialog):
         QtWidgets.QApplication.clipboard().setText(text)
 
 
+def format_time_remaining(elapsed: float, value: int, maximum: int) -> str:
+    """Time left until ``maximum`` items are done, extrapolated from
+    ``value`` items done in ``elapsed`` seconds, e.g., "03m:12s" or
+    "01h:02m:03s" (at most 10 hours are shown).
+
+    Parameters
+    ----------
+    elapsed : float
+        Seconds since the first item was done.
+    value : int
+        Items done.
+    maximum : int
+        Number of items.
+
+    Returns
+    -------
+    remaining : str
+        The estimate.
+    """
+    remaining = int((maximum - value) * elapsed / (value + 1e-6))
+    hours, remainder = divmod(remaining, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        hours = min(10, hours)  # limit hours to 10 for display
+        return f"{hours:02d}h:{minutes:02d}m:{seconds:02d}s"
+    return f"{minutes:02d}m:{seconds:02d}s"
+
+
 class ProgressDialog(QtWidgets.QProgressDialog):
     """ProgressDialog displays a progress dialog with a progress bar."""
 
@@ -668,20 +696,9 @@ class ProgressDialog(QtWidgets.QProgressDialog):
         self.setValue(value)
         if self.count_started and self.maximum() > 0:
             # estimate time left (none for a busy indicator)
-            elapsed = time.time() - self.t0_est
-            remaining = int(
-                (self.maximum() - value) * elapsed / (value + 1e-6)
+            time_estimate = format_time_remaining(
+                time.time() - self.t0_est, value, self.maximum()
             )
-            # convert to hh-mm-ss
-            hours, remainder = divmod(remaining, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            # format time estimate
-            if hours > 0:
-                hours = min(10, hours)  # limit hours to 10 for display
-                time_estimate = f"{hours:02d}h:{minutes:02d}m:{seconds:02d}s"
-            else:
-                time_estimate = f"{minutes:02d}m:{seconds:02d}s"
-            # set label text with time estimate
             description = (
                 f"{self.description_base}"
                 f"\nEstimated time remaining: {time_estimate}"
@@ -829,16 +846,35 @@ class TaskProgressDialog(ProgressDialog):
 
     A maximum of 0 shows a busy indicator, for steps that report no
     progress.
+
+    If the user switched the minigame on (it is off by default), "Play a
+    minigame" (``play_requested``) lets the task hand its progress over
+    to it, see :mod:`picasso.gui.minigame`.
     """
 
     _process_events = False
     _sound_on_maximum = False
 
     cancel_requested = QtCore.pyqtSignal()
+    play_requested = QtCore.pyqtSignal()
 
     def __init__(self, description, maximum, parent, title=None):
         super().__init__(description, 0, maximum, parent)
         self.setCancelButtonText("Cancel")
+        self._cancel_button = self.findChild(QtWidgets.QPushButton)
+        # QProgressDialog has no layout to add a button to: the Play
+        # button is placed left of Cancel in resizeEvent; none unless the
+        # user switched the game on
+        from picasso.gui import minigame
+
+        self._play_button = None
+        if minigame.offered():
+            self._play_button = QtWidgets.QPushButton(
+                minigame.play_button_text(), self
+            )
+            self._play_button.setIcon(minigame.play_icon())
+            self._play_button.setAutoDefault(False)
+            self._play_button.clicked.connect(self.play_requested)
         # QProgressDialog hides itself on cancel and, with auto-reset and
         # auto-close, at the maximum; only the task may close this one
         self.canceled.disconnect(self.cancel)
@@ -850,6 +886,41 @@ class TaskProgressDialog(ProgressDialog):
         self.cancel_was_requested = False
         self._closing = False
         self.set_value(0)  # arm: modal, delayed show, clock
+
+    def sizeHint(self) -> QtCore.QSize:
+        """Wide enough for the Play button next to Cancel."""
+        hint = super().sizeHint()
+        # Qt asks while the dialog is being built, before the buttons
+        cancel = getattr(self, "_cancel_button", None)
+        play = getattr(self, "_play_button", None)
+        if cancel is None or play is None:
+            return hint
+        margin = self.style().pixelMetric(
+            QtWidgets.QStyle.PixelMetric.PM_LayoutLeftMargin
+        )
+        width = (
+            play.sizeHint().width() + cancel.sizeHint().width() + 4 * margin
+        )
+        return QtCore.QSize(max(hint.width(), width), hint.height())
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        """Place the Play button left of Cancel, on the dialog's left
+        margin."""
+        super().resizeEvent(event)
+        cancel = getattr(self, "_cancel_button", None)
+        play = getattr(self, "_play_button", None)
+        if cancel is None or play is None:
+            return
+        size = play.sizeHint()
+        margin = self.style().pixelMetric(
+            QtWidgets.QStyle.PixelMetric.PM_LayoutLeftMargin
+        )
+        play.setGeometry(
+            margin,
+            cancel.geometry().center().y() - size.height() // 2,
+            min(size.width(), max(cancel.x() - 2 * margin, 0)),
+            size.height(),
+        )
 
     def set_value(self, value):
         """Advance the bar; see :meth:`ProgressDialog.set_value`.
@@ -877,9 +948,10 @@ class TaskProgressDialog(ProgressDialog):
         self.setLabelText(
             "Canceling...\nWaiting for the current step to finish."
         )
-        button = self.findChild(QtWidgets.QPushButton)
-        if button is not None:
-            button.setEnabled(False)
+        if self._cancel_button is not None:
+            self._cancel_button.setEnabled(False)
+        if self._play_button is not None:
+            self._play_button.hide()
         self.cancel_requested.emit()
 
     def reject(self):
@@ -1236,6 +1308,8 @@ class Task(QtCore.QObject):
         self._on_failed = on_failed
         self._on_canceled = on_canceled
         self.outcome = None
+        self.description = description
+        self._parent = parent
         self.progress = TaskProgress(description, maximum)
         self.dialog = TaskProgressDialog(description, maximum, parent, title)
         self.progress.value_changed.connect(self._on_value)
@@ -1243,6 +1317,9 @@ class Task(QtCore.QObject):
         self.progress.label_changed.connect(self._on_label)
         self.progress.phase_changed.connect(self._on_phase)
         self.dialog.cancel_requested.connect(self.cancel)
+        self.dialog.play_requested.connect(self.play)
+        # the task as the minigame shows it, once the user played
+        self.game_link = None
         self._thread = _TaskThread(fn, self.progress)
         self._thread.finished.connect(self._on_thread_finished)
 
@@ -1303,6 +1380,45 @@ class Task(QtCore.QObject):
         if self._forward():
             self.dialog.zero_progress(description)
 
+    def play(self) -> None:
+        """Open the minigame (:mod:`picasso.gui.minigame`) in place of
+        the progress dialog: the game shows the progress and Cancel, and
+        blocks the other windows until the task ended, as the dialog
+        did. Closing the game brings the dialog back."""
+        from picasso.gui import minigame
+
+        if not self.is_running():
+            return
+        if self.game_link is None:
+            window = self._parent.window() if self._parent else None
+            link = minigame.TaskLink(
+                self.description, window=window, cancel=self._cancel_from_game
+            )
+            dialog = self.dialog
+            link.start_phase(dialog.description_base, dialog.maximum())
+            link.set_progress(max(dialog.value(), 0))
+            progress = self.progress
+            progress.value_changed.connect(link.set_progress)
+            progress.maximum_changed.connect(link.set_maximum)
+            progress.label_changed.connect(link.set_label)
+            progress.phase_changed.connect(link.start_phase)
+            link.detached.connect(self._on_game_detached)
+            self.game_link = link
+        if self._dialog_alive():
+            self.dialog.hide()
+        minigame.play(self.game_link, modal=True)
+
+    def _cancel_from_game(self) -> None:
+        if self._dialog_alive():
+            self.dialog.request_cancel()  # as Cancel in the dialog
+        else:
+            self.cancel()
+
+    def _on_game_detached(self) -> None:
+        """The game was closed while the task runs: show the dialog."""
+        if self.is_running() and self._dialog_alive():
+            self.dialog.show()
+
     def _on_thread_finished(self) -> None:
         thread = self._thread
         thread.wait()  # run() has returned; make sure the thread is done
@@ -1332,6 +1448,9 @@ class Task(QtCore.QObject):
             self.dialog.deleteLater()
         _input_blocker.release()
         _running_tasks.remove(self)
+        if self.game_link is not None:
+            # the game stays open (and stops blocking the windows)
+            self.game_link.end(outcome)
 
         if outcome == "finished":
             if self._on_finished is not None:

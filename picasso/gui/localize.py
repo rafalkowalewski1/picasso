@@ -11,6 +11,7 @@ Graphical user interface for localizing single molecules.
 
 from __future__ import annotations
 
+import functools
 import glob
 import math
 import os.path
@@ -55,7 +56,7 @@ from .. import transforms as transforms_mod
 from ..fitting import precision, residualfit, splinefit
 from .app import run_gui
 from . import theme
-from . import shortcuts, toolbars
+from . import minigame, shortcuts, toolbars
 from .scalebar_settings import ScaleBarOptions
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -8009,7 +8010,7 @@ class ParametersDialog(lib.Dialog):
         )
         self.q_worker.progressMade.connect(self.quality_progress)
         self.q_worker.finished.connect(self.quality_progress_finished)
-        self.q_worker.start()
+        self.window._start_worker(self.q_worker)
 
     def on_aim_undrift_changed(self, state: int) -> None:
         """Enable/disable AIM segmentation spinbox."""
@@ -8795,6 +8796,143 @@ class LocColumnSelectionDialog(lib.Dialog):
             checkbox.setChecked(is_checked)
 
 
+class TaskStatusWidget(QtWidgets.QWidget):
+    """The running task in the status bar: a progress bar, the time
+    left and, if switched on in the user settings, "Play a minigame"
+    (``picasso.gui.minigame``); hidden while nothing runs.
+
+    The window starts its workers with ``Window._start_worker``, which
+    registers them here. Workers that run back to back, e.g., the
+    identification and the fit that follows it, or the channels of a
+    batch, are one task. The progress handlers report the progress
+    (``set_progress``) and the abort and failure handlers how the task
+    ended (``set_outcome``).
+
+    Parameters
+    ----------
+    window : Window
+        The Localize window, whose status bar shows the widget.
+    """
+
+    def __init__(self, window: Window) -> None:
+        super().__init__(window)
+        self._window = window
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedWidth(120)
+        self.remaining = QtWidgets.QLabel()
+        self.play_button = QtWidgets.QToolButton()
+        self.play_button.setIcon(minigame.play_icon())
+        self.play_button.setText(minigame.play_button_text())
+        self.play_button.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.play_button.setAutoRaise(True)
+        self.play_button.clicked.connect(self.play)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        for widget in (self.bar, self.remaining, self.play_button):
+            layout.addWidget(widget)
+        self._workers: list[QtCore.QThread] = []
+        self._outcome: str | None = None
+        self._message = ""
+        self.link: minigame.TaskLink | None = None
+        window.abort_action.changed.connect(self._on_abort_changed)
+        window.status_bar.messageChanged.connect(self._on_message)
+        self.hide()
+
+    def track(self, worker: QtCore.QThread) -> None:
+        """Show the task of ``worker`` until it and the workers started
+        after it finished. Call before ``worker.start()``. Only a
+        ``QThread`` can be followed; anything else (e.g., a stand-in for
+        a worker) runs without the status bar."""
+        if not isinstance(worker, QtCore.QThread):
+            return
+        # the base class's signal: the workers declare a ``finished``
+        # signal of their own
+        QtCore.QThread.finished.__get__(worker, QtCore.QThread).connect(
+            functools.partial(self._on_worker_finished, worker)
+        )
+        self._workers.append(worker)
+        if self.link is None:
+            self._begin()
+
+    def _begin(self) -> None:
+        window = self._window
+        self._outcome = None
+        self._message = window.status_bar.currentMessage()
+        self.link = minigame.TaskLink(
+            "Localize", window=window, cancel=window.abort_action.trigger
+        )
+        if self._message:
+            self.link.set_label(self._message)
+        self.link.set_cancelable(window.abort_action.isEnabled())
+        self.play_button.setText(minigame.play_button_text())
+        # read anew for every task: the user settings may have changed
+        self.play_button.setVisible(minigame.offered())
+        self._update_bar()
+        self.show()
+        minigame.follow(self.link)
+
+    def set_progress(self, value: int, maximum: int) -> None:
+        """Show the progress of the current step: ``value`` of
+        ``maximum`` items (0 if unknown) done."""
+        if self.link is None:
+            return
+        self.link.set_progress(value, maximum)
+        self._update_bar()
+
+    def set_outcome(self, outcome: str) -> None:
+        """Report how the task ended, "canceled" or "failed"; default
+        "finished"."""
+        self._outcome = outcome
+
+    def _update_bar(self) -> None:
+        link = self.link
+        maximum = max(link.maximum, 0)
+        self.bar.setRange(0, maximum)
+        text = ""
+        if maximum:
+            value = min(link.value, maximum)
+            self.bar.setValue(value)
+            text = f"{100 * value // maximum} %"
+            remaining = link.time_remaining()
+            if remaining:
+                text += f", {remaining} left"
+        self.remaining.setText(text)
+
+    def _on_message(self, message: str) -> None:
+        # an empty message clears the status bar, e.g., on menu hover
+        if self.link is not None and message:
+            self._message = message
+            self.link.set_label(message)
+
+    def _on_abort_changed(self) -> None:
+        if self.link is not None:
+            self.link.set_cancelable(self._window.abort_action.isEnabled())
+
+    def _on_worker_finished(self, worker: QtCore.QThread) -> None:
+        if worker in self._workers:
+            self._workers.remove(worker)
+        if not self._workers:
+            # the finished handlers may start the next worker of the
+            # task from the event loop
+            QtCore.QTimer.singleShot(0, self._end_if_idle)
+
+    def _end_if_idle(self) -> None:
+        if self._workers or self.link is None:
+            return
+        link, self.link = self.link, None
+        self.hide()
+        link.end(self._outcome or "finished", self._message)
+
+    def play(self) -> None:
+        """Open the minigame, showing the running task."""
+        minigame.play(self.link)
+        self.play_button.setText(minigame.play_button_text())
+
+
 class Window(QtWidgets.QMainWindow):
     """The main window.
 
@@ -8981,6 +9119,8 @@ class Window(QtWidgets.QMainWindow):
         central_layout.addWidget(self.contrast_bar)
         self.setCentralWidget(central_widget)
         self.status_bar = self.statusBar()
+        self.task_status = TaskStatusWidget(self)
+        self.status_bar.addPermanentWidget(self.task_status)
         self.status_bar_frame_indicator = QtWidgets.QLabel()
         self.status_bar.addPermanentWidget(self.status_bar_frame_indicator)
 
@@ -9844,7 +9984,7 @@ class Window(QtWidgets.QMainWindow):
         worker.canceled.connect(self.on_affine_calibration_canceled)
         self.affine_calibration_worker = worker
         self.status_bar.showMessage("Calibrating lateral transform ...")
-        worker.start()
+        self._start_worker(worker)
 
     def _on_affine_prompt_requested(
         self, callback, args_kwargs, holder: dict
@@ -10155,7 +10295,7 @@ class Window(QtWidgets.QMainWindow):
             self.on_channel_registration_failed
         )
         self.status_bar.showMessage("Registering channels...")
-        self.registration_worker.start()
+        self._start_worker(self.registration_worker)
 
     def _registration_regions(self) -> list | None:
         """The drawn ROIs as channel regions, or None for separate movies."""
@@ -10540,7 +10680,7 @@ class Window(QtWidgets.QMainWindow):
         else:
             msg = "Building spline PSF calibration ..."
         self.status_bar.showMessage(msg)
-        self.spline_calibration_worker.start()
+        self._start_worker(self.spline_calibration_worker)
 
     def on_spline_calibration_finished(
         self, path: str, n_beads: int, n_used: int
@@ -14240,6 +14380,12 @@ class Window(QtWidgets.QMainWindow):
         self.ready_for_fit = False
         self.draw_frame()
 
+    def _start_worker(self, worker: QtCore.QThread) -> None:
+        """Start a long-running worker, whose task the status bar shows
+        until it is done (see ``TaskStatusWidget``)."""
+        self.task_status.track(worker)
+        worker.start()
+
     def abort(self) -> None:
         """Abort the running worker thread."""
         if self._active_worker is not None:
@@ -14247,6 +14393,7 @@ class Window(QtWidgets.QMainWindow):
 
     def on_worker_aborted(self) -> None:
         """Handle the abortion of any worker thread."""
+        self.task_status.set_outcome("canceled")
         self._active_worker = None
         self.abort_action.setEnabled(False)
         # restore the GPU checkbox state for the selected model
@@ -14267,6 +14414,7 @@ class Window(QtWidgets.QMainWindow):
             The error, from the worker.
         """
         self.on_worker_aborted()
+        self.task_status.set_outcome("failed")
         self.status_bar.showMessage("Fit failed.")
         QtWidgets.QMessageBox.warning(self, "Fit failed", message)
 
@@ -14336,7 +14484,7 @@ class Window(QtWidgets.QMainWindow):
             self.identification_worker.aborted.connect(self.on_worker_aborted)
             self._active_worker = self.identification_worker
             self.abort_action.setEnabled(True)
-            self.identification_worker.start()
+            self._start_worker(self.identification_worker)
 
     def on_identify_progress(
         self,
@@ -14353,6 +14501,7 @@ class Window(QtWidgets.QMainWindow):
             f" (Box Size: {box}; {threshold}) ..."
         )
         self.status_bar.showMessage(message)
+        self.task_status.set_progress(n_done, n_frames)
 
     def _linked_count_split_fov(self, cal: dict, box: int) -> tuple | None:
         """``(n_kept, n_channels, "regions")`` for a split-FOV calibration,
@@ -14620,7 +14769,7 @@ class Window(QtWidgets.QMainWindow):
         self.identification_worker = worker
         self._active_worker = worker
         self.abort_action.setEnabled(True)
-        worker.start()
+        self._start_worker(worker)
 
     def _on_multi_identify_finished(
         self,
@@ -14904,7 +15053,7 @@ class Window(QtWidgets.QMainWindow):
         self.identification_worker = worker
         self._active_worker = worker
         self.abort_action.setEnabled(True)
-        worker.start()
+        self._start_worker(worker)
 
     def _on_sum_bootstrap_finished(
         self,
@@ -15046,7 +15195,7 @@ class Window(QtWidgets.QMainWindow):
         self.status_bar.showMessage(
             f"Identifying on the sum of {len(summed.movies)} channels..."
         )
-        worker.start()
+        self._start_worker(worker)
 
     def _on_sum_identify_finished(
         self,
@@ -15557,7 +15706,7 @@ class Window(QtWidgets.QMainWindow):
         worker.failed.connect(self.on_fit_failed)
         self._active_worker = worker
         self.abort_action.setEnabled(True)
-        worker.start()
+        self._start_worker(worker)
 
     def _ready_for_fit_anywhere(self) -> bool:
         """Whether there is anything to fit.
@@ -15950,7 +16099,7 @@ class Window(QtWidgets.QMainWindow):
         self.fit_worker.failed.connect(self.on_fit_failed)
         self._active_worker = self.fit_worker
         self.abort_action.setEnabled(True)
-        self.fit_worker.start()
+        self._start_worker(self.fit_worker)
 
     def _start_split_fov_gauss_fit(
         self,
@@ -16049,7 +16198,7 @@ class Window(QtWidgets.QMainWindow):
         self.fit_worker.failed.connect(self.on_fit_failed)
         self._active_worker = self.fit_worker
         self.abort_action.setEnabled(True)
-        self.fit_worker.start()
+        self._start_worker(self.fit_worker)
 
     def _start_multichannel_spline_fit(
         self,
@@ -16160,7 +16309,7 @@ class Window(QtWidgets.QMainWindow):
         self.fit_worker.failed.connect(self.on_fit_failed)
         self._active_worker = self.fit_worker
         self.abort_action.setEnabled(True)
-        self.fit_worker.start()
+        self._start_worker(self.fit_worker)
 
     def _start_split_fov_spline_fit(
         self,
@@ -16248,7 +16397,7 @@ class Window(QtWidgets.QMainWindow):
         self.fit_worker.failed.connect(self.on_fit_failed)
         self._active_worker = self.fit_worker
         self.abort_action.setEnabled(True)
-        self.fit_worker.start()
+        self._start_worker(self.fit_worker)
 
     def _reregister_split_fov_inputs(
         self, calibration: dict, title: str
@@ -16552,7 +16701,7 @@ class Window(QtWidgets.QMainWindow):
         self.fit_z_worker.aborted.connect(self.on_worker_aborted)
         self._active_worker = self.fit_z_worker
         self.abort_action.setEnabled(True)
-        self.fit_z_worker.start()
+        self._start_worker(self.fit_z_worker)
 
     def _report_skipped_lateral(self, worker) -> None:
         """Say which lateral corrections the finished fit skipped, since
@@ -16649,6 +16798,7 @@ class Window(QtWidgets.QMainWindow):
         if isinstance(worker, MultiEmitterFitWorker):
             message = self._fit_status_prefix + message
         self.status_bar.showMessage(message + " ...")
+        self.task_status.set_progress(curr, total)
 
     def on_fit_finished(
         self,
@@ -16812,6 +16962,7 @@ class Window(QtWidgets.QMainWindow):
         """Update the status bar with the fitting progress."""
         message = f"Fitting z coordinate {curr:,} / {total:,} ..."
         self.status_bar.showMessage(message)
+        self.task_status.set_progress(curr, total)
 
     def on_fit_z_finished(
         self,

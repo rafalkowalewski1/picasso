@@ -12,6 +12,8 @@ without threads.
 
 from __future__ import annotations
 
+import threading
+import time
 import types
 
 import pandas as pd
@@ -266,6 +268,7 @@ class TestFitStatus:
             _fit_phase="",
             fit_worker=worker,
             status_bar=types.SimpleNamespace(showMessage=messages.append),
+            task_status=types.SimpleNamespace(set_progress=lambda v, m: None),
         )
         window.on_fit_progress = lambda c, t: (
             gui_localize.Window.on_fit_progress(window, c, t)
@@ -402,3 +405,154 @@ def test_aborting_an_avg_fit_leaves_the_window_usable(
         assert len(events["locs"]) == len(real_identifications)
     finally:
         window.close()
+
+
+# ---------------------------------------------------------------------------
+# The task in the status bar (TaskStatusWidget) and Play a minigame
+# ---------------------------------------------------------------------------
+
+
+def _wait_until(qapp, condition, timeout: float = 10.0) -> None:
+    start = time.monotonic()
+    while not condition():
+        qapp.processEvents()
+        time.sleep(0.005)
+        if time.monotonic() - start > timeout:
+            raise TimeoutError("condition not met")
+
+
+def _fake_worker_class():
+    from PyQt6 import QtCore
+
+    class FakeWorker(QtCore.QThread):
+        """Runs until released and then emits its own ``finished``,
+        which shadows QThread's, as Localize's workers do."""
+
+        finished = QtCore.pyqtSignal(int)
+
+        def __init__(self, release: threading.Event) -> None:
+            super().__init__()
+            self.release = release
+
+        def run(self) -> None:
+            self.release.wait(10)
+            self.finished.emit(1)
+
+    return FakeWorker
+
+
+@pytest.fixture
+def window(qt_offscreen):
+    window = gui_localize.Window()
+    yield window
+    window.close()
+
+
+def test_the_status_bar_shows_the_running_task(window, qt_offscreen):
+    status = window.task_status
+    assert status.isHidden()
+    release = threading.Event()
+    worker = _fake_worker_class()(release)
+    window.abort_action.setEnabled(True)
+    window._start_worker(worker)
+    assert not status.isHidden()
+    link = status.link
+    assert link.cancelable
+    window.on_fit_progress(25, 100)
+    assert (status.bar.value(), status.bar.maximum()) == (25, 100)
+    assert status.remaining.text().startswith("25 %")
+    assert link.label == "Fitting spots 25 / 100 ..."
+    window.abort_action.setEnabled(False)
+    assert not link.cancelable
+    release.set()
+    _wait_until(qt_offscreen, status.isHidden)
+    assert link.outcome == "finished"
+    assert link.message == "Fitting spots 25 / 100 ..."
+    assert status.link is None
+
+
+def test_workers_that_run_back_to_back_are_one_task(window, qt_offscreen):
+    """E.g., Localize = identification, then the fit, started from the
+    identification's finished handler."""
+    FakeWorker = _fake_worker_class()
+    release = threading.Event()
+    first = FakeWorker(release)
+    second = FakeWorker(release)
+    first.finished.connect(lambda *args: window._start_worker(second))
+    window._start_worker(first)
+    link = window.task_status.link
+    ended = []
+    link.ended.connect(ended.append)
+    release.set()
+    _wait_until(qt_offscreen, lambda: ended)
+    assert first.isFinished() and second.isFinished()
+    assert ended == ["finished"]
+    assert window.task_status.link is None
+
+
+def test_an_aborted_task_ends_canceled(window, qt_offscreen):
+    release = threading.Event()
+    worker = _fake_worker_class()(release)
+    window._start_worker(worker)
+    link = window.task_status.link
+    window.on_worker_aborted()
+    release.set()
+    _wait_until(qt_offscreen, lambda: not link.running)
+    assert link.outcome == "canceled"
+    assert link.message == "Aborted."
+
+
+def test_play_shows_the_task_in_the_game(window, qt_offscreen):
+    """The game is not modal in Localize, which stays usable while it
+    works; it follows the next task by itself and stays open."""
+    from PyQt6 import QtCore
+
+    from picasso.gui import minigame
+
+    minigame._save_setting(minigame.OFFER_KEY, True)  # switched on
+    FakeWorker = _fake_worker_class()
+    release = threading.Event()
+    window._start_worker(FakeWorker(release))
+    status = window.task_status
+    assert not status.play_button.isHidden()
+    assert status.play_button.text() == "Play a minigame"
+    status.play_button.click()
+    game = minigame.game_window()
+    assert game is not None and game.link is status.link
+    assert game.windowModality() == QtCore.Qt.WindowModality.NonModal
+    assert status.play_button.text() == "Continue playing"
+    window.status_bar.showMessage("Identifying spots ...")
+    assert game.strip.label.text() == "Identifying spots ..."
+    release.set()
+    _wait_until(qt_offscreen, lambda: game.link.outcome is not None)
+    assert game.strip.label.text() == "Done: Identifying spots ..."
+    assert game.isVisible()
+    # the next task appears in the open game
+    second = threading.Event()
+    window._start_worker(FakeWorker(second))
+    assert game.link is window.task_status.link
+    assert game.link.running
+    second.set()
+    _wait_until(qt_offscreen, lambda: window.task_status.link is None)
+    game.close()
+
+
+def test_the_play_button_follows_the_setting(window, qt_offscreen):
+    """Read anew for every task, so that a change in the user settings
+    applies from the next task on."""
+    from picasso.gui import minigame
+
+    status = window.task_status
+    FakeWorker = _fake_worker_class()
+    release = threading.Event()  # off by default
+    window._start_worker(FakeWorker(release))
+    assert not status.isHidden()
+    assert status.play_button.isHidden()
+    release.set()
+    _wait_until(qt_offscreen, status.isHidden)
+    minigame._save_setting(minigame.OFFER_KEY, True)
+    second = threading.Event()
+    window._start_worker(FakeWorker(second))
+    assert not status.play_button.isHidden()
+    second.set()
+    _wait_until(qt_offscreen, status.isHidden)

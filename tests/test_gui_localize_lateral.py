@@ -137,6 +137,7 @@ def _window(dialog, locs, status=None):
         ),
         abort_action=types.SimpleNamespace(setEnabled=lambda _: None),
         _active_worker=None,
+        _start_worker=lambda worker: worker.start(),
         # the metadata of the 2D fit, with the camera information
         extra_info=list(INFO),
         on_fit_z_progress=lambda *a: None,
